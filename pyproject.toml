@@ -1,0 +1,91 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "doubi"
+version = "0.1.0"
+description = "DouBi - Multi-platform media downloader (Douyin / Bilibili / ...), backed by yt-dlp"
+readme = "README.md"
+license = { text = "GPL-3.0" }
+requires-python = ">=3.10"
+authors = [
+    { name = "DouBi contributors" },
+]
+keywords = ["douyin", "bilibili", "download", "yt-dlp", "pyside6", "cli", "rest"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Video",
+    "Topic :: Internet :: WWW/HTTP",
+]
+
+dependencies = [
+    "yt-dlp>=2024.4.9",
+    "aiohttp>=3.9.0",
+    "httpx>=0.25",
+    "rich>=13.7.0",
+    "pyyaml>=6.0.1",
+    "python-dateutil>=2.8.2",
+    "aiosqlite>=0.19.0",
+    "qrcode>=7.4",          # used by bilibili QR login in the CLI
+]
+
+[project.optional-dependencies]
+gui = [
+    "PySide6>=6.6.0",
+    "PySide6-Fluent-Widgets[full]>=1.6.0",
+    "qrcode>=7.4",
+    "psutil>=5.9",
+    "qasync>=0.27.1",        # asyncio <-> Qt event-loop bridge
+    "playwright>=1.40.0",   # browser-based auto-login (M3.1.1)
+]
+server = [
+    "fastapi>=0.100",
+    "uvicorn>=0.23",
+    "pydantic>=2.0",
+]
+mcp = [
+    # The stdio JSON-RPC bridge is stdlib-only; this extra is a placeholder
+    # for future HTTP-transport support and Claude-Desktop metadata files.
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "ruff>=0.4.0",
+    "httpx>=0.25",           # for testing the FastAPI server
+]
+all = [
+    "doubi[gui,server,dev]",
+]
+
+[project.scripts]
+doubi = "doubi.cli.main:main"
+doubi-gui = "doubi.ui.app:main"
+doubi-serve = "doubi.server.app:main"
+doubi-mcp = "doubi.mcp.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["doubi*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["src", "."]
+testpaths = ["tests"]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
