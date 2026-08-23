@@ -1,0 +1,96 @@
+<h2>主题方案该做到哪一层？</h2>
+<p class="subtitle">下面用 DouBi 下载页的真实元素（任务行 / 状态徽章 / 进度条）渲染三种深度。请点选一个。</p>
+
+<div class="options">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>亮 / 暗 / 自动 + 主题色调色板</h3>
+      <p>保留现有亮暗двух态，补上「可持久化」和一组强调色（蓝/青/紫/绿/橙/粉）。语义色（运行/完成/失败）跟随亮暗自动换档。改动集中、风险低。</p>
+    </div>
+  </div>
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>命名主题包（推荐）</h3>
+      <p>在 A 之上引入「主题」概念：每个主题是一份完整 token 表（背景层次 / 文字层次 / 语义色 / 圆角 / 密度）。内置 6 套：默认亮、默认暗、深海、莫兰迪、护眼、高对比。用户选主题而非拼参数。</p>
+    </div>
+  </div>
+  <div class="option" data-choice="c" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>B + 用户自定义主题（可导入导出）</h3>
+      <p>在 B 之上开放自定义：用户可改任意 token、存为命名主题、导出 JSON 分享。功能最全，但需要额外的主题编辑器 UI 和校验逻辑。</p>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>三种深度分别长什么样</h3>
+  <p class="subtitle">同一个任务行，在各方案下的表现力差异</p>
+</div>
+
+<div class="split">
+  <div class="mockup">
+    <div class="mockup-header">A — 仅强调色可变</div>
+    <div class="mockup-body" style="background:#f5f5f5;padding:14px">
+      <div style="background:rgba(0,0,0,.028);border-radius:6px;padding:10px 12px;display:flex;align-items:center;gap:10px;margin-bottom:8px">
+        <span style="font-size:12px;flex:1;color:#111">【4K】原神 4.2 前瞻直播</span>
+        <div style="width:90px;height:5px;background:#e6e6e6;border-radius:3px;overflow:hidden"><div style="width:62%;height:100%;background:#0a6cbf"></div></div>
+        <span style="font-size:11px;color:#8a8a8a">62%</span>
+        <span style="font-size:11px;font-weight:600;color:#0a6cbf;background:rgba(10,108,191,.1);border-radius:9px;padding:2px 8px">下载中</span>
+      </div>
+      <div style="background:rgba(0,0,0,.028);border-radius:6px;padding:10px 12px;display:flex;align-items:center;gap:10px">
+        <span style="font-size:12px;flex:1;color:#111">崩铁 2.0 剧情合集 P3</span>
+        <div style="width:90px;height:5px;background:#e6e6e6;border-radius:3px;overflow:hidden"><div style="width:100%;height:100%;background:#2ea121"></div></div>
+        <span style="font-size:11px;color:#8a8a8a">100%</span>
+        <span style="font-size:11px;font-weight:600;color:#127a1f;background:rgba(18,122,31,.1);border-radius:9px;padding:2px 8px">已完成</span>
+      </div>
+      <p style="font-size:11px;color:#8a8a8a;margin:10px 0 0">背景 / 灰阶 / 圆角固定，只有强调色跟着调色板走。</p>
+    </div>
+  </div>
+  <div class="mockup">
+    <div class="mockup-header">B — 整套 token 可变（示例：深海）</div>
+    <div class="mockup-body" style="background:#0f1720;padding:14px">
+      <div style="background:rgba(255,255,255,.055);border-radius:8px;padding:10px 12px;display:flex;align-items:center;gap:10px;margin-bottom:8px">
+        <span style="font-size:12px;flex:1;color:#e8eef4">【4K】原神 4.2 前瞻直播</span>
+        <div style="width:90px;height:5px;background:#22303d;border-radius:3px;overflow:hidden"><div style="width:62%;height:100%;background:#3fa9f5"></div></div>
+        <span style="font-size:11px;color:#93a4b3">62%</span>
+        <span style="font-size:11px;font-weight:600;color:#7cc7ff;background:rgba(63,169,245,.16);border-radius:9px;padding:2px 8px">下载中</span>
+      </div>
+      <div style="background:rgba(255,255,255,.055);border-radius:8px;padding:10px 12px;display:flex;align-items:center;gap:10px">
+        <span style="font-size:12px;flex:1;color:#e8eef4">崩铁 2.0 剧情合集 P3</span>
+        <div style="width:90px;height:5px;background:#22303d;border-radius:3px;overflow:hidden"><div style="width:100%;height:100%;background:#4ede8a"></div></div>
+        <span style="font-size:11px;color:#93a4b3">100%</span>
+        <span style="font-size:11px;font-weight:600;color:#4ede8a;background:rgba(78,222,138,.16);border-radius:9px;padding:2px 8px">已完成</span>
+      </div>
+      <p style="font-size:11px;color:#93a4b3;margin:10px 0 0">背景层次、文字层次、语义色、圆角全部由主题定义 —— 注意暗色下语义色自动提亮。</p>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>顺带修掉的现存问题</h3>
+</div>
+<div class="pros-cons">
+  <div class="cons">
+    <h4>今天的实际缺陷（已核实）</h4>
+    <ul>
+      <li><strong>主题不持久化</strong> —— <code>AppConfig</code> 里没有 theme 字段，设置页保存时刻意跳过它，重启必回 auto</li>
+      <li><strong>状态色主题无关</strong> —— <code>#127a1f</code>、<code>#c02b2b</code> 在暗背景上偏暗，themeChanged 也不刷新它们</li>
+      <li><strong>字面量 "gray" 出现 7 次</strong> —— 散落 parse / settings / login_dialog，暗色下对比度不足</li>
+      <li><strong>只有 download.py 订阅 themeChanged</strong> —— 另外 3 个含颜色的文件切主题时不重绘</li>
+      <li><strong>透明 QSS 重复两份</strong> —— download 与 settings 各写一遍</li>
+    </ul>
+  </div>
+  <div class="pros">
+    <h4>方案 B 如何一并解决</h4>
+    <ul>
+      <li>新增 <code>theme</code> / <code>theme_color</code> 字段进 DEFAULTS 与 AppConfig，走既有 YAML 持久化</li>
+      <li>语义色改为按当前亮暗从 token 表取值</li>
+      <li>所有灰字统一走 <code>tokens.text_muted</code>，字面量归零</li>
+      <li>提供统一 <code>subscribe_theme()</code> 助手，四个页面都接上</li>
+      <li>透明背景收敛成一个共享函数</li>
+    </ul>
+  </div>
+</div>

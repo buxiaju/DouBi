@@ -6,11 +6,11 @@
 
 | 形态 | 入口 | 状态 |
 |---|---|---|
-| 内核（库） | `doubi` | **M1 ✓** 本骨架 |
-| CLI | `doubi download -u URL` | **M1 ✓** 最小可用 |
-| REST 服务 | `doubi serve` | M6 |
-| 桌面 GUI | `DouBi Desktop` | M5 |
-| MCP 工具 | `doubi-mcp` | M6 |
+| 内核（库） | `doubi` | **✓** 平台无关内核 |
+| CLI | `doubi download -u URL` | **✓** download / auth / live / migrate / platforms |
+| REST 服务 | `doubi serve` | **✓** FastAPI + 内存任务队列 |
+| 桌面 GUI | `doubi-gui` | **✓** PySide6 Fluent，6 套主题 |
+| MCP 工具 | `doubi-mcp` | **✓** stdio JSON-RPC 2.0 |
 
 ## 支持平台
 
@@ -47,6 +47,33 @@ doubi download -u "https://www.bilibili.com/video/BV1xx411c7mD" -o ./Downloaded
 doubi download -u "https://www.douyin.com/video/7123456789012345678" -o ./Downloaded
 ```
 
+启动图形界面：
+
+```bash
+doubi-gui
+
+# 本次启动指定主题（default_light / default_dark / deep_sea / morandi / eye_care / high_contrast）
+doubi-gui --theme deep_sea
+```
+
+## 主题
+
+GUI 自带 6 套主题包，每套都有自己的底色、文字色与语义色，切换后**整个界面即时生效**
+（含切换之后才弹出的对话框和菜单）：
+
+| 主题 | 界面显示 | 底色 |
+|---|---|---|
+| `default_light` | 默认亮 | 浅灰白 |
+| `default_dark` | 默认暗 | 深灰 |
+| `deep_sea` | 深海 | 墨蓝 |
+| `morandi` | 莫兰迪 | 暖米灰 |
+| `eye_care` | 护眼 | 米黄 |
+| `high_contrast` | 高对比 | 纯黑 + 亮黄 |
+
+三种切换方式：设置页下拉框、导航栏画笔按钮（循环切换）、启动参数 `--theme`。
+**只有在设置页点「保存设置」才会记住**，另两种只在本次运行生效。
+详见 [docs/QUICKSTART.md](docs/QUICKSTART.md) 的「换主题」一节。
+
 ## 项目结构
 
 ```
@@ -69,12 +96,32 @@ DouBi/
 │   │   └── bilibili/              # B 站
 │   ├── cli/                       # 命令行
 │   │   └── main.py
-│   ├── server/                    # REST（占位，M6 落地）
-│   ├── ui/                        # PySide6 GUI（占位，M5 落地）
-│   └── mcp/                       # MCP 工具（占位，M6 落地）
-└── tests/
-    └── test_pipeline_smoke.py
+│   ├── server/                    # REST（FastAPI）
+│   │   ├── app.py
+│   │   ├── jobs.py                # JobManager 内存任务队列
+│   │   └── schemas.py
+│   ├── ui/                        # PySide6 GUI
+│   │   ├── app.py                 # 入口（--theme）
+│   │   ├── main_window.py
+│   │   ├── theme.py               # 6 套主题包 / token 表 / set_theme
+│   │   ├── task_manager.py        # 暂停 / 继续 / 取消
+│   │   ├── pages/                 # parse / download / history / settings
+│   │   └── dialogs/               # login_dialog.py
+│   └── mcp/                       # MCP 工具（stdio JSON-RPC）
+│       └── server.py
+├── docs/                          # ARCHITECTURE / DEVELOPMENT / QUICKSTART / CHANGELOG
+└── tests/                         # 19 个测试文件
 ```
+
+## 文档
+
+| 文档 | 内容 |
+|---|---|
+| [docs/QUICKSTART.md](docs/QUICKSTART.md) | 装完之后怎么用：CLI / GUI / REST / MCP、换主题、配置项 |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 分层、数据流、存储 schema、任务生命周期、主题生效链路 |
+| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | 开发约定、各模块要点、主题系统内幕、测试清单 |
+| [docs/CHANGELOG.md](docs/CHANGELOG.md) | 里程碑与缺陷复盘（根因 / 修法 / 判据） |
+| [INTEGRATION_PLAN.md](INTEGRATION_PLAN.md) | 原始整合方案 |
 
 ## 整合来源
 

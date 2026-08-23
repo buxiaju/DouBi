@@ -72,6 +72,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_dl.add_argument("--nfo", action="store_true", help="emit NFO sidecar (M5)")
     p_dl.add_argument("--danmaku", action="store_true", help="download danmaku (M5)")
     p_dl.add_argument("--subtitles", action="store_true", help="download subtitles (M5)")
+    p_dl.add_argument("--no-resume", action="store_true",
+                      help="restart partial downloads from scratch instead of resuming")
     p_dl.add_argument("--strategy", default=None,
                       help="for container URLs, choose strategy (e.g. post, like, space, favlist)")
     p_dl.add_argument("--database", type=Path, default=Path("doubi.db"),
@@ -200,6 +202,7 @@ def _cmd_download(args: argparse.Namespace) -> int:
         write_nfo=args.nfo,
         write_danmaku=args.danmaku,
         write_subtitles=args.subtitles,
+        resume=not args.no_resume,
         rate_limit=args.rate_limit,
         proxy=args.proxy,
         database=db_path,

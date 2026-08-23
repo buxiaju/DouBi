@@ -16,6 +16,7 @@ from .file_layout import (
     section_title_of,
 )
 from .manifest import ManifestRecord, ManifestWriter
+from .nfo import NFO_SUFFIX, build_nfo_xml, write_nfo
 
 __all__ = [
     "Database",
@@ -23,6 +24,9 @@ __all__ = [
     "TaskRow",
     "ManifestRecord",
     "ManifestWriter",
+    "NFO_SUFFIX",
+    "build_nfo_xml",
+    "write_nfo",
     "DEFAULT_DIR_TEMPLATE",
     "render_dir",
     "resolve_item_dir",

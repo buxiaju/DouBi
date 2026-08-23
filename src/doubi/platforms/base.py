@@ -7,8 +7,9 @@ A platform adapter is responsible for:
     3. (Optionally) building the URL the engine should fetch — useful
        when a platform's public URL is different from its direct
        media URL.
-    4. (Eventually) providing platform-specific post-processing steps
-       such as NFO generation, danmaku download, or transcript upload.
+    4. Providing platform-specific post-processing steps such as
+       danmaku download or transcript upload (see
+       :meth:`PlatformAdapter.post_download`).
 
 Adapters are registered into :class:`doubi.core.registry.PlatformRegistry`
 on import. See ``doubi/platforms/douyin/__init__.py`` for an example.
@@ -20,7 +21,7 @@ import re
 from abc import ABC, abstractmethod
 from typing import Pattern
 
-from ..core.models import MediaItem, Platform
+from ..core.models import DownloadOptions, MediaItem, Platform
 
 
 class PlatformAdapter(ABC):
@@ -67,6 +68,28 @@ class PlatformAdapter(ABC):
     def supported_media_types(self) -> list[str]:
         """Optional hint for UIs listing what this platform can download."""
         return []
+
+    async def post_download(self, item: MediaItem, options: DownloadOptions) -> None:
+        """Platform-specific post-processing after a successful download.
+
+        Called by :class:`~doubi.core.pipeline.DownloadPipeline` once the
+        engine has written the media file, before the DB / manifest
+        records are made. Override to fetch sidecars that the engine
+        cannot produce because they need platform API knowledge — B 站
+        danmaku is the motivating case: it requires the page's ``cid``
+        and an authenticated API call, neither of which yt-dlp exposes.
+
+        Contract for overrides:
+
+        * Honor the relevant ``DownloadOptions`` switch (e.g.
+          ``write_danmaku``) and return immediately when it is off.
+        * Never raise. The media file is already on disk, so a failed
+          sidecar must not fail the download. The pipeline also guards
+          this, but adapters should log and return.
+
+        Default: do nothing.
+        """
+        return None
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         return f"<{type(self).__name__} platform={self.platform.value} name={self.name!r}>"

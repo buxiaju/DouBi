@@ -1,7 +1,7 @@
 # DouBi 开发文档（面向 AI / 开发者）
 
 > 目标：任何有能力的 AI 或开发者读完本文档，就能安全地修改、扩展、维护 DouBi，而不需要重新逆向整个项目。
-> 版本对应：M0–M6.1（2026-08-22 快照）。配套文档：`docs/ARCHITECTURE.md`（分层图）、`docs/QUICKSTART.md`（用户操作）、`docs/CHANGELOG.md`（变更史）、`INTEGRATION_PLAN.md`（整合原始方案）。
+> 版本对应：M0–M6.3（2026-08-23 快照）。配套文档：`docs/ARCHITECTURE.md`（分层图）、`docs/QUICKSTART.md`（用户操作）、`docs/CHANGELOG.md`（变更史）、`INTEGRATION_PLAN.md`（整合原始方案）。
 
 ---
 
@@ -103,12 +103,13 @@ DouBi/
 │       ├── task_manager.py        #   TaskManager（GUI 下载任务状态）
 │       ├── workers.py             #   DownloadWorker（GUI 任务包装）
 │       ├── auth_actions.py        #   登录流程的纯 Python 包装
+│       ├── theme.py               #   主题包 / token 表 / set_theme（见 §13.4）
 │       ├── pages/                 #   parse / download / history / settings
 │       └── dialogs/               #   login_dialog.py
-└── tests/                         # 15 个测试文件（见 §15）
+└── tests/                         # 19 个测试文件（见 §15）
 ```
 
-**统计**：~55 个 .py 文件，约 10,000 行；253 个测试全部通过。
+**统计**：62 个 .py 文件，约 12,100 行；385 个测试收集，381 passed / 4 skipped。
 
 ---
 
@@ -645,11 +646,116 @@ is_top_row = top_idx is not None and row == self._top_to_row.get(top_idx)
 
 **教训**：菜单项的显示条件与其 handler 期望的行号语义必须严格对齐。显示用宽松判据、handler 用严格行号，就会造出「点了就坏」的破坏性操作。另外 `_on_table_context_menu` 在改动前**整个 tests/ 目录零覆盖**（grep `context_menu` 无命中），这是本轮 bug 完整逃逸的直接原因。
 
-### 13.4 GUI 测试要点
+### 13.4 主题系统（`ui/theme.py`）
+
+**改任何界面配色前必读。** 这是整个 GUI 里最反直觉的一块：token 表写对了界面也可能一片白。
+
+#### 13.4.1 数据结构：主题包，而非明暗开关
+
+界面没有「亮/暗/自动」三选一，只有**命名主题包**。每个包自带明度：
+
+```python
+@dataclass(frozen=True)
+class ThemePack:
+    name: str    # 持久化用的稳定 key，写进 YAML，如 deep_sea
+    label: str   # 界面显示名，如「深海」
+    dark: bool   # 自带明度，决定 setTheme(Theme.DARK / LIGHT)
+    accent: str  # 主色，喂给 setThemeColor()
+    tokens: dict[str, Any]
+```
+
+6 套内置主题（`THEMES` 的键序 = 界面展示序 = 导航栏按钮的循环序）：
+
+| key | label | dark | accent | bg_base | bg_layer |
+|---|---|---|---|---|---|
+| `default_light` | 默认亮 | ✗ | `#0078d4` | `#f3f3f3` | `#ffffff` |
+| `default_dark` | 默认暗 | ✓ | `#4cc2ff` | `#202020` | `#2b2b2b` |
+| `deep_sea` | 深海 | ✓ | `#2dd4bf` | `#0f1c24` | `#162b36` |
+| `morandi` | 莫兰迪 | ✗ | `#8c7b6b` | `#eceae5` | `#f7f5f1` |
+| `eye_care` | 护眼 | ✗ | `#3f7d58` | `#f5f1e8` | `#fbf8f1` |
+| `high_contrast` | 高对比 | ✓ | `#ffd60a` | `#000000` | `#0d0d0d` |
+
+token 键位（`_light_tokens()` / `_dark_tokens()` 是公共骨架，各主题只需给 5 个背景/文字值，语义色按需覆写）：
+
+| 组 | 键 | 用途 |
+|---|---|---|
+| 背景 | `bg_base` / `bg_layer` / `bg_hover` | 窗口底 / 卡片与输入框 / 悬停 |
+| 文字 | `text_primary` / `text_muted` | 正文 / 次级说明（走 `muted_qss()`） |
+| 表格 | `row_odd` / `row_even` | 交替行，用 `rgba` 以便叠在任何底色上 |
+| 状态 | `status_{running,paused,completed,failed,cancelled}_{fg,bg}` | 任务状态徽标 |
+| 进度 | `progress_{normal,success,error,paused}` | 自绘进度条 |
+| 尺寸 | `radius` / `row_height` | 圆角 / 行高 |
+
+**语义色必须随明度重算，不能跨明度复用**：`#c02b2b` 这类暗红在深色底上几乎不可读，所以暗色骨架统一提亮到 `#ff6b6b` 一档。
+
+#### 13.4.2 五层失效点（「每处颜色都要跟着变」的真正难点）
+
+用户报的表象是「整体的背景没有变，解析口的颜色一直都是白色」。token 表当时**全是对的**——失效点全在 qfluentwidgets 的实现细节里，五层缺一层就有地方发白：
+
+| # | 失效点 | 为什么 QSS / token 管不着 | 解法 |
+|---|---|---|---|
+| 1 | `setTheme()` 只有亮/暗两套 | 库内置调色板只有 `Theme.LIGHT` / `Theme.DARK`，`setThemeColor()` 只改强调色。六套主题的 `bg_base` 从来没生效过，用户只看到强调色在变 | `app_qss()` 把 token 表翻译成全局 QSS |
+| 2 | Win11 **Mica** 毛玻璃 | 开启时 `_normalBackgroundColor()` 返回**全透明**，`setCustomBackgroundColor` 画了也看不见 | `_apply_window_background()` 先 `setMicaEffectEnabled(False)` 再设色 |
+| 3 | 控件自带 QSS 压住全局 QSS | Qt 里**控件自己的样式表优先级高于 `QApplication` 的全局样式表**（全局表是优先级最低的兜底），而 fluent 给每个控件单独 `setStyleSheet` → `app_qss()` 只对原生 Qt 控件有效。`line_edit.qss` 的 `:focus` 更是写死纯 `white`，这就是「解析口一直是白色」 | `_refresh_fluent_widgets()` 用官方 `setCustomStyleSheet(w, light, dark)` 逐个覆盖 |
+| 4 | 卡片底色是**自绘**的 | `CardWidget.paintEvent` 里 `painter.setBrush(self.backgroundColor)`，取值来自硬编码的 `QColor(255,255,255,170)`——半透明白，任何 QSS 都碰不到 | `_patch_fluent_card_background()` 猴补丁替换取色方法 |
+| 5 | 切主题**之后**才创建的控件 | 下拉弹窗、右键菜单、登录对话框都是懒创建的，构造时向 `styleSheetManager.register` 领了库自带的亮色 QSS，错过刷新时机 → 又白回去 | `_patch_style_sheet_register()` 包一层 `register`，控件一登记就补当前主题 QSS |
+
+三个关键库内部事实，值得单独记住：
+
+- **`setCustomStyleSheet(widget, lightQss, darkQss)` 是官方留的覆盖口**：它写入控件属性 `lightCustomQss` / `darkCustomQss`，而 `StyleSheetCompose.content()` 把 `CustomStyleSheet` 拼在**最后**，同选择器后者胜。所以能干净覆盖而不必改库文件；反过来读 `widget.property("lightCustomQss")` 就是断言「这个控件被上过色」的可靠手段。
+- **遍历对象选 `styleSheetManager.widgets`（一个 `WeakKeyDictionary`）而不是 `app.allWidgets()`**：前者正好是「被库设过样式表、因而压住了全局 QSS」的那批控件，一个不多一个不少；后者会把成百上千个原生子控件白刷一遍。卡片例外——它的颜色是自绘的、不保证登记在 manager 里，所以 `_iter_cards()` 老实走 `allWidgets()`。
+- **`SimpleCardWidget` 自己重写过那三个取色方法**，只补 `CardWidget` 不生效，两个类都得显式覆盖。
+
+#### 13.4.3 公开 API
+
+| 函数 | 用途 |
+|---|---|
+| `theme_names()` / `theme_labels()` | key 列表 / 显示名列表，顺序一致，用来填下拉与 `--theme` 的 `choices` |
+| `resolve_theme(value)` | 任意输入归一为合法 key：接受 key、显示名，以及兼容旧配置的 `light`/`dark`/`auto`。**无法识别时记 warning 并回退默认**，绝不因一个坏配置值让 GUI 起不来 |
+| `get_theme(name)` / `current_theme()` / `current_theme_name()` | 取包 / 取当前包 / 取当前 key（可直接写配置） |
+| `token(key, default=None)` | 取当前主题的一个 token |
+| `muted_qss(size=12)` | 次级说明文字的 QSS。替代了各页面散落的 `setStyleSheet("color: gray;")`——字面量 `gray` 在暗底上对比度不足且换主题不刷新 |
+| `app_qss(pack=None)` | 整套全局 QSS |
+| `set_theme(name)` | **唯一的切换入口**，返回生效的 `ThemePack` |
+| `subscribe_theme(widget, callback)` | 订阅主题变化，随 `widget` 销毁自动解绑；同时挂到库的 `themeChanged` 上 |
+
+**`set_theme()` 内部六步顺序不能动**：
+
+```python
+setTheme(Theme.DARK if pack.dark else Theme.LIGHT)
+setThemeColor(pack.accent)
+_patch_fluent_card_background()   # 两个补丁必须早于刷新：
+_patch_style_sheet_register()     # 卡片重算时取色方法要已被替换，
+                                  # register 钩子要赶在后续控件创建之前就位
+_apply_app_qss(pack)              # 铺全局 QSS（覆盖原生控件）
+_apply_window_background(pack)    # 关 Mica + 刷主窗口自绘底色
+_refresh_fluent_widgets(pack)     # 逐个覆盖现存 fluent 控件 + 重算卡片
+_notify()                         # 通知订阅者刷新把颜色烘进 stylesheet 的控件
+```
+
+无 PySide6 时 `set_theme()` 只更新内部状态就返回，因此配置/解析逻辑在无 Qt 环境下也能测。
+
+#### 13.4.4 接线与启动优先级
+
+- **配置项**：`config.py` 的 `DEFAULTS["theme"] = "default_light"` + `AppConfig.theme` + `load_config` 的 `theme=str(data["theme"])` + 环境变量映射 `DOUBI_THEME`。
+- **CLI**：`app.py` 的 `--theme` 用 `choices=theme_names()`，`default=None`——只有显式传参才覆盖。实际取值是 `args.theme or load_config(None).theme`，所以完整优先级是 **`--theme` > `DOUBI_THEME` > 配置文件 > `default_light`**（env 与文件之间的先后由 `load_config` 内部决定，`--theme` 在其外层短路）。`theme.py` 不 import Qt，所以能在 GUI 可用性检查之前安全导入，`--help` 也能列出主题。
+- **持久化只发生在「保存设置」**：设置页下拉是 `_on_theme_combo_changed` → `set_theme()`，**选中即预览但不落盘**；只有 `_on_save()` 才 `data["theme"] = theme_name` 并写 `~/.doubi/config.yml`。导航栏画笔按钮同理，只切不存。改这块时别把「预览」误当成「已保存」。
+- **`app.py` 里 `set_theme(theme_name)` 故意调了两次**，别当重复代码删掉：第一次在建窗口之前（各页面构造时要按当前 token 取色），但那时 `_apply_window_background` 遍历不到任何顶层窗口，主窗口底色和 Mica 关闭落不下去；窗口建好后必须再刷一次。
+- **设置页下拉 ↔ 导航栏按钮双向同步**：`SettingsPage` 用 `subscribe_theme(self, self._sync_theme_combo)` 反向同步，`_syncing_theme` 标志位抑制信号回环（程序改动下拉时不该再触发一次 `set_theme`）。`MainWindow._cycle_theme()` 只调 `set_theme`，**不伸手进别的页面调私有方法**。
+- **导航栏按钮只连一次线**：`navigationInterface.addWidget(onClick=self._cycle_theme)` 已经接过信号，再额外 `clicked.connect(self._cycle_theme)` 会让一次点击前进两个主题。
+
+#### 13.4.5 新增一套主题要动哪里
+
+只动 `theme.py`：在 `THEMES` 里加一项，背景/文字 5 个值传给 `_light_tokens()` / `_dark_tokens()`，语义色按需 `**骨架, "status_running_fg": ...` 覆写。`theme_names()` / `theme_labels()` / 下拉框 / `--theme` 的 `choices` / 导航栏循环全部自动跟上，`tests/test_theme_apply_gui.py` 也会自动为新主题参数化出 4 个用例。
+
+### 13.5 GUI 测试要点
 
 - `QT_QPA_PLATFORM=offscreen` 无头运行。
 - `asyncio.create_task` 在测试里没有 running loop → 测试里 monkeypatch 成同步执行（见 `test_parse_and_expand_gui.py` 的 `_make_create_task_sync`）。
 - 异步测试用 `pytest-asyncio` 的 async test（`pyproject.toml` 已配 `asyncio_mode="auto"`），保证 `asyncio.get_event_loop()` 拿到同一 loop。
+- **主题测试刻意依赖库的私有接口**（`_normalBackgroundColor` / `_isMicaEnabled` / `lightCustomQss`）。这不是偷懒：断言 `THEMES` 里的色值毫无意义（token 表一直是对的，界面照样发白），只有断言「控件实际生效的颜色」才守得住 §13.4.2 那五层。上游哪天把这些改名，测试必须**当场红掉**，而不是界面悄悄变回白色。
+- **会改全局状态的 GUI 测试要自己收尾**。`test_theme_apply_gui.py` 用 autouse fixture 在每个用例后 `set_theme("default_light")`，否则同进程的其他 GUI 测试会被残留主题污染。
+- **循环里做断言必须加「至少查到一个」的守卫**：`assert checked, "主窗口里一个 fluent 控件都没找到，测试失去意义"`。少了这一行，一旦控件找不到，整个用例会因为循环体没执行而假绿。
 
 ---
 
@@ -695,28 +801,31 @@ is_top_row = top_idx is not None and row == self._top_to_row.get(top_idx)
 
 ## 15. 测试体系
 
-16 个测试文件，284 个测试收集，**280 passed / 4 skipped**（`python -m pytest`）。pytest-asyncio `mode=auto`。4 个 skip 全是「无 PySide6 则跳过」的 GUI 用例。
+19 个测试文件，385 个测试收集，**381 passed / 4 skipped**（`python -m pytest`）。pytest-asyncio `mode=auto`。4 个 skip 全是「无 PySide6 则跳过」的 GUI 用例。
 
 | 文件 | 用例数 | 覆盖 |
 |---|---|---|
 | `test_bilibili_adapter.py` | 56 | B 站 URL 分类 / 策略（mock httpx）/ adapter |
 | `test_bilibili_auth.py` | 41 | cookie 解析 / 校验 |
 | `test_storage.py` | 37 | database / file_layout / manifest / migrate |
-| `test_douyin_adapter.py` | 34 | 抖音 URL 分类 / parse / expand / `parse_and_expand`（含模块级 `_SpyEngine`） |
+| `test_douyin_adapter.py` | 37 | 抖音 URL 分类 / parse / expand / `parse_and_expand`（含模块级 `_SpyEngine`） |
+| `test_config_theme.py` | 26 | **配置地基（`to_dict` / env 覆盖 / YAML 往返）+ 主题注册表 / `resolve_theme` 兼容旧值 / token 键一致 / 无 Qt 也能 `set_theme`**（见 §13.4） |
+| `test_theme_apply_gui.py` | 24 | **主题真落到像素上：窗口底色 / 现存控件 / 卡片自绘 / 切换后新建控件**（需 PySide6，offscreen） |
 | `test_browser_login.py` | 24 | Playwright 登录流程 |
+| `test_server.py` | 19 | FastAPI 端点 |
 | `test_pipeline_smoke.py` | 18 | registry / URL 分类 / pipeline 解析 / CLI 冒烟 |
+| `test_sidecars.py` | 17 | 附属文件：NFO 生成/开关 + B 站弹幕（bvid/cid 定位、deflate 解码、失败不抛） |
+| `test_task_manager.py` | 15 | TaskManager 状态机 |
 | `test_mcp.py` | 15 | JSON-RPC 协议 |
-| `test_server.py` | 11 | FastAPI 端点 |
+| `test_ytdlp_engine.py` | 11 | engine 目录预创建 / 字幕与断点续传选项 / 取消不算错误 / `.part` 保留策略 |
+| `test_ui_empty_parse.py` | 11 | ParsePage 空解析提示（需 PySide6，offscreen） |
 | `test_ui_workers.py` | 11 | GUI 可用性 / DownloadWorker |
-| `test_ui_empty_parse.py` | 9 | ParsePage 空解析提示（需 PySide6，offscreen） |
 | `test_auth_actions.py` | 8 | GUI 登录包装 |
 | `test_row_mapping_cache.py` | 6 | **行映射缓存 / 交错布局 / 行身份判据**（见 §13.3） |
-| `test_task_manager.py` | 6 | TaskManager 状态机 |
+| `test_download_page.py` | 5 | DownloadPage 渲染 / 全部删除 |
 | `test_parse_and_expand_gui.py` | 4 | ParsePage 解析→表格（单视频/容器） |
-| `test_download_page.py` | 2 | DownloadPage 渲染 / 全部删除 |
-| `test_ytdlp_engine.py` | 2 | engine 目录预创建 |
 
-**GUI 测试模式**：`QT_QPA_PLATFORM=offscreen` + `QApplication.instance() or QApplication(sys.argv)` fixture。无 PySide6 时 `pytest.skip`。
+**GUI 测试模式**：`QT_QPA_PLATFORM=offscreen` + `QApplication.instance() or QApplication(sys.argv)` fixture。无 PySide6 时 `pytest.skip`。改全局状态的 GUI 测试（主题就是典型）必须用 autouse fixture 复位，否则先跑的用例会污染后跑的——详见 §13.5。
 
 **测试纪律**：
 - 网络相关必须 mock（httpx.AsyncClient / yt-dlp 模块 / asyncio）。
@@ -765,6 +874,12 @@ python -m pytest --collect-only -q 2>&1 | Select-Object -Last 3
 11. **树形表格用行号做 key / 做偏移量算术**：兄弟节点一插入，行号全部失效。展开状态必须用稳定键（`(top_idx,)` / `(top_idx, child_idx)`），行号只能是 `_refresh_row_mapping()` 派生的只读缓存。详见 §13.3。
 12. **拿「某行 resolve 出的 item 是什么类型」当「这一行是什么行」**：`_row_to_top_idx` 让子行也指向所属 section，所以子行也能 resolve 出 section 对象。判行身份只能用 `row == _top_to_row.get(top_idx)`。详见 §13.3。
 13. **`item.output_template` 只有一个写入点**：`naming.py:115`（`set_item_output_template`），读取点只有 `engines/yt_dlp.py` 和 `pipeline.py`。不要在 naming 里塞目录前缀——会与 `file_layout` 叠加导致合集名出现两层（踩过）。
+14. **`asyncio.to_thread` 里的活干不掉**：`YtDlpEngine.download` 是 `await asyncio.to_thread(self._download_sync, ...)`。`Task.cancel()` 只能在**下一个 await 点**生效，而线程里的 yt-dlp 根本不回到事件循环，所以取消**永远打不断已开始的传输**。唯一可行的是协作式取消：`DownloadOptions.cancel_check` 由进度钩子每个 tick 轮询。推论有两条：① 进度钩子必须**无条件注册**（哪怕调用方没传 `on_progress`），否则没人轮询；② `TaskManager._stop_attempt` 必须**双机制**——先置 flag（够得到线程里的传输），再 `task.cancel()`（覆盖「还没进引擎」的窗口，如卡在并发信号量上）。
+15. **停止标志按「尝试」持有，不能按 task_id**：暂停中的 worker 可能仍在引擎线程里跑，而 `resume()` 已经 spawn 了新尝试。若两次尝试共享一个 flag，`resume()` 清 flag 就等于**复活旧线程** → 两个写者抢同一个 `.part` 文件。所以 `_flags` 每次 spawn 都装一个新的 `_StopFlag`，并配 stale 守卫（`_forget` 只在 `_tasks.get(task_id) is task` 时清理），否则将死的旧尝试会把 `paused` 盖到新尝试的 `running` 上。
+16. **协作式停止表现为 `ok is False`，不是异常**：引擎自己吞掉了 `DownloadCancelled`，所以「这是暂停还是真失败」只能靠查 flag。判据必须写成 `flag.stopped and not ok`——少了 `not ok`，一个**已经下完**的文件会被迟到的暂停请求标成 `paused`，任务就永远停在那里无事可做。
+17. **`add()` / `resume()` 只是排程**：协程体在下一次 loop yield 才开始跑。测试里紧跟着 `pause()` 会在协程碰到 pipeline 之前就把它取消掉（曾因此假失败 6 个用例）。这**不是生产 bug**（真实环境永远有 loop 在跑），修在测试侧：用 `_started()` 补一次 `await asyncio.sleep(0)`。
+18. **`_build_options()` 漏字段是「静默失效」，不是报错**：引擎与 `file_layout` 只认 `DownloadOptions`，**从不读 `AppConfig`**，所以每端的 `_build_options()` 是唯一搬运环节。曾实际漏掉：GUI 少 `write_nfo` / `write_danmaku` / `write_subtitles` / `resume` / `output_dir_template`，REST 少 `output_dir_template` / `proxy` / `rate_limit`——表现是控件能点、配置能改，但毫无效果。判据是「`AppConfig` 与 `DownloadOptions` 的同名字段交集必须逐个抵达 options」，已由两端的结构性测试固定下来。
+19. **结构性测试必须用非默认值填充，否则是假保险**：`test_build_options_covers_every_shared_config_field` 第一版直接拿 `AppConfig()` 原值比对，把 `resume=self._cfg.resume` 删掉竟然照样通过——两个 dataclass 的 `resume` 默认值都是 `True`，「漏转发」和「转发了」结果完全相等。凡是「拿默认对象比对默认值」的测试都有这个盲区：**先把每个字段推离默认值再比**，并对没覆盖到的字段类型 `pytest.fail`（而不是跳过），否则新类型一进来检查强度就悄悄降级。改完后分别删 `resume`、`max_quality` 各验证一次变红，才算这层保险是真的。
 
 ---
 
@@ -779,17 +894,19 @@ python -m pytest --collect-only -q 2>&1 | Select-Object -Last 3
 ### 改动中
 3. **加新平台**：看 §6.4。
 4. **改 B 站策略**：先读 §14。确保 cookie 合并不破坏、WBI 重试在、目录预创建在。
-5. **加配置项**：`config.py` DEFAULTS + AppConfig + load_config + GUI 设置页 + 每端 `_build_options()`，五处都要动。
+5. **加配置项**：`config.py` DEFAULTS + AppConfig + load_config + GUI 设置页 + 每端 `_build_options()`，五处都要动。**第五处最容易忘**，而且忘了不报错——引擎和 `file_layout` 只读 `DownloadOptions`，从不读 `AppConfig`，所以漏转发的字段在那一端就是个死开关（详见 §16 第 18 条）。现在 GUI 与 REST 各有一个 `test_build_options_covers_every_shared_config_field` 结构性测试守着这一步，漏了会变红。
 6. **改数据模型**：`models.py` 加字段时用 `field(default_factory=...)` 保持向后兼容；检查 `database.py` 的 `record_download` 是否要同步新字段。
 7. **新 GUI 页面**：`pages/<name>.py` 暴露 `build_<name>_widgets()` → `pages/__init__.py` 导出 → `main_window.py` 注册。
 8. **改解析页结果表（树形结构）**：三条铁律——① 任何增删行之后必须在 `blockSignals(False)` 之后调 `_refresh_row_mapping()`；② 不要用行号做字典 key，也不要用 `base + index` 反算行号；③ 判「这是不是 section 行」用 `row == _top_to_row.get(top_idx)`，不要看 resolve 出的 item 类型。改完跑 `tests/test_row_mapping_cache.py`。
+9. **加一套主题**：与第 5 条相反，**只动 `theme.py` 的 `THEMES`**，下拉框 / `--theme` 的 `choices` / 导航栏循环 / GUI 测试参数化全部自动跟上（见 §13.4.5）。
+10. **改主题落地逻辑**：`set_theme()` 的六步顺序是硬约束（两个 monkey patch 必须早于刷新），`app.py` 里两次 `set_theme()` 都不能删——理由见 §13.4.3 / §13.4.4。新增带色控件时，**颜色不要烘进控件自身的 stylesheet**；非要烘就得 `subscribe_theme()` 注册重刷，否则切主题后残留旧色。
 
 ### 改动后
-9. 写/更新测试（新逻辑必须配测试；GUI 用 offscreen 模式）。
-10. `python -m pytest` 全绿，且**用例总数只增不减**（减少 = 有测试被意外跳过或删掉）。
-11. 更新 `docs/CHANGELOG.md`（按 M 里程碑分节）。
-12. 若修的是「踩坑类」bug，把根因与判据写进 `docs/DEVELOPMENT.md` 对应小节 —— 光修代码不写文档，下一个人（或下一轮 AI）会原地重犯。
-13. 用 `python -m doubi.ui` 手动冒烟 GUI（如果有改动 UI）。
+11. 写/更新测试（新逻辑必须配测试；GUI 用 offscreen 模式）。
+12. `python -m pytest` 全绿，且**用例总数只增不减**（减少 = 有测试被意外跳过或删掉）。
+13. 更新 `docs/CHANGELOG.md`（按 M 里程碑分节）。
+14. 若修的是「踩坑类」bug，把根因与判据写进 `docs/DEVELOPMENT.md` 对应小节 —— 光修代码不写文档，下一个人（或下一轮 AI）会原地重犯。
+15. 用 `python -m doubi.ui` 手动冒烟 GUI（如果有改动 UI）。
 
 ### 提交前清理
 - 删除临时调试脚本（`_diag*.py`、`_probe*.py`、`_repro*.py`、`_win_check.log` 等）。PowerShell 删不掉时用 Python：`python -c "import os; os.remove('...')"`。
@@ -803,8 +920,9 @@ python -m pytest --collect-only -q 2>&1 | Select-Object -Last 3
 
 1. **B 站匿名风控**：UP 主页 / 合集枚举在无登录时受限（412 / -799），登录后稳定。已用官方 API + WBI 签名缓解，但 IP 级限流仍需等待窗口（几分钟）。
 2. **抖音 user/info/self 404**：该端点已失效，`validate_cookies` 只能靠 catch 处理成"未登录"，无法确认有效登录态（下载本身走 yt-dlp 不受影响）。
-3. **GUI 尚未实现**：全部暂停、断点续传（重启后恢复未完成任务）、已完成列表排序、弹幕/字幕/章节/NFO 下载（`DownloadOptions` 里字段已预留）。
-4. **REST/MCP 的容器支持弱**：`process_url` 会展开容器，但 `_execute_download` 只算 succeeded=1。
+3. **GUI 尚未实现**：断点续传的**跨进程恢复**（重启后自动接续未完成任务——引擎层已支持 `continuedl`，缺的是把未完成任务持久化下来）、已完成列表排序、章节下载。
+   （M6.2 已补上：全部/单任务暂停恢复、弹幕、字幕、NFO）
+4. **REST/MCP 的容器支持**：容器统计已修正（读 pipeline 写的 `child_count` / `downloaded_count` / `failed_count`），但仍是「整个容器一个 job」，无法单独重试其中某一子项。
 5. **没有 i18n**：全中文硬编码。
 6. **配置只读一次**：GUI 保存后需重启才生效的部分（代理等）没有提示重启。
 
@@ -828,4 +946,4 @@ python -m pytest --collect-only -q 2>&1 | Select-Object -Last 3
 
 ---
 
-*文档生成时间：2026-08-22 · 与 `docs/CHANGELOG.md` 的 M6.1 快照对应。维护者更新本文档时，保持"结构 + 关键 API + 踩坑记录"三要素即可，避免写与代码重复的长篇源码引用。*
+*文档生成时间：2026-08-23 · 与 `docs/CHANGELOG.md` 的 M6.3 快照对应。维护者更新本文档时，保持"结构 + 关键 API + 踩坑记录"三要素即可，避免写与代码重复的长篇源码引用。*

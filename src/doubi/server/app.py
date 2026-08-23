@@ -53,10 +53,31 @@ async def _execute_download(url: str, options: DownloadOptions) -> dict:
 
     item = await pipeline.process_url(url, options, on_progress=_on_progress)
 
-    succeeded = 1 if item is not None and not item.is_container() else 0
-    failed = 0 if succeeded else 1
+    if item is None:
+        # Parse failed, or a single-item download returned False:
+        # process_url collapses both into None.
+        total, succeeded, failed = 1, 0, 1
+    elif "child_count" in item.extra:
+        # The pipeline took the container branch and recorded how its
+        # children fared, so those numbers are the answer.
+        #
+        # Keying off ``extra`` rather than ``is_container()`` is deliberate:
+        # ``is_container()`` is just ``bool(children)``, while the pipeline
+        # also routes bare ``MediaType.USER`` items (no children yet) through
+        # container expansion — the two judgements disagree. Reading the
+        # stats the pipeline actually wrote cannot drift out of sync.
+        #
+        # The previous code went further astray: it treated
+        # ``is_container()`` as *failure*, so a playlist whose every child
+        # downloaded fine still reported succeeded=0 / failed=1 / total=1.
+        succeeded = int(item.extra.get("downloaded_count") or 0)
+        failed = int(item.extra.get("failed_count") or 0)
+        total = int(item.extra.get("child_count") or 0)
+    else:
+        total, succeeded, failed = 1, 1, 0
+
     return {
-        "total": 1,
+        "total": total,
         "succeeded": succeeded,
         "failed": failed,
         "item_title": item.title if item else None,
@@ -74,13 +95,26 @@ def _build_options() -> DownloadOptions:
     cfg = load_config(None)
     return DownloadOptions(
         output_root=cfg.output_root,
+        # Same hazard as the GUI had: the directory layout, proxy and rate
+        # limit are read off DownloadOptions, so anything not forwarded here
+        # silently falls back to the dataclass default and the user's config
+        # file appears to be ignored over REST.
+        output_dir_template=cfg.output_dir_template,
         filename_template=cfg.filename_template,
         container=cfg.container,
         max_quality=cfg.max_quality,
         write_thumbnail=cfg.write_thumbnail,
         write_metadata_json=cfg.write_metadata_json,
+        # The sidecar switches are honored by the engine / adapter hooks, so
+        # forwarding them here is what makes them reachable over REST at all.
+        write_nfo=cfg.write_nfo,
+        write_danmaku=cfg.write_danmaku,
+        write_subtitles=cfg.write_subtitles,
+        resume=cfg.resume,
         database=cfg.database_path if cfg.database else None,
         manifest=cfg.manifest_path,
+        proxy=cfg.proxy,
+        rate_limit=cfg.rate_limit,
     )
 
 

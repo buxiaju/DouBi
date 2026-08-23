@@ -12,7 +12,8 @@ Scope still in M3.1+:
     * QR-code login
     * WBI-signed endpoints (when cookies are stale)
     * Bangumi / cheese metadata enrichment (region limits, etc.)
-    * Danmaku / subtitle / chapter / NFO post-processing
+    * Subtitle / chapter post-processing (danmaku is implemented, see
+      :meth:`BilibiliAdapter.post_download`)
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ import httpx
 
 from ...core.models import (
     Author,
+    DownloadOptions,
     MediaItem,
     MediaType,
     Platform,
@@ -146,6 +148,30 @@ class BilibiliAdapter(PlatformAdapter):
 
     def get_strategy(self, name: str) -> Optional[ContainerStrategy]:
         return self._strategies.get(name)
+
+    # ------------------------------------------------------------------
+    # post-download
+    # ------------------------------------------------------------------
+
+    async def post_download(self, item: MediaItem, options: DownloadOptions) -> None:
+        """Fetch the danmaku sidecar when ``--danmaku`` is on.
+
+        Danmaku cannot be a yt-dlp option: it is keyed by the page's
+        ``cid`` rather than the BV id and comes from a separate,
+        cookie-sensitive endpoint. See :mod:`.danmaku` for the details.
+
+        Containers are skipped — their children are downloaded as
+        individual items and each gets its own sidecar.
+        """
+        if not getattr(options, "write_danmaku", False):
+            return
+        if item.is_container():
+            return
+        from .danmaku import download_danmaku
+
+        path = await download_danmaku(self.api, item, options)
+        if path is not None:
+            logger.info("Danmaku saved: %s", path.name)
 
     # ------------------------------------------------------------------
     # parse
@@ -491,6 +517,11 @@ class BilibiliAdapter(PlatformAdapter):
                     "_from_multi_page": True,
                     "page_index": p_num,
                     "parent_bvid": bvid or classified.item_id,
+                    # Only present when the entry came from the official
+                    # ``pages`` payload via ``_page_dict_to_entry``;
+                    # yt-dlp entries have no cid, in which case the
+                    # danmaku module resolves it on demand.
+                    "cid": entry.get("cid"),
                     # --- naming.py reads these two to build a shared
                     # ``{collection_title}/`` folder for every page in the
                     # same multi-page BV — matching the user expectation
@@ -721,6 +752,12 @@ class BilibiliAdapter(PlatformAdapter):
                     "season_id": parent.extra.get("season_id"),
                     "section_id": section.get("section_id"),
                     "episode_id": ep.get("episode_id"),
+                    # The season payload already told us the page's cid,
+                    # so carry it: the danmaku sidecar is addressed by
+                    # cid, and forwarding it here saves a per-item
+                    # ``/x/web-interface/view`` round trip (which is also
+                    # the endpoint most likely to trip risk control).
+                    "cid": ep.get("cid"),
                     "collection_title": season_title,
                     "section_title": section.get("section_title") or "",
                     "collection_item_id": str(
@@ -799,6 +836,9 @@ class BilibiliAdapter(PlatformAdapter):
                     "episode_id": episode_item.extra.get("episode_id"),
                     "season_id": episode_item.extra.get("season_id"),
                     "section_id": episode_item.extra.get("section_id"),
+                    # Straight from the authoritative ``pages`` payload —
+                    # see the danmaku note on the ugc_season episodes.
+                    "cid": page.get("cid"),
                     "collection_title": collection_title,
                     "section_title": section_title,
                     # Forward the episode title so ``resolve_item_dir``

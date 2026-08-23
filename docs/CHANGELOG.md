@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 (2026-08-22) — 里程碑快照 M0–M6.1
+## 0.1.0 (2026-08-23) — 里程碑快照 M0–M6.3
 
 ### M1 内核骨架
 - `core/{models,registry,pipeline,config,logger,naming}.py`
@@ -156,8 +156,155 @@ B 站「带分类的合集」在解析页展开为 `分类 → 分集 → 分P` 
   （数据模型、数据流、平台/引擎扩展指南、B 站风控专题、测试体系、
   常见坑、改动检查单、已知限制与路线图）
 
+### M6.2 补齐「预留字段」与暂停/续传（P0 + P3）
+
+这一轮的共同根因是**声明与行为脱节**：`DownloadOptions` 里若干字段只被存下来、
+从未传给引擎，UI 上若干按钮只被画出来、从未接线。
+
+**P0-1 字幕 / NFO 开关是空开关**
+- `engines/yt_dlp.py`：`write_subtitles` 现在真正映射到 yt-dlp 的
+  `writesubtitles` / `writeautomaticsub` / `subtitleslangs`
+- 新增 `core/storage/nfo.py`：从 `MediaItem` 渲染 Jellyfin/Plex 可读的
+  `.nfo`，由 pipeline 在单条下载成功后写出
+- 判据：开关关闭时产物目录不得出现 `.nfo` / `.vtt`（测试直接断言落盘文件集合）
+
+**P0-2 B 站弹幕下载**
+- 新增 `platforms/bilibili/danmaku.py`：`resolve_cid` → `fetch_danmaku_xml`
+  → `write_danmaku` 三步，弹幕按**分P 的 cid** 而非 BV 号取，且走另一个
+  对 cookie 敏感的端点，因此天生不可能做成一个 yt-dlp 选项
+- 接线点是 `platforms/bilibili/adapter.py::post_download` 钩子，**不进 `engines/`**
+  ——引擎层必须保持平台无关（见 DEVELOPMENT §2 三条解耦轴）
+- 容器直接跳过：其子项各自作为单条下载，各写各的 sidecar
+
+**P0-3 REST 容器统计误报 failed**
+- 根因：`_execute_download` 把 `item.is_container()` 当作**失败**判据，于是
+  子项全部成功的合集仍返回 `total=1, succeeded=0, failed=1`
+- 修法：改以 `"child_count" in item.extra` 为判据，直接读 pipeline 真正写下的
+  `downloaded_count` / `failed_count` / `child_count`
+- 为什么不用 `is_container()`：它只是 `bool(children)`，而 pipeline 还会把
+  尚无 children 的裸 `MediaType.USER` 也走容器展开——两个判据会打架；
+  读 pipeline 自己写的统计则不可能与它脱同步
+
+**P3-1 引擎层断点续传与取消**
+- `core/models.py`：`DownloadOptions` 新增 `resume: bool = True` 与
+  `cancel_check: Optional[Callable[[], bool]] = None`
+- `engines/yt_dlp.py`：`continuedl=options.resume`；进度钩子**无条件注册**并在
+  每个 tick 轮询 `cancel_check`，命中则抛 `_LocalDownloadCancelled`
+- 取消时**跳过 `.part` 清理**并返回 `False`（清理只在非续传路径做，否则
+  下一次续传无从接续）
+- 根因：`YtDlpEngine.download` 是 `await asyncio.to_thread(...)`，
+  **`Task.cancel()` 永远打不断已进入线程的传输**，取消只能是协作式的
+- `config.py` DEFAULTS + `cli/main.py --no-resume` + `server/app.py` 同步接线
+
+**P3-2 GUI 单任务与全部暂停 / 恢复**
+- `ui/task_manager.py`：
+  - `_tasks` / `_flags` 两个注册表——此前 spawn 出去的 asyncio.Task
+    **完全不可寻址**，`remove()` 的「会取消下载」注释是空承诺
+  - **双机制停止**：先置 `_StopFlag`（够得到已在引擎线程里的传输），
+    再 `task.cancel()`（覆盖「还没进引擎」的窗口，如卡在并发信号量上）
+  - **flag 按尝试而非按 task_id**：暂停中的 worker 可能仍在引擎线程里，
+    共享 flag 会让 `resume()` 复活旧线程 → **两个写者抢同一个 `.part`**
+  - `replace(options, cancel_check=flag)` 而非原地改——调用方合法地把同一个
+    `DownloadOptions` 传给多个 `add()`
+  - 协作式停止表现为 `ok is False`（引擎自己吞掉了取消），故判据是
+    `flag.stopped and not ok`——**已下完的文件要赢过迟到的暂停**
+  - `_forget` / `_finish_stopped` 的 stale 守卫：将死的旧尝试不得把
+    `paused` 盖到新尝试的 `running` 上
+  - `paused` 刻意设计为**非终态**：保留 `_active` 里的位置与磁盘上的分片
+  - `pause()` 同步翻转状态并发 `task_progress`——worker 要等引擎下一个
+    进度 tick 才察觉 flag，UI 不能等
+- `ui/pages/download.py`：
+  - TaskRow 增加暂停列（52px 固定宽 holder，按钮文案表达**下一步动作**：
+    running→「暂停」/ paused→「继续」/ 终态→隐藏但不塌宽度）
+  - `_on_pause_all` 规则：**只要还有 running 就一律暂停**，全暂停后按钮才变
+    「全部继续」——否则混合列表上一次点击会立刻自我抵消
+  - `_refresh_active_rows()`：批量操作绕过了逐行信号路径，需显式推一次
+  - `_update_summaries()` 输出「N 个正在下载，M 个已暂停」，并让按钮文案与
+    `_on_pause_all` 的规则严格同源
+- 测试：`test_task_manager.py` 6 → 15，`test_download_page.py` 2 → 5，
+  `test_ytdlp_engine.py` 4 → 11
+- 测试坑：`add()` / `resume()` 只是**排程**，不 yield 就 `pause()` 会在协程体
+  执行前把它取消掉，pipeline 根本没被碰到（6 个用例因此假失败）。真实环境永远
+  有 loop 在跑，所以由测试用 `_started()` 补一次 yield，**不改生产代码**
+
+**顺带修掉的「静默失效开关」（按检查单第 5 条自查发现）**
+
+上面几项做完后，按 DEVELOPMENT §17 改动检查单第 5 条「加配置项要动五处」逐处
+核对 `resume`，结果发现**第五处压根没动**，还牵出一个更早就存在的漏洞：
+
+| 位置 | 漏掉的字段 | 后果 |
+| --- | --- | --- |
+| `ui/pages/parse.py::_build_options()` | `write_nfo` / `write_danmaku` / `write_subtitles` / `resume` / `output_dir_template` | GUI 是唯一忽略这些开关的端 |
+| `server/app.py::_build_options()` | `output_dir_template` / `proxy` / `rate_limit` | REST 忽略目录模板与代理限速 |
+
+- 根因：引擎和 `file_layout` 都只认 `DownloadOptions`，**从不读 `AppConfig`**。
+  每端的 `_build_options()` 是唯一的搬运环节，漏一个字段就等于那个开关在该端
+  是死的——而且配置文件里改了也毫无反应。
+- `output_dir_template` 比开关更隐蔽：它决定 `resolve_item_dir()` 的落盘目录，
+  漏转发时会静默退回 dataclass 默认值，用户自定义的目录结构直接失效。
+- 判据：`AppConfig` 与 `DownloadOptions` 的**同名字段交集**必须逐个抵达
+  options。为此两端各加一个结构性测试
+  （`test_build_options_covers_every_shared_config_field`），以后新增字段忘了
+  转发会**测试变红**，而不是发出一个点了没用的控件。
+- 该测试的关键设计：填 cfg 时必须把每个字段推到**非默认值**。第一版直接用
+  `AppConfig()` 原值比较，删掉 `resume=` 那行竟然照样通过——因为两个 dataclass
+  的 `resume` 默认值都是 `True`，「没转发」和「转发了」结果相等，是个**假保险**。
+  改成非默认值填充后，删任意一行都能稳定变红（已分别删 `resume`、`max_quality`
+  实测过）。遇到不认识的字段类型时 `pytest.fail`，避免默默削弱检查强度。
+- CLI 不在此列：它从命令行参数直接构造 options，字段本来就是齐的。
+
+### M6.3 多主题系统（6 套主题包 + 全局即时生效）
+
+界面原先只有 fluent 默认亮色。这一轮引入**具名主题包**：每套主题自带一整张 token 表
+（背景 / 文字 / 表格斑马纹 / 5 种状态色 / 4 种进度条色 / 圆角 / 行高），而不是「亮暗开关 +
+强调色」。内置 `default_light` / `default_dark` / `deep_sea` / `morandi` / `eye_care` /
+`high_contrast`，新增 `ui/theme.py`（720 行）。
+
+- 接线：`config.py` 加 `theme` 字段（`DOUBI_THEME` 可覆盖）、`app.py` 加 `--theme`
+  （`choices=theme_names()`）、设置页下拉框、导航栏画笔按钮循环切换。
+- 设计要点：**语义色必须随明度重算而非直接复用**。`#c02b2b` 这类暗红在深色底上几乎不可读，
+  暗色骨架一律提亮到 `#ff6b6b` 一档。
+- 详见 `docs/DEVELOPMENT.md §13.4`。
+
+**用户实测反馈：「整体的背景没有变，解析口的颜色一直都是白色」**
+
+token 表写对了，界面却基本没变色。逐层排查发现**五个独立失效点**，任一个没处理都会让主题
+「看起来没生效」：
+
+| # | 失效点 | 根因 | 修法 |
+| --- | --- | --- | --- |
+| ① | 六套主题只有强调色在变 | qfluentwidgets 只有 `Theme.LIGHT` / `Theme.DARK` 两套内置调色板，`setTheme()` 无法表达 6 套配色，`setThemeColor()` 只改强调色 → `bg_base` 从未生效 | `app_qss()` 把 token 表翻译成全局 QSS |
+| ② | Win11 上主窗口底色画了看不见 | 开启 **Mica** 毛玻璃时 `_normalBackgroundColor()` 返回**全透明**，`setCustomBackgroundColor` 形同虚设 | `_apply_window_background()` 先 `setMicaEffectEnabled(False)` 再设色 |
+| ③ | **解析框一直是白的**（用户反馈的原话） | Qt 里**控件自己的样式表优先级高于 `QApplication` 全局样式表**（全局表是最低优先级兜底），而 fluent 给每个控件单独 `setStyleSheet` → 全局 QSS 只对原生控件有效。`line_edit.qss` 的 `:focus` 更是写死纯 `white` | `_refresh_fluent_widgets()` 用官方 `setCustomStyleSheet(w, light, dark)` 逐个覆盖 |
+| ④ | 卡片始终半透明白 | `CardWidget.paintEvent` 自绘，取硬编码 `QColor(255,255,255,170)`，**任何 QSS 都碰不到** | `_patch_fluent_card_background()` 猴补丁替换取色方法；`SimpleCardWidget` 自己也覆写了这三个 getter，**两个类都得打** |
+| ⑤ | 切完主题后新开的菜单/对话框又白回去 | 下拉弹窗、右键菜单、登录对话框都懒创建，构造时向 `styleSheetManager.register` 领了库自带亮色 QSS，错过了刷新时机 | `_patch_style_sheet_register()` 包一层 `register`，控件一登记就补当前主题 QSS |
+
+- **`set_theme()` 内部有强制顺序**，不是可随意重排的六行：两个猴补丁必须早于刷新（卡片重算时
+  取色方法要已被替换，`register` 钩子要赶在后续控件创建之前就位），`_notify()` 收尾通知那些
+  把颜色烘进自身 stylesheet 的控件。
+- **`app.py` 里 `set_theme()` 故意调两次**，别当重复代码删：第一次在建窗口前（页面构造要按
+  token 取色），但那时 `_apply_window_background` 遍历不到任何顶层窗口，主窗口底色与 Mica
+  关闭落不下去；窗口建好后必须再刷一次。
+- 判据：`test_theme_apply_gui.py` 24 个用例对**每套主题**参数化断言四件事——窗口底色等于
+  `bg_base` 且 Mica 已关、现存 fluent 控件的 `lightCustomQss` 含 `bg_layer`、
+  `cards[0]._normalBackgroundColor()` 等于 `bg_layer`、切换后新建的 ComboBox 也带上主题 QSS。
+  第三、四条正是 ④⑤ 的回归防线。
+- 测试教训：循环断言必须有「至少找到一个」的兜底（`assert checked, "主窗口里一个 fluent 控件
+  都没找到"`），否则控件一个都没匹配上时**整个用例空转变绿**。改全局状态的 GUI 测试要用
+  autouse fixture 复位到 `default_light`，否则先跑的用例污染后跑的。
+- 顺带修掉 `settings.py::_find_settings_page()` **永远返回 None**：它按
+  `objectName() == "settingsPage"` 查找，但容器注册页面时把 objectName 覆写成了
+  `"settingsInterface"`，而调用方一个宽泛的 `except Exception` 把失败彻底吞掉。改为**按能力
+  识别**（检查是否具备目标方法）+ 沿 parent 链上溯。教训：**objectName 会被容器改写，不是可靠
+  的身份判据**。
+- 测试：新增 `test_config_theme.py` 26 个（无 Qt 也能跑：token 键一致性、`resolve_theme`
+  兼容 `light`/`亮色`/`dark`/`暗色`/`auto` 等旧值、YAML 往返）、`test_theme_apply_gui.py`
+  24 个；331 → 381 passed。
+
 ## 统计
-- 源码 ~55 个 .py 文件，约 10000 行
-- 测试 16 个文件，284 个用例收集：**280 passed / 4 skipped**
+- 源码 62 个 .py 文件，约 12100 行
+- 测试 19 个文件，385 个用例收集：**381 passed / 4 skipped**
   （4 个 skip 均为「无 PySide6 则跳过」的 GUI 用例）
+- 基线演进：280（M6.1）→ 299（P0-2）→ 309（P0-3）→ 316（P3-1）→ 328（P3-2）
+  → 331（补齐 `_build_options` 转发 + 结构性守卫）→ 381（多主题系统 + 五层失效点回归）
 

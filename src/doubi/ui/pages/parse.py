@@ -42,6 +42,14 @@ def build_parse_widgets():
     from ...core.engine_loader import build_default_pipeline
     from ...core.models import DownloadOptions, MediaItem
     from ...core.pipeline import DownloadPipeline
+    from ..theme import (
+        SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS,
+        TYPE_BODY, TYPE_CAPTION, FONT_FAMILY, RADIUS_CARD,
+        heading_qss, muted_qss, subscribe_theme,
+    )
+    from ..widgets import (
+        build_page_header, build_empty_state, build_platform_badge,
+    )
 
     class ParsePage(QWidget):
         """The "解析" tab of the main window."""
@@ -55,6 +63,14 @@ def build_parse_widgets():
             # Set later via set_task_manager(...) from MainWindow.
             self._task_manager = None
             self._build_ui()
+            # 提示文字的颜色写在 stylesheet 里，换主题时得重刷。
+            subscribe_theme(self, self._on_theme_changed)
+
+        def _on_theme_changed(self) -> None:
+            """换主题后刷新自绘颜色的控件。"""
+            # hint 文案由 PageHeader 的副标题承载——但有些旧调用点（解析按钮
+            # loading 文本）仍会读 hint，这里留空实现保持 ABI 兼容。
+            pass
 
         # ---- public API ----------------------------------------------
 
@@ -64,58 +80,68 @@ def build_parse_widgets():
         # ---- UI build ------------------------------------------------
 
         def _build_ui(self):
-            layout = QVBoxLayout(self)
-            layout.setContentsMargins(24, 24, 24, 24)
-            layout.setSpacing(12)
+            PageHeader = build_page_header()
+            EmptyState = build_empty_state()
 
-            title = StrongBodyLabel(self)
-            title.setText("解析")
-            layout.addWidget(title)
+            outer = QVBoxLayout(self)
+            outer.setContentsMargins(SPACE_XL, SPACE_LG, SPACE_XL, SPACE_LG)
+            outer.setSpacing(SPACE_LG)
 
-            hint = QLabel(
-                "粘贴链接（每行一个），支持抖音 / B 站 / 合集 / 用户主页 / 短链接。",
-                self,
+            # ---- 页头 ----
+            self._header = PageHeader(self)
+            self._header.set_title("解析")
+            self._header.set_subtitle(
+                "粘贴链接（每行一个），支持抖音 / B 站 / 合集 / 用户主页 / 短链接。"
             )
-            hint.setStyleSheet("color: gray;")
-            layout.addWidget(hint)
+            outer.addWidget(self._header)
 
-            # URL input
-            self.url_input = QPlainTextEdit(self)
+            # ---- 输入区（多行输入 + 平台 + 按钮 同一行） ----
+            input_card = CardWidget(self)
+            input_layout = QVBoxLayout(input_card)
+            input_layout.setContentsMargins(SPACE_MD, SPACE_MD, SPACE_MD, SPACE_MD)
+            input_layout.setSpacing(SPACE_MD)
+
+            self.url_input = QPlainTextEdit(input_card)
             self.url_input.setPlaceholderText(
                 "https://www.bilibili.com/video/BV1GJ411x7h7\n"
                 "https://space.bilibili.com/486906719\n"
                 "https://www.bilibili.com/list/ml12345\n"
                 "https://www.douyin.com/video/7123456789012345678"
             )
-            self.url_input.setFixedHeight(100)
-            layout.addWidget(self.url_input)
+            self.url_input.setFixedHeight(110)
+            input_layout.addWidget(self.url_input)
 
-            # Buttons row: parse / quick download on the right
             btn_row = QHBoxLayout()
+            btn_row.setSpacing(SPACE_SM)
             btn_row.addStretch(1)
-            self.parse_btn = PushButton("解析", self)
+            self.parse_btn = PushButton("解析", input_card)
             self.parse_btn.clicked.connect(self._on_parse_clicked)
-            self.quick_download_btn = PushButton("快速下载", self)
+            self.quick_download_btn = PushButton("快速下载", input_card)
             self.quick_download_btn.setToolTip("解析第一个 URL 并直接加入下载队列")
             self.quick_download_btn.clicked.connect(self._on_quick_download_clicked)
             btn_row.addWidget(self.parse_btn)
             btn_row.addWidget(self.quick_download_btn)
-            btn_row.addSpacing(12)
-            btn_row.addWidget(QLabel("平台：", self))
-            self.platform_combo = ComboBox(self)
+            btn_row.addSpacing(SPACE_LG)
+            platform_label = QLabel("平台：", input_card)
+            platform_label.setStyleSheet(muted_qss())
+            btn_row.addWidget(platform_label)
+            self.platform_combo = ComboBox(input_card)
             self.platform_combo.addItems(["自动识别", "抖音", "B 站"])
             self.platform_combo.setCurrentIndex(0)
             btn_row.addWidget(self.platform_combo)
-            layout.addLayout(btn_row)
+            input_layout.addLayout(btn_row)
+            outer.addWidget(input_card)
 
-            # Result card: search + summary + table
+            # ---- 结果区 ----
             self.result_card = CardWidget(self)
             self.result_layout = QVBoxLayout(self.result_card)
-            self.result_layout.setContentsMargins(12, 12, 12, 12)
-            self.result_layout.setSpacing(8)
+            self.result_layout.setContentsMargins(SPACE_MD, SPACE_MD, SPACE_MD, SPACE_MD)
+            self.result_layout.setSpacing(SPACE_MD)
 
             top_row = QHBoxLayout()
+            top_row.setSpacing(SPACE_MD)
             self.result_summary = QLabel("尚未解析。", self.result_card)
+            self.result_summary.setStyleSheet(heading_qss(3))
             top_row.addWidget(self.result_summary, 1)
             self.search_box = SearchLineEdit(self.result_card)
             self.search_box.setPlaceholderText("搜索标题 / 作者…")
@@ -125,20 +151,27 @@ def build_parse_widgets():
             self.result_layout.addLayout(top_row)
 
             actions_row = QHBoxLayout()
+            actions_row.setSpacing(SPACE_SM)
             self.select_all_btn = PushButton("全选", self.result_card)
             self.select_all_btn.clicked.connect(self._select_all)
             self.select_none_btn = PushButton("全不选", self.result_card)
             self.select_none_btn.clicked.connect(self._select_none)
             self.select_range_btn = PushButton("按行号选择…", self.result_card)
             self.select_range_btn.clicked.connect(self._on_select_range)
-            self.download_selected_btn = PushButton("下载选中 (0)", self.result_card)
-            self.download_selected_btn.clicked.connect(self._download_selected)
             actions_row.addWidget(self.select_all_btn)
             actions_row.addWidget(self.select_none_btn)
             actions_row.addWidget(self.select_range_btn)
             actions_row.addStretch(1)
+            self.download_selected_btn = PushButton("下载选中 (0)", self.result_card)
+            self.download_selected_btn.clicked.connect(self._download_selected)
             actions_row.addWidget(self.download_selected_btn)
             self.result_layout.addLayout(actions_row)
+
+            # 用一个 stack 切换「表格」与「空态」两套占位：解析前显示空态，
+            # 解析后切换到表格。空态是 EmptyState 控件（透明 + 居中文案）。
+            from PySide6.QtWidgets import QStackedWidget
+            self._result_stack = QStackedWidget(self.result_card)
+            self.result_layout.addWidget(self._result_stack, 1)
 
             self.result_table = TableWidget(self.result_card)
             self.result_table.setColumnCount(7)
@@ -153,6 +186,8 @@ def build_parse_widgets():
             self.result_table.customContextMenuRequested.connect(
                 self._on_table_context_menu,
             )
+            # 行高拉大一点——之前 22 看起来太挤，改为更宽松的默认
+            self.result_table.verticalHeader().setDefaultSectionSize(36)
             header = self.result_table.horizontalHeader()
             header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
             header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
@@ -162,8 +197,18 @@ def build_parse_widgets():
             header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
             header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
             self.result_table.itemChanged.connect(self._on_table_changed)
-            self.result_layout.addWidget(self.result_table, 1)
-            layout.addWidget(self.result_card, 1)
+            self._result_stack.addWidget(self.result_table)
+
+            self._empty = EmptyState(self.result_card)
+            self._empty.set_text(
+                "等待你粘贴链接",
+                "支持视频 / 图集 / 直播 / 用户主页 / 收藏夹 / 合集 / 短链接\n"
+                "粘贴后点击「解析」",
+            )
+            self._result_stack.addWidget(self._empty)
+            self._result_stack.setCurrentWidget(self._empty)
+
+            outer.addWidget(self.result_card, 1)
 
         # ---- parsing --------------------------------------------------
 
@@ -422,6 +467,8 @@ def build_parse_widgets():
 
         def _fill_result_table(self, items: list[MediaItem]) -> None:
             self._parsed_items = list(items)
+            # 解析到内容后切换到「表格」视图
+            self._result_stack.setCurrentWidget(self.result_table)
             # Expansion state keyed by **stable identifiers** rather
             # than by table row number — table rows shift whenever a
             # sibling section is expanded/collapsed, so a row-based
@@ -1088,11 +1135,23 @@ def build_parse_widgets():
         def _build_options(self) -> DownloadOptions:
             return DownloadOptions(
                 output_root=self._cfg.output_root,
+                # Without this the GUI silently ignores a customised directory
+                # layout: file_layout.resolve_item_dir() reads the template off
+                # DownloadOptions, so an un-forwarded one falls back to the
+                # dataclass default instead of the user's setting.
+                output_dir_template=self._cfg.output_dir_template,
                 filename_template=self._cfg.filename_template,
                 container=self._cfg.container,
                 max_quality=self._cfg.max_quality,
                 write_thumbnail=self._cfg.write_thumbnail,
                 write_metadata_json=self._cfg.write_metadata_json,
+                # Sidecars and resume must be forwarded here too, or the GUI
+                # would be the one surface that silently ignores them: the
+                # engine reads them off DownloadOptions, not off AppConfig.
+                write_nfo=self._cfg.write_nfo,
+                write_danmaku=self._cfg.write_danmaku,
+                write_subtitles=self._cfg.write_subtitles,
+                resume=self._cfg.resume,
                 database=self._cfg.database_path if self._cfg.database else None,
                 manifest=self._cfg.manifest_path,
                 proxy=self._cfg.proxy,

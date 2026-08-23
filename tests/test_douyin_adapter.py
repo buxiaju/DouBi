@@ -375,6 +375,96 @@ def test_pipeline_container_recursion(monkeypatch):
     assert result.extra.get("downloaded_count") == 1
 
 
+# Root cause these two cover: ``_process_container`` set
+# ``downloaded_count = len(children)`` — the number of items *attempted* —
+# and threw away the DownloadJob returned by ``process_batch``, which held
+# the only record of what actually succeeded. A playlist where every child
+# failed still claimed a full house.
+#
+# 判据: downloaded_count counts successes only, failed_count counts the
+# rest, and child_count keeps the attempted total, so the three are
+# asserted separately rather than as a sum.
+
+def test_pipeline_container_records_partial_failure(monkeypatch):
+    import doubi.core.pipeline as pipeline_mod
+
+    class _FlakyEngine:
+        name = "flaky"
+        def supports(self, item): return True
+        async def download(self, item, options, *, on_progress=None):
+            return item.item_id != "bad"
+
+    pipeline = pipeline_mod.DownloadPipeline(engine=_FlakyEngine(), max_concurrent=2)
+    good = MediaItem(platform=Platform.DOUYIN, item_id="good", title="g",
+                     author=Author(), media_type=MediaType.VIDEO, source_url="https://x/good")
+    bad = MediaItem(platform=Platform.DOUYIN, item_id="bad", title="b",
+                    author=Author(), media_type=MediaType.VIDEO, source_url="https://x/bad")
+    container = MediaItem(platform=Platform.DOUYIN, item_id="SEC", title="user",
+                          author=Author(), media_type=MediaType.USER,
+                          source_url="https://www.douyin.com/user/SEC",
+                          children=[good, bad])
+    async def _fake_parse(url): return container
+    monkeypatch.setattr(pipeline, "parse", _fake_parse)
+    from doubi.platforms.douyin.adapter import DouyinAdapter
+    async def _fake_expand(self, item, *, strategy="post", max_count=0):
+        return [good, bad]
+    monkeypatch.setattr(DouyinAdapter, "expand", _fake_expand)
+
+    result = asyncio.run(
+        pipeline.process_url(container.source_url, DownloadOptions(output_root=Path("./out")))
+    )
+    assert result.extra["downloaded_count"] == 1
+    assert result.extra["failed_count"] == 1
+    assert result.extra["child_count"] == 2
+
+
+def test_process_batch_reports_real_counts(monkeypatch):
+    """DownloadJob.completed_count/failed_count must reflect outcomes."""
+    import doubi.core.pipeline as pipeline_mod
+
+    class _FlakyEngine:
+        name = "flaky"
+        def supports(self, item): return True
+        async def download(self, item, options, *, on_progress=None):
+            if item.item_id == "boom":
+                raise RuntimeError("engine exploded")
+            return item.item_id == "good"
+
+    pipeline = pipeline_mod.DownloadPipeline(engine=_FlakyEngine(), max_concurrent=3)
+    items = [
+        MediaItem(platform=Platform.DOUYIN, item_id=iid, title=iid, author=Author(),
+                  media_type=MediaType.VIDEO, source_url=f"https://x/{iid}")
+        for iid in ("good", "bad", "boom")
+    ]
+    job = asyncio.run(
+        pipeline.process_batch(items, DownloadOptions(output_root=Path("./out")))
+    )
+    assert job.total_count() == 3
+    assert job.completed_count() == 1
+    assert job.failed_count() == 2
+    assert job.status == "completed"  # partial success is still 'completed'
+
+
+def test_process_batch_status_failed_when_nothing_succeeds(monkeypatch):
+    import doubi.core.pipeline as pipeline_mod
+
+    class _DeadEngine:
+        name = "dead"
+        def supports(self, item): return True
+        async def download(self, item, options, *, on_progress=None):
+            return False
+
+    pipeline = pipeline_mod.DownloadPipeline(engine=_DeadEngine())
+    items = [MediaItem(platform=Platform.DOUYIN, item_id="a", title="a", author=Author(),
+                       media_type=MediaType.VIDEO, source_url="https://x/a")]
+    job = asyncio.run(
+        pipeline.process_batch(items, DownloadOptions(output_root=Path("./out")))
+    )
+    assert job.completed_count() == 0
+    assert job.failed_count() == 1
+    assert job.status == "failed"
+
+
 def test_pipeline_parse_and_expand_single_item(monkeypatch):
     """A single-item URL returns (item, [])."""
     import doubi.core.pipeline as pipeline_mod

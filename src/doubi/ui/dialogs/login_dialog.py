@@ -14,7 +14,9 @@ Two factories:
   Playwright (or fails gracefully if not installed), waits for the
   cookies, and saves them.
 
-Both dialogs are :class:`QDialog` instances with a "关闭" button.
+Both dialogs are :class:`QDialog` instances with a "关闭" button. M6.x
+在标题区加了「品牌 hero」（小图标 + 应用名 + 平台标签），与主窗口和
+关于对话框保持一致的视觉语言。
 """
 
 from __future__ import annotations
@@ -25,6 +27,104 @@ from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger("doubi.ui.dialogs.login")
+
+
+# ---------------------------------------------------------------------------
+# 共享：登录对话框顶部的品牌 hero（平台 logo + 平台名 + 应用名）
+# ---------------------------------------------------------------------------
+
+
+def _build_brand_hero(platform: str, accent: str) -> "QWidget":
+    """登录对话框的顶部品牌区。
+
+    不是直接用 main_window 的 :func:`header_qss`——主窗口的渐变配色
+    不一定契合登录场景，单独给对话框做一份。配色跟随主色。
+    """
+    try:
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QFont
+        from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QLabel
+    except ImportError:  # pragma: no cover
+        return None
+
+    from ..resources import APP_NAME, load_app_icon
+    from ..theme import (
+        FONT_FAMILY, SPACE_LG, SPACE_MD, RADIUS_CARD, TYPE_H1, TYPE_CAPTION,
+        _hex_to_rgba, current_theme, token,
+    )
+
+    pack = current_theme()
+    bg_color = pack.bg_elevated or token("bg_layer")
+    text_color = token("text_primary")
+    sub_color = token("text_muted")
+    border = _hex_to_rgba(text_color, 0.08)
+
+    hero = QWidget()
+    hero.setObjectName("loginBrandHero")
+    hero.setStyleSheet(
+        f"QWidget#loginBrandHero {{"
+        f" background-color: {bg_color};"
+        f" border: 1px solid {border};"
+        f" border-radius: {RADIUS_CARD}px;"
+        f" }}"
+    )
+
+    h = QHBoxLayout(hero)
+    h.setContentsMargins(SPACE_LG, SPACE_MD, SPACE_LG, SPACE_MD)
+    h.setSpacing(SPACE_MD)
+
+    # ---- 平台 badge：圆形背景 + 首字 ----
+    badge = QLabel(platform[:1] if platform else "D")
+    badge.setFixedSize(40, 40)
+    badge.setAlignment(Qt.AlignCenter)
+    badge_font = QFont()
+    badge_font.setFamilies([s.strip("'") for s in FONT_FAMILY.split(",")])
+    badge_font.setPointSize(16)
+    badge_font.setBold(True)
+    badge.setFont(badge_font)
+    badge_color = accent or pack.accent
+    badge.setStyleSheet(
+        f"QLabel {{"
+        f" color: #ffffff;"
+        f" background-color: {badge_color};"
+        f" border: none;"
+        f" border-radius: 20px;"
+        f" }}"
+    )
+    h.addWidget(badge, 0)
+
+    # ---- 文字 ----
+    text_col = QVBoxLayout()
+    text_col.setContentsMargins(0, 0, 0, 0)
+    text_col.setSpacing(2)
+
+    title = QLabel(f"{platform} 登录")
+    title.setStyleSheet(
+        f"QLabel {{"
+        f" font-family: {FONT_FAMILY};"
+        f" font-size: {TYPE_H1 - 4}px;"
+        f" font-weight: 600;"
+        f" color: {text_color};"
+        f" background: transparent;"
+        f" border: none;"
+        f" }}"
+    )
+    text_col.addWidget(title)
+
+    sub = QLabel(f"{APP_NAME} · 一站式多平台视频下载")
+    sub.setStyleSheet(
+        f"QLabel {{"
+        f" font-family: {FONT_FAMILY};"
+        f" font-size: {TYPE_CAPTION}px;"
+        f" color: {sub_color};"
+        f" background: transparent;"
+        f" border: none;"
+        f" }}"
+    )
+    text_col.addWidget(sub)
+    h.addLayout(text_col, 1)
+
+    return hero
 
 
 # ---------------------------------------------------------------------------
@@ -48,12 +148,13 @@ def build_bilibili_qr_dialog():
         bilibili_status,
         bilibili_wait_for_scan,
     )
+    from ..theme import muted_qss, token
 
     class BilibiliQRDialog(QDialog):
         def __init__(self, parent=None):
             super().__init__(parent)
             self.setWindowTitle("B 站扫码登录")
-            self.resize(460, 540)
+            self.resize(500, 600)
             self._qr_session = None
             self._qr_code = None
             self._scan_task: Optional[asyncio.Task] = None
@@ -64,10 +165,16 @@ def build_bilibili_qr_dialog():
         def _build_ui(self):
             layout = QVBoxLayout(self)
             layout.setContentsMargins(20, 20, 20, 20)
-            layout.setSpacing(10)
+            layout.setSpacing(12)
+
+            # 顶部品牌 hero —— 与主窗口、关于对话框保持一致的视觉
+            hero = _build_brand_hero("B 站", "#00aeec")
+            if hero is not None:
+                layout.addWidget(hero)
 
             title = QLabel("用 B 站 App 扫描下方二维码", self)
             font = title.font()
+            font.setBold(True)
             font.setPointSize(font.pointSize() + 1)
             title.setFont(font)
             layout.addWidget(title)
@@ -77,7 +184,7 @@ def build_bilibili_qr_dialog():
                 "若二维码看不清，可点 “在浏览器打开” 跳转后扫描",
                 self,
             )
-            hint.setStyleSheet("color: gray;")
+            hint.setStyleSheet(muted_qss())
             layout.addWidget(hint)
 
             self.qr_view = QPlainTextEdit(self)
@@ -93,7 +200,7 @@ def build_bilibili_qr_dialog():
             self.url_label = QLabel("", self)
             self.url_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
             self.url_label.setWordWrap(True)
-            self.url_label.setStyleSheet("color: gray;")
+            self.url_label.setStyleSheet(muted_qss())
             layout.addWidget(self.url_label)
 
             self.progress = QProgressBar(self)
@@ -103,7 +210,7 @@ def build_bilibili_qr_dialog():
             layout.addWidget(self.progress)
 
             self.status_label = QLabel("正在准备二维码…", self)
-            self.status_label.setStyleSheet("color: gray;")
+            self.status_label.setStyleSheet(muted_qss())
             layout.addWidget(self.status_label)
 
             btn_row = QHBoxLayout()
@@ -212,7 +319,7 @@ def build_bilibili_qr_dialog():
         # -------------------------------------------------- helpers
 
         def _set_status(self, text: str, *, error: bool = False) -> None:
-            color = "#e64545" if error else "gray"
+            color = token("progress_error") if error else token("text_muted")
             self.status_label.setStyleSheet(f"color: {color};")
             self.status_label.setText(text)
 
@@ -274,6 +381,7 @@ def build_douyin_browser_dialog():
     )
 
     from ...ui.auth_actions import douyin_login_via_browser, douyin_save_cookies
+    from ..theme import muted_qss, token
 
     class _BrowserDoneEvent(QEvent):
         event_type = QEvent.Type(QEvent.registerEventType())
@@ -287,7 +395,7 @@ def build_douyin_browser_dialog():
         def __init__(self, parent=None):
             super().__init__(parent)
             self.setWindowTitle("抖音扫码登录")
-            self.resize(440, 360)
+            self.resize(500, 460)
             self._cancelled = False
             self._build_ui()
             QTimer.singleShot(50, self._start)
@@ -295,10 +403,16 @@ def build_douyin_browser_dialog():
         def _build_ui(self):
             layout = QVBoxLayout(self)
             layout.setContentsMargins(20, 20, 20, 20)
-            layout.setSpacing(10)
+            layout.setSpacing(12)
+
+            # 顶部品牌 hero
+            hero = _build_brand_hero("抖音", "#fe2c55")
+            if hero is not None:
+                layout.addWidget(hero)
 
             title = QLabel("请在弹出的浏览器窗口中登录抖音", self)
             font = title.font()
+            font.setBold(True)
             font.setPointSize(font.pointSize() + 1)
             title.setFont(font)
             layout.addWidget(title)
@@ -309,7 +423,7 @@ def build_douyin_browser_dialog():
                 "3. 登录成功后本窗口会自动关闭",
                 self,
             )
-            hint.setStyleSheet("color: gray;")
+            hint.setStyleSheet(muted_qss())
             layout.addWidget(hint)
 
             self.progress = QProgressBar(self)
@@ -319,7 +433,7 @@ def build_douyin_browser_dialog():
             layout.addWidget(self.progress)
 
             self.status_label = QLabel("正在启动浏览器…", self)
-            self.status_label.setStyleSheet("color: gray;")
+            self.status_label.setStyleSheet(muted_qss())
             self.status_label.setWordWrap(True)
             layout.addWidget(self.status_label)
 
@@ -376,7 +490,7 @@ def build_douyin_browser_dialog():
             )
 
         def _set_status(self, text: str, *, error: bool = False) -> None:
-            color = "#e64545" if error else "gray"
+            color = token("progress_error") if error else token("text_muted")
             self.status_label.setStyleSheet(f"color: {color};")
             self.status_label.setText(text)
             self.log_view.appendPlainText(text)

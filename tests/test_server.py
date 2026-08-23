@@ -235,3 +235,190 @@ def test_get_job_after_submit_returns_its_url(client):
     body = fetched.json()
     assert body["url"] == "https://x/specific"
     assert body["job_id"] == posted["job_id"]
+
+
+# ---------------------------------------------------------------------------
+# Executor statistics
+#
+# Root cause of the bug these cover: ``_execute_download`` derived its
+# tallies from ``item.is_container()``, treating "the returned item is a
+# container" as "the download failed". A playlist whose every child
+# downloaded fine still reported succeeded=0 / failed=1 / total=1.
+#
+# 判据: the numbers must come from what the pipeline actually recorded
+# about the children (``extra['downloaded_count'] / ['failed_count'] /
+# ['child_count']``), so each case below asserts the exact triple rather
+# than an aggregate like "failed == 0".
+# ---------------------------------------------------------------------------
+
+
+class _StubPipelineResult:
+    """Stands in for build_default_pipeline(): returns a canned item."""
+
+    def __init__(self, item):
+        self._item = item
+
+    async def process_url(self, url, options, *, on_progress=None):
+        return self._item
+
+
+def _run_executor(monkeypatch, item) -> dict:
+    """Call the real _execute_download against a stubbed pipeline."""
+    import doubi.server.app as app_mod
+
+    monkeypatch.setattr(
+        app_mod, "build_default_pipeline", lambda: _StubPipelineResult(item)
+    )
+    from doubi.core.models import DownloadOptions
+
+    return asyncio.run(app_mod._execute_download("https://x", DownloadOptions()))
+
+
+def _container(**extra) -> MediaItem:
+    """A container as the pipeline hands it back: children attached and
+    the child statistics already written into ``extra``."""
+    child = MediaItem(
+        platform=Platform.BILIBILI, item_id="child", title="c",
+        media_type=MediaType.VIDEO, source_url="https://x/child",
+    )
+    item = MediaItem(
+        platform=Platform.BILIBILI,
+        item_id="BV1zygDzDES2",
+        title="合集",
+        author=Author(name="up主"),
+        media_type=MediaType.COLLECTION,
+        source_url="https://www.bilibili.com/video/BV1zygDzDES2",
+        children=[child],
+    )
+    item.extra.update(extra)
+    return item
+
+
+def test_executor_reports_container_children_as_successes(monkeypatch):
+    result = _run_executor(
+        monkeypatch,
+        _container(downloaded_count=5, failed_count=0, child_count=5),
+    )
+    assert result["total"] == 5
+    assert result["succeeded"] == 5
+    assert result["failed"] == 0
+
+
+def test_executor_reports_partial_container_failure(monkeypatch):
+    result = _run_executor(
+        monkeypatch,
+        _container(downloaded_count=3, failed_count=2, child_count=5),
+    )
+    assert result["total"] == 5
+    assert result["succeeded"] == 3
+    assert result["failed"] == 2
+
+
+def test_executor_reports_empty_container_as_no_work(monkeypatch):
+    result = _run_executor(
+        monkeypatch,
+        _container(downloaded_count=0, failed_count=0, child_count=0),
+    )
+    assert result["total"] == 0
+    assert result["succeeded"] == 0
+    assert result["failed"] == 0
+
+
+def test_executor_counts_single_item_success(monkeypatch):
+    item = MediaItem(
+        platform=Platform.BILIBILI,
+        item_id="BV1zygDzDES2",
+        title="单个视频",
+        media_type=MediaType.VIDEO,
+        source_url="https://www.bilibili.com/video/BV1zygDzDES2",
+    )
+    result = _run_executor(monkeypatch, item)
+    assert result["total"] == 1
+    assert result["succeeded"] == 1
+    assert result["failed"] == 0
+    assert result["item_title"] == "单个视频"
+
+
+def test_executor_counts_none_as_failure(monkeypatch):
+    result = _run_executor(monkeypatch, None)
+    assert result["total"] == 1
+    assert result["succeeded"] == 0
+    assert result["failed"] == 1
+    assert result["item_title"] is None
+
+
+def test_executor_does_not_call_a_container_a_failure(monkeypatch):
+    """Degraded path: a container without recorded stats.
+
+    Can happen if a future adapter returns children without going through
+    ``_process_container``. The old code called this failed=1; the guarantee
+    now is only that it is never reported as a failure.
+    """
+    item = _container()  # children present, but no *_count keys
+    result = _run_executor(monkeypatch, item)
+    assert result["failed"] == 0
+
+
+def test_build_options_forwards_sidecar_switches(monkeypatch):
+    """The REST surface must expose the same switches as the CLI."""
+    import doubi.server.app as app_mod
+    from doubi.core.config import AppConfig
+
+    cfg = AppConfig()
+    cfg.write_nfo = True
+    cfg.write_danmaku = True
+    cfg.write_subtitles = True
+    monkeypatch.setattr(app_mod, "load_config", lambda _: cfg)
+
+    options = app_mod._build_options()
+    assert options.write_nfo is True
+    assert options.write_danmaku is True
+    assert options.write_subtitles is True
+
+
+def test_build_options_covers_every_shared_config_field(monkeypatch):
+    """Guard against the *next* added field being dropped on the REST side.
+
+    Instead of enumerating today's fields, this intersects the names that
+    ``AppConfig`` and ``DownloadOptions`` share and asserts each one actually
+    arrives. Every field is first pushed *away from its default*, because two
+    dataclasses that declare the same default make an un-forwarded field
+    compare equal — that is exactly how ``output_dir_template`` stayed
+    invisible here while a custom directory layout was being ignored.
+    """
+    import dataclasses
+
+    import doubi.server.app as app_mod
+    from doubi.core.config import AppConfig
+    from doubi.core.models import DownloadOptions
+
+    cfg_names = {f.name for f in dataclasses.fields(AppConfig)}
+    opt_names = {f.name for f in dataclasses.fields(DownloadOptions)}
+    shared = cfg_names & opt_names
+    # ``database`` is reshaped (bool -> path or None) and ``extra`` is a
+    # config-only bag, so neither is a plain hand-off.
+    shared -= {"database", "extra"}
+    assert shared, "sanity: the two dataclasses must overlap"
+
+    cfg = AppConfig()
+    for name in shared:
+        current = getattr(cfg, name)
+        if isinstance(current, bool):
+            setattr(cfg, name, not current)
+        elif isinstance(current, str):
+            setattr(cfg, name, current + "_probe")
+        elif isinstance(current, Path):
+            setattr(cfg, name, current / "probe")
+        elif current is None:
+            setattr(cfg, name, "probe")
+        else:
+            # An unhandled type would silently weaken the check.
+            pytest.fail(f"extend this test for {name}: {type(current)!r}")
+    monkeypatch.setattr(app_mod, "load_config", lambda _: cfg)
+
+    options = app_mod._build_options()
+    missing = [
+        name for name in sorted(shared)
+        if getattr(options, name) != getattr(cfg, name)
+    ]
+    assert not missing, f"_build_options drops config fields: {missing}"

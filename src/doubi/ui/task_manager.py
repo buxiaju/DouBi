@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Optional
 
@@ -49,7 +49,12 @@ class TaskInfo:
     task_id: str
     item: MediaItem
     options: DownloadOptions
-    status: str = "running"             # running | completed | failed | cancelled
+    # running | paused | completed | failed | cancelled
+    #
+    # ``paused`` is deliberately NOT terminal: a paused task keeps its
+    # slot in the active list (and its partial files on disk) so
+    # :meth:`TaskManager.resume` can pick it up again.
+    status: str = "running"
     fraction: float = 0.0
     title: str = ""
     message: str = ""
@@ -60,6 +65,40 @@ class TaskInfo:
 
     def is_terminal(self) -> bool:
         return self.status in ("completed", "failed", "cancelled")
+
+
+class _StopFlag:
+    """Cooperative stop signal for one *attempt* of one task.
+
+    A fresh instance is created per attempt (initial download, resume,
+    retry) and handed to the engine as
+    :attr:`DownloadOptions.cancel_check`. That indirection matters:
+    ``Engine.download`` runs inside ``asyncio.to_thread``, so
+    ``Task.cancel()`` cannot interrupt a transfer that is already in
+    flight — only a flag the engine polls from its progress hook can.
+
+    Binding the flag to the attempt rather than to the ``task_id`` is
+    what makes resume safe. A paused worker may still be sitting inside
+    the engine thread when :meth:`TaskManager.resume` spawns the next
+    attempt; if both attempts shared one flag, clearing it would revive
+    the old thread and leave two writers on the same ``.part`` file.
+    """
+
+    __slots__ = ("stopped", "reason")
+
+    def __init__(self) -> None:
+        self.stopped = False
+        # "paused" | "removed" — tells _run_download whether the task
+        # should keep its slot in _active or disappear entirely.
+        self.reason = ""
+
+    def stop(self, reason: str) -> None:
+        self.reason = reason
+        self.stopped = True
+
+    def __call__(self) -> bool:
+        """Probe used by the engine's progress hook."""
+        return self.stopped
 
 
 class TaskManager(QObject):
@@ -79,6 +118,12 @@ class TaskManager(QObject):
         self._completed: dict[str, TaskInfo] = {}
         self._counter = 0
         self._pending_tasks: set[asyncio.Task] = set()
+        # task_id -> the asyncio.Task of its *current* attempt. Without
+        # this map the manager cannot address one specific running
+        # download, which is what pause / resume / remove all need.
+        self._tasks: dict[str, asyncio.Task] = {}
+        # task_id -> the _StopFlag of its *current* attempt.
+        self._flags: dict[str, _StopFlag] = {}
 
     # ---- public API ---------------------------------------------------
 
@@ -103,12 +148,7 @@ class TaskManager(QObject):
         )
         self._active[task_id] = info
         self.task_added.emit(task_id)
-
-        # Spawn the actual download in the asyncio loop.
-        loop = asyncio.get_event_loop()
-        t = loop.create_task(self._run_download(task_id, item, options))
-        self._pending_tasks.add(t)
-        t.add_done_callback(self._pending_tasks.discard)
+        self._spawn(task_id, item, options)
         return task_id
 
     def active_tasks(self) -> list[TaskInfo]:
@@ -140,11 +180,63 @@ class TaskManager(QObject):
         info = self._active.pop(task_id, None)
         if info is not None:
             info.status = "cancelled"
+            # Actually stop the work instead of just dropping the record:
+            # the flag aborts a transfer already inside the engine thread,
+            # while cancel() wakes an attempt still awaiting in the loop.
+            self._stop_attempt(task_id, "removed")
             self.task_removed.emit(task_id)
             return
         info = self._completed.pop(task_id, None)
         if info is not None:
             self.task_removed.emit(task_id)
+
+    def pause(self, task_id: str) -> bool:
+        """Pause a running task, keeping it in the active list.
+
+        Returns ``True`` when a running task was actually asked to stop.
+        """
+        info = self._active.get(task_id)
+        if info is None or info.status != "running":
+            return False
+        self._stop_attempt(task_id, "paused")
+        # Flip the state synchronously. The worker only notices the flag
+        # on the engine's next progress tick, which can be seconds away
+        # on a slow chunk; leaving the row as "下载中" until then would
+        # look like the button did nothing.
+        info.status = "paused"
+        info.message = "已暂停"
+        self.task_progress.emit(task_id, info.fraction, "已暂停")
+        logger.info("TaskManager: pausing %s (%s)", task_id, info.title)
+        return True
+
+    def resume(self, task_id: str) -> bool:
+        """Resume a paused task, continuing from its partial file.
+
+        Returns ``True`` when a new attempt was started.
+        """
+        info = self._active.get(task_id)
+        if info is None or info.status != "paused":
+            return False
+        info.status = "running"
+        info.message = ""
+        self._spawn(task_id, info.item, info.options)
+        self.task_progress.emit(task_id, info.fraction, "")
+        logger.info("TaskManager: resuming %s (%s)", task_id, info.title)
+        return True
+
+    def pause_all(self) -> int:
+        """Pause every running task; returns how many were paused."""
+        return sum(1 for info in self.active_tasks() if self.pause(info.task_id))
+
+    def resume_all(self) -> int:
+        """Resume every paused task; returns how many were restarted."""
+        return sum(1 for info in self.active_tasks() if self.resume(info.task_id))
+
+    def running_count(self) -> int:
+        return sum(1 for info in self._active.values() if info.status == "running")
+
+    def paused_count(self) -> int:
+        return sum(1 for info in self._active.values() if info.status == "paused")
 
     def clear_completed(self) -> None:
         """Drop all completed/failed tasks."""
@@ -189,10 +281,7 @@ class TaskManager(QObject):
         self._active[task_id] = info
         self.task_added.emit(task_id)
 
-        loop = asyncio.get_event_loop()
-        t = loop.create_task(self._run_download(task_id, info.item, info.options))
-        self._pending_tasks.add(t)
-        t.add_done_callback(self._pending_tasks.discard)
+        self._spawn(task_id, info.item, info.options)
         logger.info("TaskManager: retrying %s (%s)", task_id, info.title)
         return True
 
@@ -206,8 +295,61 @@ class TaskManager(QObject):
 
     # ---- internals ----------------------------------------------------
 
-    async def _run_download(
+    def _spawn(
         self, task_id: str, item: MediaItem, options: DownloadOptions
+    ) -> None:
+        """Start one attempt for *task_id* and register it for control.
+
+        The options bag is copied with :func:`dataclasses.replace` so the
+        attempt gets its *own* ``cancel_check``. Writing the probe into
+        the caller's instance would be a cross-task leak: callers legally
+        share one :class:`DownloadOptions` across several :meth:`add`
+        calls, so pausing one task would pause every task sharing it.
+        """
+        flag = _StopFlag()
+        self._flags[task_id] = flag
+        attempt_options = replace(options, cancel_check=flag)
+
+        loop = asyncio.get_event_loop()
+        t = loop.create_task(
+            self._run_download(task_id, item, attempt_options, flag)
+        )
+        self._tasks[task_id] = t
+        self._pending_tasks.add(t)
+        t.add_done_callback(self._pending_tasks.discard)
+
+    def _forget(self, task_id: str, task: asyncio.Task) -> None:
+        """Drop control handles, but only if they are still this attempt's.
+
+        A late-finishing attempt must not clobber the registration of the
+        newer one that :meth:`resume` or :meth:`retry` already installed.
+        """
+        if self._tasks.get(task_id) is task:
+            self._tasks.pop(task_id, None)
+            self._flags.pop(task_id, None)
+
+    def _stop_attempt(self, task_id: str, reason: str) -> None:
+        """Stop the current attempt of *task_id* using both mechanisms.
+
+        Neither half is sufficient alone. The flag is the only thing that
+        can reach a transfer already running inside ``asyncio.to_thread``
+        (that is what P3-1's cancel probe exists for), but it is polled
+        from the engine's progress hook, so an attempt that has not
+        reached the engine yet — still resolving, or queued behind the
+        pipeline's semaphore — would never see it. ``Task.cancel()``
+        covers exactly that window. Setting the flag *first* guarantees
+        the reason is readable by whichever path unwinds.
+        """
+        flag = self._flags.get(task_id)
+        if flag is not None:
+            flag.stop(reason)
+        task = self._tasks.get(task_id)
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _run_download(
+        self, task_id: str, item: MediaItem, options: DownloadOptions,
+        flag: _StopFlag,
     ) -> None:
         """Async body that calls into the pipeline and updates state."""
         info = self._active.get(task_id)
@@ -224,11 +366,10 @@ class TaskManager(QObject):
                 item, options, on_progress=_on_progress,
             )
         except asyncio.CancelledError:
-            info.status = "cancelled"
-            self._active.pop(task_id, None)
-            self.task_failed.emit(task_id, "已取消")
+            self._finish_stopped(task_id, info, flag, default_reason="removed")
             return
         except Exception as exc:   # noqa: BLE001
+            self._forget(task_id, asyncio.current_task())
             logger.exception("TaskManager[%s] download raised", task_id)
             info.status = "failed"
             info.error = str(exc)
@@ -237,6 +378,20 @@ class TaskManager(QObject):
             self.task_failed.emit(task_id, str(exc))
             return
 
+        # A stop we requested surfaces as ``ok is False`` rather than an
+        # exception: the engine swallows its own DownloadCancelled and
+        # reports failure. Checking the flag is the only way to tell a
+        # deliberate pause apart from a genuine download error.
+        #
+        # ``not ok`` is part of the condition on purpose. A pause can land
+        # after the transfer already succeeded, and a finished file must
+        # win over a stop request that arrived too late — otherwise the
+        # task would sit "paused" forever with nothing left to download.
+        if flag.stopped and not ok:
+            self._finish_stopped(task_id, info, flag, default_reason="paused")
+            return
+
+        self._forget(task_id, asyncio.current_task())
         if ok:
             info.status = "completed"
             info.fraction = 1.0
@@ -255,3 +410,34 @@ class TaskManager(QObject):
         info = self._active.pop(task_id, None)
         if info is not None:
             self._completed[task_id] = info
+
+    def _finish_stopped(
+        self, task_id: str, info: TaskInfo, flag: _StopFlag,
+        *, default_reason: str,
+    ) -> None:
+        """Settle an attempt that we stopped on purpose.
+
+        ``paused`` keeps the task in ``_active`` (its ``.part`` files stay
+        on disk thanks to the resume-aware cleanup in the yt-dlp engine)
+        so :meth:`resume` can continue it. ``removed`` drops the task
+        outright — deliberately *not* into ``_completed``, because a
+        removed row must vanish from the UI, and ``get()`` must return
+        ``None`` for it.
+        """
+        stale = self._tasks.get(task_id) is not asyncio.current_task()
+        self._forget(task_id, asyncio.current_task())
+
+        reason = flag.reason or default_reason
+        if reason == "paused":
+            # A newer attempt already owns this task_id; do not let this
+            # dying one stamp "paused" over the fresh "running".
+            if stale:
+                return
+            info.status = "paused"
+            info.message = "已暂停"
+            self.task_progress.emit(task_id, info.fraction, "已暂停")
+            return
+
+        info.status = "cancelled"
+        self._active.pop(task_id, None)
+        self.task_failed.emit(task_id, "已取消")

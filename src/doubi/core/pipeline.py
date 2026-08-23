@@ -40,6 +40,10 @@ def _import_manifest():
     from .storage.manifest import ManifestWriter
     return ManifestWriter
 
+def _import_nfo():
+    from .storage.nfo import write_nfo
+    return write_nfo
+
 logger = logging.getLogger("doubi.core.pipeline")
 
 
@@ -217,14 +221,17 @@ class DownloadPipeline:
         results = await asyncio.gather(*[_one(it) for it in items], return_exceptions=True)
 
         job.finished_at = datetime.now()
-        any_ok = any(r is True for r in results)
-        any_bad = any(r is False or isinstance(r, Exception) for r in results)
-        if any_bad and not any_ok:
+        # Count once and derive both the tallies and the status from the
+        # same numbers. Previously the status was computed from ad-hoc
+        # any()/any() scans while the counts stayed at their placeholder
+        # values, so callers had no way to learn what actually happened.
+        job.succeeded = sum(1 for r in results if r is True)
+        job.failed = len(results) - job.succeeded
+        if job.failed and not job.succeeded:
             job.status = "failed"
-        elif any_bad:
-            job.status = "completed"  # partial success
         else:
-            job.status = "completed"
+            job.status = "completed"  # includes partial success
+        job.progress = 1.0
         return job
 
     # ---- internals ----------------------------------------------------
@@ -256,6 +263,9 @@ class DownloadPipeline:
 
         if not children:
             logger.warning("[%s] container %s expanded to 0 items", job_id[:8], container.source_url)
+            container.extra["downloaded_count"] = 0
+            container.extra["failed_count"] = 0
+            container.extra["child_count"] = 0
             self._emit(on_progress, ProgressEvent(
                 job_id=job_id, item=container, phase="done",
                 fraction=1.0, message="Container expanded to 0 items",
@@ -267,9 +277,18 @@ class DownloadPipeline:
             fraction=1.0, message=f"Expanded to {len(children)} items",
         ))
 
-        # Recurse: treat children as a fresh batch
-        await self.process_batch(children, options, on_progress=on_progress)
-        container.extra["downloaded_count"] = len(children)
+        # Recurse: treat children as a fresh batch.
+        #
+        # The job that comes back carries the only trustworthy account of
+        # what happened to the children, so it must not be discarded:
+        # ``downloaded_count`` used to be ``len(children)``, i.e. the number
+        # of items *attempted*, which reported a fully failed playlist as a
+        # complete success. Callers (REST executor, CLI summary) read these
+        # keys to build their own totals.
+        child_job = await self.process_batch(children, options, on_progress=on_progress)
+        container.extra["downloaded_count"] = child_job.succeeded
+        container.extra["failed_count"] = child_job.failed
+        container.extra["child_count"] = len(children)
         return container
 
     async def _download_with_progress(
@@ -336,6 +355,7 @@ class DownloadPipeline:
 
         # M4: post-download persistence
         if ok:
+            await self._run_post_download(item, options, job_id, on_progress)
             await self._record_success(item, options, job_id)
 
         self._emit(on_progress, ProgressEvent(
@@ -345,6 +365,78 @@ class DownloadPipeline:
             message="ok" if ok else "engine returned False",
         ))
         return ok
+
+    async def _run_post_download(
+        self, item: MediaItem, options: DownloadOptions, job_id: str, on_progress
+    ) -> None:
+        """Produce the opt-in sidecars the engine cannot produce itself.
+
+        Two kinds, both gated on their ``DownloadOptions`` switch:
+
+        * **NFO** — platform-agnostic, generated from the MediaItem
+          because yt-dlp has no NFO writer (``writeinfojson`` emits
+          yt-dlp's own schema, which media libraries cannot read).
+        * **Platform post-processing** — delegated to the adapter via
+          the optional :meth:`PlatformAdapter.post_download` hook. B 站
+          danmaku lives there because it needs a ``cid`` and a signed
+          API call that only the adapter knows how to make.
+
+        Sidecars are best-effort by design: the media file is already on
+        disk, so a metadata failure must never turn a successful
+        download into a failed one. Every branch therefore swallows its
+        exception and only logs.
+        """
+        basename = item.output_template
+        if options.write_nfo and basename:
+            try:
+                resolve_item_dir, _ = _import_file_layout()
+                write_nfo = _import_nfo()
+                path = write_nfo(item, resolve_item_dir(item, options), basename)
+                if path is not None:
+                    logger.debug("[%s] wrote NFO %s", job_id[:8], path.name)
+            except Exception as exc:   # noqa: BLE001
+                logger.warning("[%s] NFO generation failed: %s", job_id[:8], exc)
+
+        # Platform-specific post-processing (danmaku, transcripts, ...).
+        # PlatformRegistry.get() keys on the Platform enum, not its value.
+        try:
+            adapter = PlatformRegistry.get(item.platform)
+        except Exception:   # noqa: BLE001
+            adapter = None
+        if adapter is None:
+            return
+        hook = getattr(adapter, "post_download", None)
+        if hook is None:
+            return
+        # The base class defines a no-op post_download, so calling it
+        # unconditionally would emit a misleading "postprocess" event on
+        # every single download. Only adapters that actually override it
+        # have work to do.
+        if not self._overrides_post_download(adapter):
+            return
+        self._emit(on_progress, ProgressEvent(
+            job_id=job_id, item=item, phase="postprocess",
+            fraction=1.0, message="post-processing",
+        ))
+        try:
+            await hook(item, options)
+        except Exception as exc:   # noqa: BLE001
+            logger.warning("[%s] post_download hook failed: %s", job_id[:8], exc)
+
+    @staticmethod
+    def _overrides_post_download(adapter: Any) -> bool:
+        """True if ``adapter`` supplies its own ``post_download``.
+
+        Compares the bound method's underlying function against the base
+        class's, which is import-free and works for subclasses, mocks
+        and monkeypatched instances alike.
+        """
+        try:
+            from ..platforms.base import PlatformAdapter
+        except Exception:   # noqa: BLE001
+            return True     # cannot prove it's the default; let it run
+        own = getattr(type(adapter), "post_download", None)
+        return own is not None and own is not PlatformAdapter.post_download
 
     async def _record_success(
         self, item: MediaItem, options: DownloadOptions, job_id: str

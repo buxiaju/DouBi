@@ -12,6 +12,17 @@ Engine contract (M2):
       ``cookies_file``) to the corresponding yt-dlp options.
     * Emits :class:`EngineProgress` events at most every ~0.5% to
       keep progress bars smooth without spam.
+
+Resume & cancellation (P3-1):
+    * ``options.resume`` maps to yt-dlp's ``continuedl`` and also
+      protects ``.part`` / ``.ytdl`` files from the intermediate
+      cleanup, since deleting them is what defeats a resume.
+    * ``options.cancel_check`` is a cooperative abort probe polled from
+      the progress hook. The download body runs in a worker thread via
+      ``asyncio.to_thread``, so ``asyncio.Task.cancel()`` cannot
+      interrupt it — the probe is the only way to stop a transfer in
+      flight. A cancelled download returns ``False`` and leaves its
+      ``.part`` file in place so it can be resumed later.
 """
 
 from __future__ import annotations
@@ -37,6 +48,15 @@ logger = logging.getLogger("doubi.engines.yt_dlp")
 #: nothing". It keeps the multi-part (分P) files of a single Bilibili
 #: video apart while leaving plain single-video filenames untouched.
 PART_INDEX_SUFFIX = "%(playlist_index&_P{:03d}|)s"
+
+
+class _LocalDownloadCancelled(Exception):
+    """Fallback abort signal when ``yt_dlp.utils.DownloadCancelled`` is absent.
+
+    Only used when the injected yt-dlp module does not expose the real
+    class (e.g. a test double). See
+    :meth:`YtDlpEngine._cancelled_exception`.
+    """
 
 
 def _try_import_yt_dlp() -> Any:
@@ -142,6 +162,11 @@ class YtDlpEngine(Engine):
             "retries": 3,
             "fragment_retries": 3,
             "concurrent_fragment_downloads": max(1, options.concurrent_fragments),
+            # Resume an interrupted transfer from the existing ``.part``
+            # file instead of re-downloading from byte 0. yt-dlp's own
+            # default is True, but we set it explicitly so the behaviour
+            # is contractual rather than inherited.
+            "continuedl": options.resume,
         }
         # Point yt-dlp at an ffmpeg binary (PATH or the bundled static
         # one from imageio-ffmpeg) so bestvideo+bestaudio merging works
@@ -149,6 +174,17 @@ class YtDlpEngine(Engine):
         ffmpeg_loc = self._resolve_ffmpeg_location()
         if ffmpeg_loc:
             opts["ffmpeg_location"] = ffmpeg_loc
+        # Subtitles are a pure yt-dlp passthrough: the extractor knows
+        # which tracks a site offers. ``writeautomaticsub`` is included
+        # because most 抖音 / B 站 videos only carry auto-generated
+        # (AI 字幕) tracks, and requesting only manual ones would make
+        # the switch silently produce nothing. ``subtitlesformat``
+        # prefers srt and falls back to whatever the site has.
+        if options.write_subtitles:
+            opts["writesubtitles"] = True
+            opts["writeautomaticsub"] = True
+            opts["subtitleslangs"] = ["all"]
+            opts["subtitlesformat"] = "srt/best"
         if options.cookies_file:
             opts["cookiefile"] = str(options.cookies_file)
         if options.proxy:
@@ -192,8 +228,18 @@ class YtDlpEngine(Engine):
         or retried run, and the playlist-level ``*.info.json`` it writes for
         B 站 multi-P videos is never cleaned up. Sidecars the user opted
         into (``write_thumbnail`` / ``write_metadata_json``) are preserved.
+
+        **Resume interaction (P3-1)**: a ``.part`` file *is* the resume
+        state, so deleting it makes ``continuedl`` a no-op on the next
+        attempt. When ``options.resume`` is on we therefore keep
+        ``.part`` / ``.ytdl``. This also removes a latent concurrency
+        hazard: the default ``output_dir_template``
+        (``{platform}/{author}/{media_type}``) puts every video by one
+        author in a *shared* directory, so an unconditional sweep here
+        could delete the in-flight ``.part`` of a sibling item still
+        being downloaded by another worker.
         """
-        drop_suffixes = {".part", ".ytdl", ".temp"}
+        drop_suffixes = {".temp"} if options.resume else {".part", ".ytdl", ".temp"}
         try:
             item_dir = resolve_item_dir(item, options)
         except Exception:   # noqa: BLE001
@@ -214,6 +260,26 @@ class YtDlpEngine(Engine):
                 path.unlink()
             except OSError:
                 logger.debug("could not remove intermediate %s", name, exc_info=True)
+
+    def _cancelled_exception(self) -> type[BaseException]:
+        """Return the exception class used to abort a yt-dlp transfer.
+
+        ``yt_dlp.utils.DownloadCancelled`` is the sanctioned mechanism:
+        ``YoutubeDL.download()`` runs inside ``__download_wrapper``, which
+        re-raises it unless ``break_per_url`` is set (off by default), so
+        raising it from a progress hook cleanly unwinds out of
+        ``ydl.download([url])``.
+
+        The lookup is defensive because ``self.ytdlp`` is injectable — tests
+        pass a ``MagicMock`` module, whose attribute access yields a Mock
+        that is neither raisable nor catchable. Anything that is not a real
+        exception class falls back to a private local class, which keeps the
+        ``raise`` / ``except`` pair coherent under a fake module.
+        """
+        exc = getattr(getattr(self.ytdlp, "utils", None), "DownloadCancelled", None)
+        if isinstance(exc, type) and issubclass(exc, BaseException):
+            return exc
+        return _LocalDownloadCancelled
 
     def _download_sync(
         self,
@@ -241,7 +307,7 @@ class YtDlpEngine(Engine):
         if on_progress is not None:
             last_fraction = {"v": -1.0}
 
-            def _hook(d: dict) -> None:
+            def _emit_progress(d: dict) -> None:
                 status = d.get("status")
                 if status == "downloading":
                     total = d.get("total_bytes") or d.get("total_bytes_estimate")
@@ -271,14 +337,43 @@ class YtDlpEngine(Engine):
                     on_progress(EngineProgress(
                         fraction=0.0, message="yt-dlp reported error",
                     ))
+        else:
+            def _emit_progress(d: dict) -> None:
+                return None
 
-            opts["progress_hooks"] = [_hook]
+        cancel_check = options.cancel_check
+        cancelled_exc = self._cancelled_exception()
+
+        def _hook(d: dict) -> None:
+            # Cancellation is checked *before* reporting progress so an
+            # abort is not preceded by a misleading progress event. The
+            # hook is installed unconditionally (even without
+            # ``on_progress``) because it is the only place we get
+            # control back from yt-dlp mid-transfer.
+            if cancel_check is not None and cancel_check():
+                raise cancelled_exc("cancelled by caller")
+            _emit_progress(d)
+
+        opts["progress_hooks"] = [_hook]
 
         try:
             with self.ytdlp.YoutubeDL(opts) as ydl:
                 ydl.download([item.source_url])
             self._cleanup_intermediates(item, options)
             return True
+        except cancelled_exc as exc:
+            # Must be caught *before* the blanket handler below:
+            # DownloadCancelled subclasses Exception, so it would
+            # otherwise be logged and reported as a genuine failure.
+            # Intermediates are deliberately NOT cleaned up here — the
+            # ``.part`` file is what makes resuming possible.
+            logger.info("yt-dlp cancelled for %s: %s", item.source_url, exc)
+            if on_progress is not None:
+                on_progress(EngineProgress(
+                    fraction=0.0, message="cancelled",
+                    extra={"cancelled": True},
+                ))
+            return False
         except Exception as exc:
             logger.exception("yt-dlp failed for %s: %s", item.source_url, exc)
             if on_progress is not None:

@@ -169,6 +169,21 @@ class DownloadOptions:
     cookies_file: Optional[Path] = None
     user_agent: Optional[str] = None
 
+    #: Resume partially downloaded files instead of restarting them
+    #: (yt-dlp ``continuedl``). Also keeps ``.part`` / ``.ytdl``
+    #: stragglers out of the intermediate cleanup, since deleting them
+    #: is exactly what makes a resume impossible.
+    resume: bool = True
+    #: Cooperative cancellation probe. Called periodically from the
+    #: engine's download loop; returning ``True`` aborts the transfer.
+    #:
+    #: This rides on the options bag rather than on
+    #: :meth:`doubi.engines.base.Engine.download`'s signature on
+    #: purpose — the engine runs in a worker thread (``asyncio.to_thread``),
+    #: so ``Task.cancel()`` can never interrupt it, and widening the ABC
+    #: signature would break every existing engine implementation.
+    cancel_check: Optional[Callable[[], bool]] = None
+
     #: SQLite database path. Set to ``None`` to disable DB-based dedup.
     database: Optional[Path] = None
     #: Path to the JSONL manifest (relative or absolute). Set to ``None`` to skip.
@@ -196,11 +211,22 @@ class DownloadJob:
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
 
+    # Real outcome tallies, filled in by DownloadPipeline.process_batch.
+    # They start at 0 and only ever describe items that actually finished,
+    # so a still-running job reports 0/0 rather than an optimistic guess.
+    succeeded: int = 0
+    failed: int = 0
+
+    def total_count(self) -> int:
+        return len(self.items)
+
     def completed_count(self) -> int:
-        return sum(1 for _ in self.items)  # placeholder, populated by manager
+        """Items that finished successfully (a DB-dedup skip counts as one)."""
+        return self.succeeded
 
     def failed_count(self) -> int:
-        return 0
+        """Items whose download returned False or raised."""
+        return self.failed
 
 
 # ---------------------------------------------------------------------------

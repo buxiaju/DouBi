@@ -82,6 +82,84 @@ def test_classify_login_required_returns_none_for_douyin(qapp):
     ) is None
 
 
+def test_build_options_forwards_sidecar_switches_and_resume(qapp):
+    """The GUI must honour the same switches as the CLI and REST surfaces.
+
+    The engine reads these off ``DownloadOptions``, never off ``AppConfig``,
+    so a field that ``_build_options`` forgets is a switch that silently does
+    nothing in the GUI — which is exactly how ``write_nfo`` / ``write_danmaku``
+    / ``write_subtitles`` / ``resume`` were dead here at first.
+    """
+    from doubi.core.config import AppConfig
+
+    page = _make_page(qapp)
+    cfg = AppConfig()
+    cfg.write_nfo = True
+    cfg.write_danmaku = True
+    cfg.write_subtitles = True
+    cfg.resume = False
+    page._cfg = cfg
+
+    options = page._build_options()
+    assert options.write_nfo is True
+    assert options.write_danmaku is True
+    assert options.write_subtitles is True
+    assert options.resume is False
+
+
+def test_build_options_covers_every_shared_config_field(qapp):
+    """Guard against the *next* added field being forgotten here.
+
+    Rather than listing today's fields, this compares the names that
+    ``AppConfig`` and ``DownloadOptions`` have in common and asserts the GUI
+    actually propagates each one. Adding a switch to both dataclasses without
+    wiring the GUI will fail this test instead of shipping a dead control.
+
+    Every field is first set to a value *away from its default*: a pristine
+    ``AppConfig()`` would compare equal to an un-forwarded option simply
+    because both dataclasses declare the same default, which is how this
+    check would quietly pass while ``resume`` was in fact dropped (verified
+    by removing the line and watching this test go red).
+    """
+    import dataclasses
+
+    from doubi.core.config import AppConfig
+    from doubi.core.models import DownloadOptions
+
+    cfg_names = {f.name for f in dataclasses.fields(AppConfig)}
+    opt_names = {f.name for f in dataclasses.fields(DownloadOptions)}
+    shared = cfg_names & opt_names
+    # ``database`` is intentionally reshaped (bool -> path or None) and
+    # ``extra`` is a config-only bag, so neither is a plain hand-off.
+    shared -= {"database", "extra"}
+    assert shared, "sanity: the two dataclasses must overlap"
+
+    cfg = AppConfig()
+    for name in shared:
+        current = getattr(cfg, name)
+        if isinstance(current, bool):
+            setattr(cfg, name, not current)
+        elif isinstance(current, str):
+            setattr(cfg, name, current + "_probe")
+        elif isinstance(current, Path):
+            setattr(cfg, name, current / "probe")
+        elif current is None:
+            setattr(cfg, name, "probe")
+        else:
+            # An unhandled type would silently weaken the check.
+            pytest.fail(f"extend this test for {name}: {type(current)!r}")
+
+    page = _make_page(qapp)
+    page._cfg = cfg
+    options = page._build_options()
+
+    missing = [
+        name for name in sorted(shared)
+        if getattr(options, name) != getattr(cfg, name)
+    ]
+    assert not missing, f"_build_options drops config fields: {missing}"
+
+
 def test_classify_login_required_returns_none_for_single_video(qapp):
     page = _make_page(qapp)
     assert page._classify_login_required(
