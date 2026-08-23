@@ -267,4 +267,11 @@ def douyin_save_cookies(cookies: list[dict], dst: Optional[Path] = None) -> tupl
     info = dy_auth.login_info_from_cookies_sync(target)
     if info.is_logged_in:
         return True, f"已登录为 uid={info.uid} {info.name!r}"
+    # The online validator calls a risk-controlled endpoint that often
+    # rejects plain httpx requests. But if we harvested a login-state
+    # cookie (sessionid family), the login itself *did* succeed —
+    # don't report failure just because the probe was blocked.
+    names = {c.get("name") for c in cookies}
+    if names & {"sessionid", "sessionid_ss", "sid_guard"}:
+        return True, "登录成功，Cookie 已保存（在线校验被风控拦截，不影响下载）"
     return False, "Cookie 已保存但抖音仍报未登录"

@@ -44,6 +44,33 @@ def _import_nfo():
     from .storage.nfo import write_nfo
     return write_nfo
 
+def _resolve_platform_cookie_file(platform: Platform) -> Optional[Any]:
+    """Best-effort lookup of the platform's persisted cookie file.
+
+    yt-dlp's Douyin / Bilibili extractors refuse to run (or return
+    garbage) without cookies, but ``DownloadOptions.cookies_file`` is
+    only set by callers that explicitly pass one — every entry point
+    (GUI / CLI / REST / MCP) currently builds the options bag without
+    it. Resolving per-item here, right before the engine call, means
+    the login the user did in the UI actually reaches yt-dlp without
+    each surface having to know about ``~/.doubi/cookies``.
+
+    Returns the path (as Path) or ``None``; never raises.
+    """
+    try:
+        from importlib import import_module
+        mod = import_module(f"doubi.platforms.{platform.value}.auth")
+        loader = getattr(mod, "load_cookie_file", None)
+        if loader is None:
+            return None
+        loaded = loader()
+        if not loaded:
+            return None
+        from pathlib import Path
+        return Path(loaded)
+    except Exception:
+        return None
+
 logger = logging.getLogger("doubi.core.pipeline")
 
 
@@ -113,7 +140,7 @@ class DownloadPipeline:
             ))
             return None
 
-        if item.is_container() or item.media_type is MediaType.USER:
+        if item.is_container() or item.media_type in (MediaType.USER, MediaType.MIX):
             return await self._process_container(
                 item, options, on_progress, job_id,
                 strategy=container_strategy, max_count=container_max,
@@ -145,7 +172,7 @@ class DownloadPipeline:
         # through. Fail loudly and clearly instead of silently handing
         # the engine an un-dereferenceable playlist URL (which used to
         # surface as the vague "engine returned False").
-        if item.is_container() or item.media_type is MediaType.USER:
+        if item.is_container() or item.media_type in (MediaType.USER, MediaType.MIX):
             msg = (
                 f"Refusing to download container item "
                 f"(media_type={item.media_type!r}, "
@@ -188,7 +215,7 @@ class DownloadPipeline:
         if item is None:
             return None, []
 
-        if item.is_container() or item.media_type is MediaType.USER:
+        if item.is_container() or item.media_type in (MediaType.USER, MediaType.MIX):
             adapter = PlatformRegistry.get(item.platform)
             expand = getattr(adapter, "expand", None)
             if callable(expand):
@@ -333,10 +360,24 @@ class DownloadPipeline:
             fraction=0.0, message=f"Starting {item.source_url}",
         ))
 
+        # Per-item cookie injection: if the caller did not pin a cookie
+        # file explicitly, attach the one persisted by the platform's
+        # login flow (see _resolve_platform_cookie_file). Applies only
+        # to the engine call — everything downstream of the download
+        # (DB / manifest / NFO) does not care about cookies.
+        engine_options = options
+        if options.cookies_file is None:
+            cookie_file = _resolve_platform_cookie_file(item.platform)
+            if cookie_file is not None:
+                from dataclasses import replace as _dc_replace
+                engine_options = _dc_replace(options, cookies_file=cookie_file)
+                logger.debug("[%s] using %s cookies: %s",
+                             job_id[:8], item.platform.value, cookie_file)
+
         async with self._sem:
             try:
                 ok = await self.engine.download(
-                    item, options,
+                    item, engine_options,
                     on_progress=(
                         lambda ev: on_progress(ProgressEvent(
                             job_id=job_id, item=item,

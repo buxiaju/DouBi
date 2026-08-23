@@ -1,7 +1,7 @@
 # DouBi 开发文档（面向 AI / 开发者）
 
 > 目标：任何有能力的 AI 或开发者读完本文档，就能安全地修改、扩展、维护 DouBi，而不需要重新逆向整个项目。
-> 版本对应：M0–M6.3（2026-08-23 快照）。配套文档：`docs/ARCHITECTURE.md`（分层图）、`docs/QUICKSTART.md`（用户操作）、`docs/CHANGELOG.md`（变更史）、`INTEGRATION_PLAN.md`（整合原始方案）。
+> 版本对应：M0–M6.6（2026-08-23 快照）。配套文档：`docs/ARCHITECTURE.md`（分层图）、`docs/QUICKSTART.md`（用户操作）、`docs/CHANGELOG.md`（变更史）、`docs/ICONS.md`（图标管线）、`docs/BUILD.md`（打包）、`INTEGRATION_PLAN.md`（整合原始方案）。
 
 ---
 
@@ -20,11 +20,33 @@
 11. [登录体系](#11-登录体系)
 12. [四端入口（CLI / GUI / REST / MCP）](#12-四端入口)
 13. [GUI 内部结构](#13-gui-内部结构)
-14. [B 站风控专题（最重要的实战知识）](#14-b-站风控专题)
+14. [平台风控专题（B 站 + 抖音，最重要的实战知识）](#14-平台风控专题b-站--抖音最重要的实战知识)
 15. [测试体系](#15-测试体系)
 16. [代码约定与常见坑](#16-代码约定与常见坑)
 17. [如何安全地修改项目（改动检查单）](#17-如何安全地修改项目)
 18. [已知限制与路线图](#18-已知限制与路线图)
+19. [§13 节内子目录](#13-节内子目录)
+
+### §13 节内子目录
+
+- **§13.1** 页面与导航
+- **§13.2** TaskManager
+- **§13.3** 关键交互流程（结果表行模型 / 稳定键 / 交错布局陷阱 / 行身份判据）
+- **§13.4** 主题系统
+  - §13.4.1 数据结构（主题包）
+  - §13.4.2 五层失效点
+  - §13.4.3 公开 API
+  - §13.4.4 接线与启动优先级
+  - §13.4.5 新增一套主题要动哪里
+  - §13.4.6 排版 / 间距 / 圆角 常量与辅助 QSS
+  - §13.4.7 共享组件
+- **§13.5** 图标管线（`ui/resources/`）
+  - §13.5.1 三个文件，三种用途
+  - §13.5.2 资源模块 API
+  - §13.5.3 主窗口图标全链路
+  - §13.5.4 模板回归守卫
+- **§13.6** 打包成 Windows .exe
+- **§13.7** GUI 测试要点
 
 ---
 
@@ -55,7 +77,7 @@ DouBi 是一个**多形态统一的多平台视频/媒体下载器**：同一个
 ## 2. 技术栈与运行要求
 
 - Python ≥ 3.10（开发环境 3.13.15）
-- 核心依赖：`yt-dlp`、`aiohttp`、`httpx`、`rich`、`pyyaml`、`python-dateutil`、`aiosqlite`、`qrcode`
+- 核心依赖：`yt-dlp`、`aiohttp`、`httpx`、`rich`、`pyyaml`、`python-dateutil`、`aiosqlite`、`qrcode`、`gmssl`（sm3，抖音 a_bogus 签名用——在 adapter→webapi→sign 的 **import 链顶层**，缺失则整个程序起不来，2026-08 起为硬依赖）
 - GUI 额外：`PySide6`、`PySide6-Fluent-Widgets[full]`、`qasync`、`psutil`、`playwright`
 - REST 额外：`fastapi`、`uvicorn`、`pydantic`
 - 开发：`pytest` + `pytest-asyncio` + `ruff`
@@ -106,10 +128,16 @@ DouBi/
 │       ├── theme.py               #   主题包 / token 表 / set_theme（见 §13.4）
 │       ├── pages/                 #   parse / download / history / settings
 │       └── dialogs/               #   login_dialog.py
-└── tests/                         # 19 个测试文件（见 §15）
+└── tests/                         # 20 个测试文件（见 §15）
 ```
 
-**统计**：62 个 .py 文件，约 12,100 行；385 个测试收集，381 passed / 4 skipped。
+**统计**（截至 0.1.0 / M6.8）：`src/` 70 个 .py 文件，约 15,200 行；
+`pytest --collect-only -q` 收集 **454** 个用例。
+数字会随开发漂移，改动较大时自己重取：
+
+```bash
+python -m pytest --collect-only -q | Select-Object -Last 1
+```
 
 ---
 
@@ -184,7 +212,7 @@ URL
      ├─ 单条 → MediaItem(media_type=VIDEO/IMAGE_ALBUM/...)
      └─ 容器 → MediaItem(media_type=USER/FAVLIST/MIX, children=[])
  → DownloadPipeline.process_url(url, options):
-     ├─ item.is_container() or item.media_type is USER?
+     ├─ item.is_container() or media_type ∈ {USER, MIX}?
      │    → adapter.expand(item, strategy)   # 展开成 children
      │    → process_batch(children)          # 递归下载每个子项
      └─ 单条:
@@ -240,15 +268,26 @@ class PlatformAdapter(ABC):
 |---|---|
 | `url.py` | `DouyinURLType` + `classify_douyin_url()`（video/note/gallery/collection/mix/music/live/short/user） |
 | `api.py` | `DouyinAPI`：异步包装 yt-dlp 提取元数据 + `to_media_item()`/`flat_to_media_item()` 转换 |
-| `auth.py` | Cookie 文件管理（Netscape/JSON/legacy）、`validate_cookies()`（调 user/info/self） |
-| `adapter.py` | `DouyinAdapter`：URL 匹配、parse、expand（post/like 策略）、短链解析 |
-| `strategies.py` | `PostStrategy`（用户主页作品）/ `LikeStrategy`（点赞列表），走 yt-dlp flat 展开 |
+| `webapi.py` | ★ M6.7：**签名 Web API 客户端**（httpx + a_bogus）。合集/用户作品分页枚举、视频详情反查合集、`aweme_to_media_item()` 归一化。见 §14.6 |
+| `sign/` | a_bogus / x_bogus 签名算法（移植自 douyin-downloader-main，MIT；abogus.py 依赖 `gmssl` 的 sm3） |
+| `auth.py` | Cookie 文件管理（Netscape/JSON/legacy）、`validate_cookies()`（API 失败时降级为 session cookie 存在性判定） |
+| `adapter.py` | `DouyinAdapter`：URL 匹配、parse、expand（post/like 策略 + MIX 合集分支）、`collection_of()` 反查、短链解析、modal_id → canonical 重写 |
+| `strategies.py` | `PostStrategy`（用户主页作品）/ `LikeStrategy`（点赞列表）。M6.7 起 PostStrategy 优先走 `webapi.iter_user_posts`（yt-dlp flat 路径已静默失效，保留兜底） |
 | `live.py` | `LiveRecorder`：抖音直播录制（max_duration、room.json sidecar） |
 
 URL 分类示例：
 - `https://www.douyin.com/video/{aweme_id}` → VIDEO
 - `https://www.douyin.com/user/{sec_uid}` → USER（容器）
+- `https://www.douyin.com/collection/{mix_id}`、`https://www.iesdouyin.com/share/mix/detail/{mix_id}/` → COLLECTION（合集容器，M6.7）
+- `https://www.douyin.com/jingxuan?modal_id={aweme_id}`、`/user/{sec_uid}?...&modal_id={id}&vid={id}` → VIDEO（**modal_id / vid 就是 aweme_id**；这两条规则必须排在 USER 之前，否则用户页带 modal_id 的单视频链接会触发整个主页的容器展开）
 - `https://v.douyin.com/xxx` → SHORT（先解析重定向再分类）
+
+**抖音合集解析**（M6.7）：`parse()` 把 COLLECTION/MIX 路由到 `_parse_collection(mix_id)`，
+返回 `MediaType.MIX` 壳（children 空、`extra={"mix_id": ...}`）；标题 best-effort——从
+`get_mix_aweme` 第一页 items 的 `mix_info.mix_name` 探测（`/mix/detail/` 端点本身被风控 403，
+不可用），失败则退化为 `抖音合集 {mix_id}`。`expand()` 的 MIX 分支走
+`webapi.iter_mix_awemes` 分页枚举。`collection_of(aweme_id)` 供 GUI「右键 → 下载整个合集」
+反查：调 `get_video_detail` 取 `mix_info.mix_id` 再返回合集容器。
 
 ### 6.3 B 站适配器（`platforms/bilibili/`）
 
@@ -358,9 +397,13 @@ class DownloadPipeline:
 
 pipeline 判断"这是不是容器"用两种方式：
 - `item.is_container()`（`children` 非空）——但 parse 完时容器 children 是空的
-- `item.media_type is MediaType.USER`
+- `item.media_type is MediaType.USER or item.media_type is MediaType.MIX`（M6.7 起含 MIX）
 
-所以**容器解析逻辑**：B 站适配器在 `parse()` 里就根据 `_CONTAINER_TYPES` 把容器 URL 变成 `MediaType.USER/FAVLIST/MIX` 的壳 item，pipeline 看到这个 media_type 就去调 `adapter.expand()`。**改容器相关逻辑时要同时看 adapter.py 和 pipeline.py**。
+所以**容器解析逻辑**：适配器在 `parse()` 里把容器 URL 变成 `MediaType.USER/FAVLIST/MIX`
+的壳 item（children 空），pipeline 看到这些 media_type 就去调 `adapter.expand()`。
+判定出现在**三个地方**（`run()` / `download_item()` 的容器拒绝守卫 / `parse_and_expand()`），
+改容器判定必须三处同步——漏一处会出现「能解析出 children 但下载时被拒绝」或反之。
+**改容器相关逻辑时要同时看 adapter.py 和 pipeline.py**。
 
 ---
 
@@ -551,6 +594,7 @@ increment_checkpoint  (platform, user_id, mode) 主键 · last_item_id/last_chec
 | --- | --- | --- |
 | `展开分类` / `折叠分类` | `is_top_row`（**行身份**判据，见下文陷阱）且 `_from_ugc_season_section`；按 `top_item.children` 是否非空切换文案 | `_expand_section_row` / `_collapse_section` |
 | `展开分P` / `折叠分P` | `_episode_key_for_row(row) is not None` 且 `_from_ugc_season`；按 key 是否在 `_expanded_episode_rows` 里切换文案 | `_expand_episode_row` / `_collapse_episode` |
+| `下载整个合集` | 抖音 VIDEO 行（M6.7）：右键合集内任意一条视频反查并展开整个合集 | `_download_whole_collection`：`adapter.collection_of(item_id)` → `adapter.expand(container)` → `_fill_result_table(children)` |
 | `解析此项` / `在浏览器中打开` / `作为单个视频下载` / `查看元数据` / `查看封面` | 所有行 | 各自 handler；作用对象是 `episode_item or top_item` |
 
   容器项的「作为单个视频下载」会被 disabled 并改文案「（不可用，先展开）」。
@@ -664,27 +708,41 @@ class ThemePack:
     tokens: dict[str, Any]
 ```
 
-6 套内置主题（`THEMES` 的键序 = 界面展示序 = 导航栏按钮的循环序）：
+7 套内置主题（`THEMES` 的键序 = 界面展示序 = 导航栏按钮的循环序）：
 
 | key | label | dark | accent | bg_base | bg_layer |
 |---|---|---|---|---|---|
 | `default_light` | 默认亮 | ✗ | `#0078d4` | `#f3f3f3` | `#ffffff` |
 | `default_dark` | 默认暗 | ✓ | `#4cc2ff` | `#202020` | `#2b2b2b` |
+| `doubi` | 豆比紫 | ✓ | `#f59e6a` | `#1a1230` | `#251a3d` |
 | `deep_sea` | 深海 | ✓ | `#2dd4bf` | `#0f1c24` | `#162b36` |
 | `morandi` | 莫兰迪 | ✗ | `#8c7b6b` | `#eceae5` | `#f7f5f1` |
 | `eye_care` | 护眼 | ✗ | `#3f7d58` | `#f5f1e8` | `#fbf8f1` |
 | `high_contrast` | 高对比 | ✓ | `#ffd60a` | `#000000` | `#0d0d0d` |
 
+**`doubi` 是品牌主题**——配色从 `resources/icon.svg` 反推，深紫底 + 琥珀橙
+主色与图标本身是同一色系。注意它**不是**通过 `accent` 二次推导回来的：`icon_palette("doubi")`
+直接返回 `BRAND_PALETTE`，否则用主色 `#f59e6a` 反推会让图标偏色，丢原图的味道。
+详情见 §13.6。
+
 token 键位（`_light_tokens()` / `_dark_tokens()` 是公共骨架，各主题只需给 5 个背景/文字值，语义色按需覆写）：
 
 | 组 | 键 | 用途 |
 |---|---|---|
-| 背景 | `bg_base` / `bg_layer` / `bg_hover` | 窗口底 / 卡片与输入框 / 悬停 |
+| 背景 | `bg_base` / `bg_layer` / `bg_hover` / `bg_elevated` | 窗口底 / 卡片 / 悬停 / 浮起态 |
 | 文字 | `text_primary` / `text_muted` | 正文 / 次级说明（走 `muted_qss()`） |
+| 强调 | `accent` / `accent_soft` / `accent_strong` | 主色 / 浅底（hover/选中态） / 深色（pressed） |
 | 表格 | `row_odd` / `row_even` | 交替行，用 `rgba` 以便叠在任何底色上 |
 | 状态 | `status_{running,paused,completed,failed,cancelled}_{fg,bg}` | 任务状态徽标 |
 | 进度 | `progress_{normal,success,error,paused}` | 自绘进度条 |
-| 尺寸 | `radius` / `row_height` | 圆角 / 行高 |
+| 尺寸 | `radius` / `radius_card` / `radius_pill` / `row_height` | 圆角 / 行高 |
+| 阴影 | `shadow_sm` / `shadow_md` / `shadow_lg` | 卡片 / 浮层 / 弹窗 |
+| 装饰 | `gradient_header` | `header_qss()` 用的 hero 渐变，None 时退纯色 |
+
+**M6.4 补全的字段**：`accent_soft` / `accent_strong` / `bg_elevated` / `radius_card` /
+`radius_pill` / `shadow_*` / `gradient_header` 之前在 `ThemePack` dataclass 里没声明，
+取色代码会 AttributeError。**所有 7 套主题的这些字段都必须存在**——`test_every_theme_has_full_token_set`
+守着这条，新主题漏字段当场红测。
 
 **语义色必须随明度重算，不能跨明度复用**：`#c02b2b` 这类暗红在深色底上几乎不可读，所以暗色骨架统一提亮到 `#ff6b6b` 一档。
 
@@ -748,7 +806,246 @@ _notify()                         # 通知订阅者刷新把颜色烘进 stylesh
 
 只动 `theme.py`：在 `THEMES` 里加一项，背景/文字 5 个值传给 `_light_tokens()` / `_dark_tokens()`，语义色按需 `**骨架, "status_running_fg": ...` 覆写。`theme_names()` / `theme_labels()` / 下拉框 / `--theme` 的 `choices` / 导航栏循环全部自动跟上，`tests/test_theme_apply_gui.py` 也会自动为新主题参数化出 4 个用例。
 
-### 13.5 GUI 测试要点
+#### 13.4.6 排版 / 间距 / 圆角 常量与辅助 QSS
+
+M6.4 把散落的字号 / 间距 / 圆角也收到 `theme.py` 里。`accent_soft` 那五个新 token 之外还导出了两组常量：
+
+| 常量 | 值序列 | 用途 |
+| --- | --- | --- |
+| `TYPE_H1/H2/H3/BODY/CAPTION/TINY` | 24/20/16/13/12/10 | 页面级排版尺度，**单调**递增（H1 最大） |
+| `SPACE_XS/SM/MD/LG/XL/XXL` | 4/8/12/16/24/32 | 间距尺度，**单调**递增 |
+| `RADIUS_DEFAULT/CARD/PILL` | 4/8/20 | 圆角三档（控件 / 卡片 / 胶囊） |
+
+- 调整这些值会让全应用随之变化——不要在某个页面里覆盖成字面量。
+- 辅助 QSS 函数取代散落的 `setStyleSheet("color: gray;")`：
+  - `heading_qss(level=1..3)` — 页面级标题
+  - `body_qss()` — 正文字号 / 字色
+  - `muted_qss()` — 次级说明（暗色骨架上重算灰度，避免「字面 gray 对比度不足」）
+  - `card_qss(elevated=False)` — CardWidget 边框 / 背景
+  - `header_qss(level=1..3)` — 标题区渐变（`gradient_header` 存在时走渐变，否则退纯色）
+- 这些函数**不带 Qt 副作用**：返回的是字符串，调用方 `widget.setStyleSheet(...)`。
+  这样可以把整段 QSS 拼出来一次塞给一个布局，而不是给每个 widget 单独调一次。
+- `test_typography_constants_are_exposed` + `test_helper_qss_functions_return_strings`
+  + `test_header_qss_uses_gradient_or_fallback` 三道测试守着：常量存在且单调、函数
+  返回非空、渐变/纯色分支都覆盖。
+
+#### 13.4.7 共享组件（`ui/widgets.py`）
+
+解析 / 下载 / 历史 / 设置四个页面 + 三个对话框要复用同一套设计语言，
+于是有了 `ui/widgets.py`。每个组件是一个工厂函数，**不依赖 PySide6 也能
+import**——class 体在工厂内部，模块顶层只暴露 `build_*` 函数。
+
+| 工厂 | 类 | 用途 |
+| --- | --- | --- |
+| `build_page_header()` | `PageHeader` | 页面级「标题 + 副标题 + 右侧动作」三段式，四个页面统一 |
+| `build_empty_state()` | `EmptyState` | 居中占位态（图标 + 主标 + 副标），空表格 / 空列表用 |
+| `build_stat_chip()` | `StatChip` | 顶部统计小方块（"3 个正在下载"），4 种 kind 颜色 |
+| `build_platform_badge()` | `PlatformBadge` | 圆形彩色平台徽标（B 站蓝 / 抖音红） |
+| `build_section_divider()` | `SectionDivider` | 卡片内的「细横线 + 副标题」分组分隔 |
+
+**API 约定**：
+
+```python
+Header = build_page_header()       # 工厂调用一次拿 class
+header = Header(parent)            # class 实例化
+header.set_title("下载")
+header.set_subtitle("...")
+header.add_action(my_button)       # 右侧动作槽
+```
+
+**关键设计取舍**：
+
+- **不取代 qfluentwidgets**。`PushButton` / `LineEdit` / `ComboBox` 这些
+  还在直接用，共享组件是「需要统一表达力」时用。强行包一层会让我们失去
+  fluent 控件的样式跟随能力。
+- **延迟 import Qt**。`class _PageHeader(QWidget)` 写在工厂里，
+  `from doubi.ui.widgets import build_page_header` 在无 PySide6 的 CI 环境
+  也能跑（headless 装 PySide6 的 tox task 之外，配置 / 解析单元测试都是
+  这样的）。
+- **构造函数接 parent**：遵循 Qt 父子关系约定，主题广播时通过
+  `subscribe_theme` 跟 `parent.destroyed` 信号自动解绑。
+- **StatChip 的 `set_kind` 是枚举式的字符串**（`"running"` /
+  `"paused"` / `"completed"` / `"failed"`），不是 enum。**字符串可读性
+  高 + 不需要 import 复杂 enum**，单元测试时直接 `set_kind("running")`
+  就能验；4 种 kind 都用 `test_stat_chip_set_value_and_kind` 守住。
+
+### 13.5 图标管线（`ui/resources/`）
+
+#### 13.5.1 三个文件，三种用途
+
+`ui/resources/` 目录里有三种图标，**用途完全不同**：
+
+| 文件 | 用途 | 运行时 | 何时生效 |
+| --- | --- | --- | --- |
+| `icon.svg` | 设计源稿（含 filter / clipPath） | 不参与 | — |
+| `icon_template.svg` | 渲染模板（QtSvg 安全子集 + 7 个换色锚点） | 是 | 标题栏 / 关于 / 登录对话框 / 闪屏 |
+| `icon.png` | 1024px 兜底位图 | 仅在 QtSvg 不可用时 | PyInstaller 打包后兜底 |
+| `icon.ico` | Windows .exe 资源图标 | 操作系统 | Windows 任务栏（仅打包后生效） |
+
+**设计源稿** (`icon.svg`)：用户提供 1124×1124 的设计稿，带 `<filter>`
+投影 + `<clipPath>` 裁剪 + `<feGaussianBlur>` 等。**不直接渲染**——Qt 只
+实现 SVG Tiny 1.2，实测 `feColorMatrix` 投影层被当成「实心黑圆角矩形」
+画在最上层，29% 像素变纯黑，整张图标糊掉。保留它作为视觉参考 / 重设计
+参考。
+
+**渲染模板** (`icon_template.svg`)：同一张图重写为 QtSvg 安全子集：
+- 去掉 `<filter>` / `<clipPath>` / `<fe*>`（clipPath 本来就是 no-op，
+  裁剪框完全包住两个腮红椭圆）
+- viewBox 收紧到 `50 30 1024 1024`，让圆角方块**出血铺满**画布
+  （源稿四周 4.5% 是死边——图标在标题栏 / 任务栏里看着偏小就是这段
+  留白吃掉的）
+- 投影由 `rim-light` 描边近似（视觉损失可忽略）
+- 7 个品牌色 hex 既是模板字面量，**也是换色锚点**——`icon_svg(accent)`
+  一次正则替换完成。`BRAND_PALETTE` 必须与模板**逐字一致**（含大小写），
+  否则漏色
+
+**兜底 PNG** (`icon.png`)：从模板 SVG 渲染 1024×1024，仅在 QtSvg 不可用
+时（如极老的 PySide6 发行版）走这条。运行时检测到 QtSvg 失败会自动
+退化，调用方什么都不用改。
+
+**Windows .ico** (`icon.ico`)：多档位 PNG 合集，用于 PyInstaller 打包时
+嵌进 .exe 资源段——这是 Windows 任务栏读取「应用分组图标」的唯一渠道。
+详见 [docs/BUILD.md](../BUILD.md)。
+
+#### 13.5.2 资源模块 API
+
+```python
+from doubi.ui.resources import (
+    APP_NAME, APP_DISPLAY_NAME, APP_VERSION, APP_COPYRIGHT,  # 品牌元数据
+    BRAND_PALETTE,                                            # 7 色 → 语义名
+    icon_path, icon_source_path, icon_template_path,          # 路径
+    icon_palette, icon_svg,                                   # 换色
+    render_icon_pixmap, load_app_icon, load_splash_pixmap,    # 渲染
+    clear_icon_cache,                                         # 测试 / 热替换
+)
+```
+
+**`icon_palette(accent=None)`** 按主色推导整套图标配色：
+
+- 底板渐变 = 主色色相 ±20°，亮度 0.63 → 0.68
+- 呆毛 = 同色相再沉一档（亮度 0.52）
+- 脸 = 主色色相的极浅色（亮度 0.90），冷色主题下自然变成薄荷/淡蓝奶油色
+- **腮红 / 舌头 / 眼睛恒定**——这三是吉祥物辨识度的核心，跟主题变色
+  会丢掉可爱感。主题识别度由占比 70% 以上的底板承担，已经足够
+- 饱和度不是照抄主色而是压缩到 `0.42 + 0.55 * s`：莫兰迪这类低饱和主题
+  如果强行拉满会变成刺眼的橙色，与主题气质相悖
+- `accent=None` / 不可解析 / 脏色值 → **退化到 `BRAND_PALETTE`**
+  （不抛异常，不让一个错误配置把整个 GUI 起不来）
+
+**`icon_svg(accent=None)`** 换色 + 返回 SVG 文本：
+
+- 一次**正则替换**完成，不是逐色 `str.replace`——后者在「A 被换成 B，
+  B 又被下一轮替换」时会产生二次命中，产出错色
+- 替换锚点是模板里的 7 个品牌色字面量；**这些字面量必须与 `BRAND_PALETTE`
+  完全一致**（`test_icon_template_exists_and_holds_all_anchors` 守着）
+
+**`render_icon_pixmap(size, accent=None, *, themed=True)`** 渲染单张图：
+
+- `themed=True` 时 `_active_accent()` 自动从 `current_theme()` 取主色
+- `themed=False` 固定品牌原色
+- `size <= 0` → 返回 `None`（不抛）
+- 按 `(size, accent)` 缓存到 `_pixmap_cache`，同一主题切来切去不会重复渲染
+
+**`load_app_icon(size=None, ...)`** 装填 QIcon：
+
+- `size=None` 时填入 `ICON_SIZES` 全部 8 档位（16/20/24/32/40/48/64/
+  96/128/256）——Qt 在标题栏 / 任务栏 / Alt+Tab 各挑最合适的一档，
+  避免系统强制缩放产生锯齿与白边
+- `size=N` 时只装填一档（用于对话框 / 闪屏）
+- 按 `accent` 缓存到 `_icon_cache`
+
+**`load_splash_pixmap(w, h, ...)`** 闪屏专用：`min(w, h)` 边长的矢量渲染——
+比「渲染大图再缩放」少一次重采样。
+
+**`_active_accent()`**：根据当前主题返回图标主色。**豆比紫主题下返回
+`None`**——它本身取自图标，再用主色二次推导只会偏离原图。这是产品
+决定，不是技术 bug。
+
+#### 13.5.3 主窗口图标全链路
+
+```
+set_theme(...)
+  → subscribe_theme(self, _refresh_app_icon) 自动触发
+  → load_app_icon() 渲染新配色
+  → self.setWindowIcon(icon)
+  → QApplication.setWindowIcon(icon)         ← 任务栏 / Alt+Tab 同步
+  → windowIconChanged 信号
+  → qfluentwidgets.FluentTitleBar.setIcon(icon)
+  → iconLabel.setPixmap(QIcon(icon).pixmap(18, 18))    ← 这里
+```
+
+**`qfluentwidgets.FluentTitleBar.setIcon` 把 pixmap 尺寸写死 18px**——
+48px 高的标题栏里 18px 图标明显偏小。修法（`main_window.py::MainWindow._enlarge_titlebar_icon`）：
+
+1. `iconLabel.setFixedSize(28, 28)`（`TITLEBAR_ICON_SIZE` 常量）
+2. 断开 `windowIconChanged → title_bar.setIcon` 的旧连接
+3. 改用 `set_icon(icon)` 闭包，按新尺寸重设 pixmap
+4. 全程防御性处理（拿不到 `iconLabel` 就放弃，不影响主窗口）
+
+**为什么必须断开旧信号**：qfluentwidgets 在 `FluentTitleBar.__init__` 里
+`self.window().windowIconChanged.connect(self.setIcon)`。如果只改
+`iconLabel` 尺寸没换槽函数，下一次 `setWindowIcon` 触发信号，旧
+`setIcon` 会把 `iconLabel.pixmap` 打回 18px。`_enlarge_titlebar_icon`
+一定要在 `disconnect → connect` 这一对操作之间完成，顺序反了会
+丢信号。
+
+**关于 / 登录对话框补 setWindowIcon**：这三个 dialog 之前没设
+`windowIcon`，Windows 任务栏 / Alt+Tab 会回退到 **python.exe 的双蛇 logo**
+（用户报的「Python 终端图标」就是这个）。修法是 `self.setWindowIcon(load_app_icon())`
++ 工厂函数顶部 import `load_app_icon`。防御性写法：
+
+```python
+icon = load_app_icon()
+if icon is not None and not icon.isNull():
+    self.setWindowIcon(icon)
+```
+
+——`load_app_icon` 在 QtSvg 不可用时返回 None，dialog 仍然能跑，只是
+没有自定义图标（Windows 用 python.exe 双蛇兜底）。
+
+#### 13.5.4 模板回归守卫
+
+Qt 只实现 SVG Tiny 1.2，**任何**新贡献的 SVG 都可能踩 filter 坑。守卫：
+
+- `test_icon_template_has_no_unsupported_svg_features` 剥掉 XML 注释
+  后查 `<filter` / `<clipPath` / `filter=` / `clip-path=` / `<fe`。
+  这条测试抓过「在模板注释里写 `<filter>` 也算」这种假阳性——剥注释
+  后再查。
+- `test_render_icon_pixmap_size_and_no_black_block` 渲染 128px 后
+  统计纯黑像素占比 < 5%。`feColorMatrix` bug 的症状就是 29% 像素
+  变纯黑，>5% 阈值足够抓回归。
+- `test_icon_template_exists_and_holds_all_anchors` 模板必须含
+  全部 7 个品牌色字面量——漏一个 `icon_svg(accent)` 替换会漏色。
+
+### 13.6 打包成 Windows .exe 与安装包（`scripts/build_exe.py` / `build_installer.py`）
+
+详见 [docs/BUILD.md](../BUILD.md)。要点：
+
+- **入口用「构建期生成的启动壳」，不是包内文件、也不是 `--module`**。
+  `app.py` 内部是 `from .theme import ...` 相对导入，直接把它当入口，
+  它会被当成顶层 `__main__`，`doubi` 父包不存在，相对 import 直接挂
+  `ImportError`。启动壳位于包外面，用绝对导入 `from doubi.ui.app import main`
+  进包，包结构就完整保留了。
+  **PyInstaller 没有 `--module` 选项**（6.22.2 报 `unrecognized arguments`）。
+- **必传 `--icon src/doubi/ui/resources/icon.ico`**——这是 Windows
+  任务栏读取「应用分组图标」的唯一渠道。`QApplication.setWindowIcon`
+  改不了任务栏，必须靠 .exe 资源。
+- 第三方 Qt 库（qframelesswindow / qfluentwidgets）有隐藏的 QRC 资源
+  / 插件，PyInstaller 默认钩子抓不全，`--collect-all <pkg>` 显式补一遍。
+- 产物 `dist/doubi-gui.exe` 约 235 MB，PyInstaller onefile 把 Python
+  runtime 全打包，正常体积。
+- **发给最终用户走安装包**：`python scripts/build_installer.py` 先出
+  onedir 产物，再用仓库内置的便携版 NSIS（`tools/nsis/`）压成
+  `dist/DouBi-Setup-<version>.exe`（约 213 MB）。免 UAC 装到
+  `%LOCALAPPDATA%\DouBi`，注册表只写 HKCU，卸载零残留而 `~/.doubi` 保留。
+- **版本号只有一处真源**：`pyproject.toml` 的 `version` 被
+  `build_installer.py` 读走并 `/D` 注入 NSIS；UI 侧是
+  `src/doubi/ui/resources/__init__.py` 的 `APP_VERSION`。改版本要同时动这两处，
+  历史上曾漂移成「UI 显示 0.6.0 而安装包写 0.1.0」。
+
+
+
+### 13.7 GUI 测试要点
 
 - `QT_QPA_PLATFORM=offscreen` 无头运行。
 - `asyncio.create_task` 在测试里没有 running loop → 测试里 monkeypatch 成同步执行（见 `test_parse_and_expand_gui.py` 的 `_make_create_task_sync`）。
@@ -756,12 +1053,20 @@ _notify()                         # 通知订阅者刷新把颜色烘进 stylesh
 - **主题测试刻意依赖库的私有接口**（`_normalBackgroundColor` / `_isMicaEnabled` / `lightCustomQss`）。这不是偷懒：断言 `THEMES` 里的色值毫无意义（token 表一直是对的，界面照样发白），只有断言「控件实际生效的颜色」才守得住 §13.4.2 那五层。上游哪天把这些改名，测试必须**当场红掉**，而不是界面悄悄变回白色。
 - **会改全局状态的 GUI 测试要自己收尾**。`test_theme_apply_gui.py` 用 autouse fixture 在每个用例后 `set_theme("default_light")`，否则同进程的其他 GUI 测试会被残留主题污染。
 - **循环里做断言必须加「至少查到一个」的守卫**：`assert checked, "主窗口里一个 fluent 控件都没找到，测试失去意义"`。少了这一行，一旦控件找不到，整个用例会因为循环体没执行而假绿。
+- **GUI 集成测试不要反复 `build_main_window()`**：M6.5 那阵曾
+  想加 4 个 titlebar 测试，每个新建一个 MainWindow 后 deleteLater。
+  实测：pytest 的 `qapp` 是 module-scope 复用，`deleteLater` 排队但
+  不会被事件循环执行（除非手动 `qapp.processEvents()`），下一个测试
+  set_theme 时广播到 4~5 个死回调，`Mica 样式 + QSS 全树重算` 累加
+  起来从「慢」劣化到「hang」。**用 `test_theme_apply_gui.py` 里 module-scope
+  的 window fixture 共享一个 MainWindow**，或者**让产品代码被真机截图
+  验证**（`screenshots/verify_*.png`），别在测试里反复构造主窗口。
 
 ---
 
-## 14. B 站风控专题（最重要的实战知识）
+## 14. 平台风控专题（B 站 + 抖音，最重要的实战知识）
 
-这是本项目踩坑最多的领域。**改 B 站相关代码前必读。**
+这是本项目踩坑最多的领域。**改 B 站 / 抖音相关代码前必读。**
 
 ### 14.1 现状：三类 URL 各自用什么通道
 
@@ -797,23 +1102,61 @@ _notify()                         # 通知订阅者刷新把颜色烘进 stylesh
 
 `generate_buvid3()` 生成匿名标识（uuid 风格 + `infoc` 后缀），每次 `BilibiliAPI()` 新建时生成。能轻微缓解 412，但不是根治——真正要稳定得登录（SESSDATA）或走官方 API + WBI。
 
+### 14.6 抖音 Web API 签名与反爬（M6.7，`platforms/douyin/webapi.py` + `sign/`）
+
+抖音合列举/用户作品列举**没有 yt-dlp 抽取器**（2026.08 版离线 `ie.suitable()` 验证：user /
+collection URL 均落到 generic fallback），只能走签名 Web API。
+
+**通道速查**：
+
+| 需求 | 端点 | 说明 |
+|---|---|---|
+| 合集分页列举 | `GET /aweme/v1/web/mix/aweme/?mix_id=&cursor=&count=` | 主力通道，实测可用 |
+| 合集详情 | `GET /aweme/v1/web/mix/detail/` | **实测 403（风控）**，不要依赖；合集标题改从列举第一页的 `mix_info.mix_name` 探测 |
+| 视频详情 | `GET /aweme/v1/web/aweme/detail/` | `aid` 参数 6383 / 1128 两候选，用于 `collection_of()` 反查 |
+| 用户作品 | `GET /aweme/v1/web/aweme/post/` | `iter_user_posts` 分页枚举 |
+
+**签名（a_bogus）**：
+- 值由 **query string + User-Agent + 浏览器指纹** 计算，实现在 `sign/abogus.py`
+  （865 行，sm3 依赖 `gmssl` 包，pip 装的不是标准库）。
+- msToken 策略：优先取 cookie 文件里的 msToken；没有则用 **182 随机字符伪 token** 兜底
+  （参考项目同款做法，风控放行）。
+- `_signed_url()` 签名失败时**降级为不签名**发出（不阻断主流程），由重试层兜底。
+
+**反爬信号与重试（`_request_json`）**：
+- **HTTP 200 但 body 为空 = 反爬**（最阴险的一种，不是成功也不是失败）→ 重新签名重试。
+- 403 / 429 / 461 / 471 / 5xx 同样进重试；延迟 1s / 2s / 5s 递增，最多 3 次。
+- **每次尝试都重新取 msToken**——同一 token 连发更容易被识别。
+
+**分页枚举（`iter_mix_awemes` / `iter_user_posts`）**：
+- 响应归一化为 `{items, has_more, max_cursor}`；用 `max_cursor` 翻页直到 `has_more=False`。
+- **cursor 卡死保护**：服务端偶发返回与上页相同的 cursor 却仍有 has_more，直接 break，
+  否则死循环。
+
+**归一化（`aweme_to_media_item`）**：
+- `source_url` 一律写成 canonical `https://www.douyin.com/video/{aweme_id}`——下载阶段
+  走 yt-dlp，它只认这个形态。
+- title 取 `desc` 首行（多行文案会把文件名撑爆）；duration 从 ms 转 s；
+- `mix_info` 写进 `extra["mix_id"] / extra["mix_name"]`（供 GUI 反查与目录用）。
+
 ---
 
 ## 15. 测试体系
 
-19 个测试文件，385 个测试收集，**381 passed / 4 skipped**（`python -m pytest`）。pytest-asyncio `mode=auto`。4 个 skip 全是「无 PySide6 则跳过」的 GUI 用例。
+21 个测试文件，454 个测试收集，**450 passed / 4 skipped**（`python -m pytest`，全量约 27 分钟）。pytest-asyncio `mode=auto`。skip 全是「无 PySide6 则跳过」的 GUI 用例。
 
 | 文件 | 用例数 | 覆盖 |
 |---|---|---|
 | `test_bilibili_adapter.py` | 56 | B 站 URL 分类 / 策略（mock httpx）/ adapter |
+| `test_ui_polish.py` | 45 | UI 品牌化 / 组件工厂 / **EmptyState 间距回归（防静默回退）** / 图标管线 |
+| `test_douyin_adapter.py` | 43 | 抖音 URL 分类（modal_id / vid / 分享链）/ parse / expand / `parse_and_expand` / 登录态 cookie 降级判定 |
 | `test_bilibili_auth.py` | 41 | cookie 解析 / 校验 |
 | `test_storage.py` | 37 | database / file_layout / manifest / migrate |
-| `test_douyin_adapter.py` | 37 | 抖音 URL 分类 / parse / expand / `parse_and_expand`（含模块级 `_SpyEngine`） |
+| `test_theme_apply_gui.py` | 28 | **主题真落到像素上：窗口底色 / 现存控件 / 卡片自绘 / 切换后新建控件**（需 PySide6，offscreen；跑一次 ~3 分钟，全量慢主要慢在这里） |
+| `test_pipeline_smoke.py` | 28 | registry / URL 分类 / pipeline 解析 / **引擎 cookie 注入** / CLI 冒烟 |
+| `test_browser_login.py` | 28 | Playwright 登录流程（含 networkidle 陷阱回归） |
 | `test_config_theme.py` | 26 | **配置地基（`to_dict` / env 覆盖 / YAML 往返）+ 主题注册表 / `resolve_theme` 兼容旧值 / token 键一致 / 无 Qt 也能 `set_theme`**（见 §13.4） |
-| `test_theme_apply_gui.py` | 24 | **主题真落到像素上：窗口底色 / 现存控件 / 卡片自绘 / 切换后新建控件**（需 PySide6，offscreen） |
-| `test_browser_login.py` | 24 | Playwright 登录流程 |
 | `test_server.py` | 19 | FastAPI 端点 |
-| `test_pipeline_smoke.py` | 18 | registry / URL 分类 / pipeline 解析 / CLI 冒烟 |
 | `test_sidecars.py` | 17 | 附属文件：NFO 生成/开关 + B 站弹幕（bvid/cid 定位、deflate 解码、失败不抛） |
 | `test_task_manager.py` | 15 | TaskManager 状态机 |
 | `test_mcp.py` | 15 | JSON-RPC 协议 |
@@ -880,6 +1223,12 @@ python -m pytest --collect-only -q 2>&1 | Select-Object -Last 3
 17. **`add()` / `resume()` 只是排程**：协程体在下一次 loop yield 才开始跑。测试里紧跟着 `pause()` 会在协程碰到 pipeline 之前就把它取消掉（曾因此假失败 6 个用例）。这**不是生产 bug**（真实环境永远有 loop 在跑），修在测试侧：用 `_started()` 补一次 `await asyncio.sleep(0)`。
 18. **`_build_options()` 漏字段是「静默失效」，不是报错**：引擎与 `file_layout` 只认 `DownloadOptions`，**从不读 `AppConfig`**，所以每端的 `_build_options()` 是唯一搬运环节。曾实际漏掉：GUI 少 `write_nfo` / `write_danmaku` / `write_subtitles` / `resume` / `output_dir_template`，REST 少 `output_dir_template` / `proxy` / `rate_limit`——表现是控件能点、配置能改，但毫无效果。判据是「`AppConfig` 与 `DownloadOptions` 的同名字段交集必须逐个抵达 options」，已由两端的结构性测试固定下来。
 19. **结构性测试必须用非默认值填充，否则是假保险**：`test_build_options_covers_every_shared_config_field` 第一版直接拿 `AppConfig()` 原值比对，把 `resume=self._cfg.resume` 删掉竟然照样通过——两个 dataclass 的 `resume` 默认值都是 `True`，「漏转发」和「转发了」结果完全相等。凡是「拿默认对象比对默认值」的测试都有这个盲区：**先把每个字段推离默认值再比**，并对没覆盖到的字段类型 `pytest.fail`（而不是跳过），否则新类型一进来检查强度就悄悄降级。改完后分别删 `resume`、`max_quality` 各验证一次变红，才算这层保险是真的。
+20. **抖音 modal_id / vid 规则必须排在 USER 规则之前**（`url.py::_PATTERNS`）：用户主页「合集」tab 打开的单视频链接形如 `/user/{sec_uid}?...&modal_id={id}&vid={id}`，先匹配 USER 会把单视频误判成用户容器，触发整个主页的作品展开。顺序即语义。
+21. **抖音风控的「空 200」**：HTTP 200 + 空 body 不是成功，是反爬拦截（见 §14.6）。任何抖音 Web API 响应解析前必须判空，命中则重新签名重试。
+22. **`is_container()` 只看 children 非空，不看 media_type**：容器解析时 children 刻意不填（惰性展开），所以 pipeline 三处容器判定都要补 `media_type is MIX`。新增一种惰性容器类型时，`run()` / `download_item()` 守卫 / `parse_and_expand()` 三处必须同步，漏一处就是「能展开但拒绝下载」或反之。
+23. **登录成功后的落地页永远到不了 networkidle**：feed 流 / WebSocket 长连接 / 心跳是常态。Playwright 里不要用 `wait_for_load_state("networkidle")` 当「登录完成」信号，用固定短 settle 或直接轮询 `context.cookies()`。
+24. **判定平台登录态要用「登录后才会出现的 cookie」**：sessionid / sessionid_ss / sid_guard（抖音）；不要用设备标识（ttwid / odin_tt——游客也有）或 JS 风控 token（msToken——自动化下经常不写入）。名单错向两个方向都翻过车：真登录抓不到 + 游客误判成功。
+25. **引擎阶段的 cookie 与解析阶段是两条通道**：解析在 adapter（自己读 cookie 文件），下载在 engine（只认 `DownloadOptions.cookies_file`）。四个入口都不传 cookies_file 时引擎裸跑。M6.7 起在 pipeline 层懒加载注入（显式指定优先），修一处救四端。
 
 ---
 
@@ -919,7 +1268,7 @@ python -m pytest --collect-only -q 2>&1 | Select-Object -Last 3
 ### 已知限制
 
 1. **B 站匿名风控**：UP 主页 / 合集枚举在无登录时受限（412 / -799），登录后稳定。已用官方 API + WBI 签名缓解，但 IP 级限流仍需等待窗口（几分钟）。
-2. **抖音 user/info/self 404**：该端点已失效，`validate_cookies` 只能靠 catch 处理成"未登录"，无法确认有效登录态（下载本身走 yt-dlp 不受影响）。
+2. **抖音 user/info/self 404**：该端点被风控（无签名调用必 404），`validate_cookies` 已降级为「session cookie 存在性」判定（sessionid / sessionid_ss / sid_guard 任一存在即已登录）——只能判"有登录痕迹"，无法确认 cookie 是否仍有效（下载本身走 yt-dlp 不受影响）。同类问题：抖音合集标题是 best-effort（`/mix/detail/` 被风控 403，合集名从列举第一页的 `mix_info.mix_name` 探测，失败时退化为 `抖音合集 {mix_id}`）。
 3. **GUI 尚未实现**：断点续传的**跨进程恢复**（重启后自动接续未完成任务——引擎层已支持 `continuedl`，缺的是把未完成任务持久化下来）、已完成列表排序、章节下载。
    （M6.2 已补上：全部/单任务暂停恢复、弹幕、字幕、NFO）
 4. **REST/MCP 的容器支持**：容器统计已修正（读 pipeline 写的 `child_count` / `downloaded_count` / `failed_count`），但仍是「整个容器一个 job」，无法单独重试其中某一子项。
@@ -946,4 +1295,4 @@ python -m pytest --collect-only -q 2>&1 | Select-Object -Last 3
 
 ---
 
-*文档生成时间：2026-08-23 · 与 `docs/CHANGELOG.md` 的 M6.3 快照对应。维护者更新本文档时，保持"结构 + 关键 API + 踩坑记录"三要素即可，避免写与代码重复的长篇源码引用。*
+*文档生成时间：2026-08-23 · 与 `docs/CHANGELOG.md` 的 M6.7 快照对应。维护者更新本文档时，保持"结构 + 关键 API + 踩坑记录"三要素即可，避免写与代码重复的长篇源码引用。*

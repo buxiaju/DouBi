@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1124" height="1124">
+  <defs>
+    <filter id="filter_0" color-interpolation-filters="sRGB" x="0" y="0" width="1124" height="1124" filterUnits="userSpaceOnUse">
+      <feColorMatrix in="SourceAlpha" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 127 0" result="hardAlpha"/>
+      <feOffset dx="0" dy="20"/>
+      <feGaussianBlur stdDeviation="30"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.1176 0" result="shadow"/>
+    </filter>
+  </defs>
+  <g filter="url(#filter_0)">
+    <rect fill="#FFF" transform="matrix(1 0 0 1 50 30)" x="10" y="10" width="1004" height="1004" rx="222" ry="222"/>
+  </g>
+  <defs>
+    <linearGradient id="gradient_0" gradientTransform="matrix(724.187 724.187 -724.187 724.187 -144.837 144.837)" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#FF8C42"/>
+      <stop offset="1" stop-color="#FF5E7C"/>
+    </linearGradient>
+  </defs>
+  <rect fill="url(#gradient_0)" transform="matrix(1 0 0 1 50 30)" width="1024" height="1024" rx="232" ry="232"/>
+  <path fill="#E8552A" transform="matrix(1 0 0 1 527 259.26)" d="M0 27.7397C13.3333 -2.2603 30 -7.9269 50 10.7397C76.6667 -6.5936 97.6667 2.4064 113 37.7397C94.3333 53.0731 73.3333 57.4064 50 50.7397C30 57.4064 13.3333 49.7397 0 27.7397Z"/>
+  <path fill="#E8552A" transform="matrix(1 0 0 1 564 264)" d="M13.6683 21.4051L3.6683 -1.5949Q3.0439 -3.1519 1.4661 -3.7216Q-0.0764 -4.3811 -1.5949 -3.6683Q-3.1519 -3.0439 -3.7216 -1.4661Q-4.3811 0.0764 -3.6683 1.5949L6.3317 24.5949Q6.9561 26.1519 8.5339 26.7216Q10.0764 27.3811 11.5949 26.6683Q13.1519 26.0439 13.7216 24.4661Q14.3811 22.9236 13.6683 21.4051Z" fill-rule="evenodd"/>
+  <ellipse fill="#FFE4D1" transform="matrix(1 0 0 1 314 324)" cx="248" cy="238" rx="248" ry="238"/>
+  <path fill="#2A2A2A" transform="matrix(1 0 0 1 427 517)" d="M45 -12Q18.8667 -12 -6.6564 5.0154Q-10.9224 7.6854 -11.767 12.6466Q-12.8955 17.5511 -9.9846 21.6564Q-7.3146 25.9224 -2.3534 26.767Q2.5511 27.8955 6.6564 24.9846Q26.1333 12 45 12Q63.8667 12 83.3436 24.9846Q87.4489 27.8955 92.3534 26.767Q97.3146 25.9224 99.9846 21.6564Q102.8955 17.5511 101.767 12.6466Q100.9224 7.6854 96.6564 5.0154Q71.1333 -12 45 -12Z" fill-rule="evenodd"/>
+  <circle fill="#2A2A2A" transform="matrix(1 0 0 1 590 478)" cx="50" cy="50" r="50"/>
+  <circle fill="#FFF" transform="matrix(1 0 0 1 641 495)" cx="17" cy="17" r="17"/>
+  <circle fill="#FFF" transform="matrix(1 0 0 1 612 534)" cx="8" cy="8" r="8"/>
+  <clipPath id="clip_0">
+    <rect x="252" y="232" width="620" height="620"/>
+  </clipPath>
+  <g clip-path="url(#clip_0)">
+    <g opacity="0.6">
+      <ellipse fill="#FF9AA2" transform="matrix(1 0 0 1 367 583)" cx="40" cy="27" rx="40" ry="27"/>
+    </g>
+  </g>
+  <clipPath id="clip_1">
+    <rect x="252" y="232" width="620" height="620"/>
+  </clipPath>
+  <g clip-path="url(#clip_1)">
+    <g opacity="0.6">
+      <ellipse fill="#FF9AA2" transform="matrix(1 0 0 1 637 583)" cx="40" cy="27" rx="40" ry="27"/>
+    </g>
+  </g>
+  <path fill="#2A2A2A" transform="matrix(1 0 0 1 437 592)" d="M0 0C83.3333 83.3333 166.6667 83.3333 250 0C166.6667 60 83.3333 60 0 0Z"/>
+  <ellipse fill="#FF6B6B" transform="matrix(1 0 0 1 518 632)" cx="44" cy="28" rx="44" ry="28"/>
+  <defs>
+    <filter id="filter_1" color-interpolation-filters="sRGB" x="50" y="30" width="1024" height="1026" filterUnits="userSpaceOnUse">
+      <feColorMatrix in="SourceAlpha" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 127 0" result="hardAlpha"/>
+      <feOffset in="hardAlpha" dx="0" dy="2" result="offsetAlpha"/>
+      <feGaussianBlur in="offsetAlpha" stdDeviation="2" result="blurredAlpha"/>
+      <feComposite in2="hardAlpha" operator="arithmetic" k2="-1" k3="1"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.149 0"/>
+    </filter>
+  </defs>
+</svg>

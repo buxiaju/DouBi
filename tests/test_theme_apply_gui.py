@@ -144,3 +144,7 @@ def test_theme_applies_to_widgets_created_after_switch(window, name):
         assert pack.tokens["bg_layer"] in _custom_qss(fresh)
     finally:
         fresh.deleteLater()
+
+# 标题栏应用图标的尺寸/换色测试见 tests/test_ui_polish.py：
+# 那些用「独立 MainWindow + 调完就 deleteLater」的模式，不在
+# 本文件 module-scope 的 window fixture 上累计状态。

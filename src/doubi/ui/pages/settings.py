@@ -120,7 +120,23 @@ def build_settings_widgets():
             # 别处（导航栏主题按钮、CLI）切换主题时，下拉框跟着走。
             subscribe_theme(self, self._sync_theme_combo)
             # Populate the account block asynchronously
-            QTimer.singleShot(50, lambda: asyncio.ensure_future(self._refresh_account_status_async()))
+            # 包一层 try：测试/截屏脚本等没有运行中的 asyncio loop 时，
+            # ``asyncio.ensure_future`` 会抛 RuntimeError——这种情况
+            # 直接同步调一次即可，账号状态晚一点刷新不影响 UI 启动。
+            def _kick_status_refresh() -> None:
+                try:
+                    asyncio.ensure_future(self._refresh_account_status_async())
+                except RuntimeError:
+                    import logging
+                    logging.getLogger("doubi.ui.pages.settings").debug(
+                        "no event loop, falling back to sync account refresh",
+                    )
+                    try:
+                        # 同步跑一次：阻塞到完成
+                        asyncio.run(self._refresh_account_status_async())
+                    except Exception:   # noqa: BLE001
+                        pass
+            QTimer.singleShot(50, _kick_status_refresh)
 
         # ---------------------------------------------------------- UI
 

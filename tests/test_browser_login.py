@@ -320,8 +320,42 @@ def test_douyin_login_info_not_logged_in():
 
 
 def test_douyin_browser_login_runs(monkeypatch):
-    """browser_login uses URLChangeLogin/CookieSetLogin under the hood."""
-    # Provide all 4 cookies the douyin adapter expects.
+    """browser_login uses CookieSetLogin under the hood — and success
+    must trigger on *login-state* cookies, not the anonymous-visitor
+    set (ttwid / msToken / odin_tt), see the "scanned but no cookie"
+    bug."""
+    pw_ctx = _mock_playwright([
+        {"name": "ttwid", "value": "t1", "domain": ".douyin.com",
+         "path": "/", "secure": False, "expires": 0},
+        {"name": "msToken", "value": "m1", "domain": ".douyin.com",
+         "path": "/", "secure": False, "expires": 0},
+        {"name": "passport_csrf_token", "value": "p1", "domain": ".douyin.com",
+         "path": "/", "secure": False, "expires": 0},
+        {"name": "odin_tt", "value": "o1", "domain": ".douyin.com",
+         "path": "/", "secure": False, "expires": 0},
+        # Login-state cookies — what actually signals success now.
+        {"name": "sessionid", "value": "sess1", "domain": ".douyin.com",
+         "path": "/", "secure": True, "expires": 0},
+        {"name": "sid_guard", "value": "sg1", "domain": ".douyin.com",
+         "path": "/", "secure": True, "expires": 0},
+    ])
+    import doubi.core.auth.browser_login as bl
+    monkeypatch.setattr(bl, "sync_playwright", MagicMock(return_value=pw_ctx), raising=False)
+    monkeypatch.setattr(bl, "HAS_PLAYWRIGHT", True)
+
+    cookies = dy_auth.browser_login(headless=True, timeout=5.0)
+    names = {c["name"] for c in cookies}
+    # Login cookies must be captured — the whole point of the flow.
+    assert "sessionid" in names
+    assert "sid_guard" in names
+    # Visitor cookies ride along (they're still useful to yt-dlp).
+    assert "ttwid" in names
+
+
+def test_douyin_browser_login_requires_login_cookie(monkeypatch):
+    """Regression: visitor-only cookies (ttwid / msToken / odin_tt /
+    passport_csrf_token) must NOT count as a successful login — the
+    old bug treated them as sufficient and harvested guest cookies."""
     pw_ctx = _mock_playwright([
         {"name": "ttwid", "value": "t1", "domain": ".douyin.com",
          "path": "/", "secure": False, "expires": 0},
@@ -336,10 +370,26 @@ def test_douyin_browser_login_runs(monkeypatch):
     monkeypatch.setattr(bl, "sync_playwright", MagicMock(return_value=pw_ctx), raising=False)
     monkeypatch.setattr(bl, "HAS_PLAYWRIGHT", True)
 
+    with pytest.raises(BrowserLoginError, match="timed out"):
+        dy_auth.browser_login(headless=True, timeout=0.2)
+
+
+def test_douyin_browser_login_msToken_missing_still_succeeds(monkeypatch):
+    """Regression: after a real QR scan msToken is often *withheld* by
+    risk control. sessionid alone must complete the login."""
+    pw_ctx = _mock_playwright([
+        {"name": "ttwid", "value": "t1", "domain": ".douyin.com",
+         "path": "/", "secure": False, "expires": 0},
+        {"name": "sessionid", "value": "sess1", "domain": ".douyin.com",
+         "path": "/", "secure": True, "expires": 0},
+    ])
+    import doubi.core.auth.browser_login as bl
+    monkeypatch.setattr(bl, "sync_playwright", MagicMock(return_value=pw_ctx), raising=False)
+    monkeypatch.setattr(bl, "HAS_PLAYWRIGHT", True)
+
     cookies = dy_auth.browser_login(headless=True, timeout=5.0)
-    assert len(cookies) == 4
     names = {c["name"] for c in cookies}
-    assert names == {"ttwid", "msToken", "passport_csrf_token", "odin_tt"}
+    assert "sessionid" in names
 
 
 def test_bilibili_browser_login_runs(monkeypatch):
@@ -354,6 +404,80 @@ def test_bilibili_browser_login_runs(monkeypatch):
     cookies = bili_auth.browser_login(headless=True, timeout=5.0)
     assert len(cookies) == 1
     assert cookies[0]["name"] == "SESSDATA"
+
+
+# ---------------------------------------------------------------------------
+# Regression: post-success settle must not wait for ``networkidle``.
+#
+# Both Douyin feed and B-station home have *persistent* traffic after
+# login (WebSocket, video feeds, recommendation streams, heartbeats).
+# Waiting for ``wait_for_load_state("networkidle")`` always times out
+# after 10s — Playwright then throws ``TimeoutError`` and the GUI shows
+# "浏览器登录失败：Timeout 10000ms exceeded" *after* the cookies were
+# already in hand. The fix is a short fixed ``wait_for_timeout`` for
+# any final cookie writes that lag the success signal by a frame.
+# ---------------------------------------------------------------------------
+
+
+def test_post_success_does_not_wait_for_networkidle(monkeypatch):
+    """Regression for the "Timeout 10000ms exceeded" bug.
+
+    The old ``_run_browser`` called
+    ``page.wait_for_load_state("networkidle", timeout=10_000)`` after a
+    successful login. Post-login landing pages have persistent traffic
+    and never reach networkidle within 10s — the call raises
+    ``PlaywrightTimeoutError`` even though ``_wait_for_success``
+    already saw the cookies and returned. This test guards against
+    that pattern being reintroduced.
+    """
+    pw_ctx = _mock_playwright([
+        {"name": "sessionid", "value": "sess1", "domain": ".douyin.com",
+         "path": "/", "secure": True, "expires": 0},
+    ])
+    page = pw_ctx.__enter__.return_value.chromium.launch.return_value.new_context.return_value.new_page.return_value
+
+    import doubi.core.auth.browser_login as bl
+    monkeypatch.setattr(bl, "sync_playwright", MagicMock(return_value=pw_ctx), raising=False)
+    monkeypatch.setattr(bl, "HAS_PLAYWRIGHT", True)
+
+    # Make wait_for_load_state raise loudly if it ever gets called —
+    # that's the path we're guarding against.
+    page.wait_for_load_state = MagicMock(
+        side_effect=AssertionError("wait_for_load_state must not be called "
+                                    "after _wait_for_success — use wait_for_timeout")
+    )
+
+    # The path under test — does not raise.
+    result = dy_auth.browser_login(headless=True, timeout=5.0)
+    assert any(c["name"] == "sessionid" for c in result)
+
+    # The wait_for_load_state mock would have raised if called.
+    page.wait_for_load_state.assert_not_called()
+
+
+def test_post_success_uses_short_fixed_settle(monkeypatch):
+    """The fix uses a short ``wait_for_timeout`` (not wait_for_load_state)
+    to give the final cookie writes time to flush. The settle window
+    must be bounded — never the full 10s timeout that previously broke
+    on busy post-login pages.
+    """
+    pw_ctx = _mock_playwright([
+        {"name": "sessionid", "value": "sess1", "domain": ".douyin.com",
+         "path": "/", "secure": True, "expires": 0},
+    ])
+    page = pw_ctx.__enter__.return_value.chromium.launch.return_value.new_context.return_value.new_page.return_value
+
+    import doubi.core.auth.browser_login as bl
+    monkeypatch.setattr(bl, "sync_playwright", MagicMock(return_value=pw_ctx), raising=False)
+    monkeypatch.setattr(bl, "HAS_PLAYWRIGHT", True)
+
+    dy_auth.browser_login(headless=True, timeout=5.0)
+
+    page.wait_for_timeout.assert_called_once()
+    ms = page.wait_for_timeout.call_args.args[0]
+    # Settle window is short (<= 2s) and strictly positive. If anyone
+    # bumps this past 5s, treat it as a regression of the timeout bug.
+    assert 0 < ms <= 2_000
 
 
 # ---------------------------------------------------------------------------

@@ -18,6 +18,10 @@ import logging
 
 logger = logging.getLogger("doubi.ui.main_window")
 
+#: 自绘标题栏里应用图标的边长。标题栏固定 48px 高，28px 图标上下各留 10px，
+#: 视觉重量合适；qfluentwidgets 默认的 18px 在这个高度里明显偏小。
+TITLEBAR_ICON_SIZE = 28
+
 
 def build_main_window():
     """Return a factory that constructs the :class:`MainWindow` QWidget."""
@@ -35,8 +39,8 @@ def build_main_window():
     )
     from .resources import APP_DISPLAY_NAME, APP_NAME, APP_VERSION, load_app_icon
     from .theme import (
-        FONT_FAMILY, TYPE_BODY, current_theme_name, set_theme, theme_names,
-        muted_qss,
+        FONT_FAMILY, TYPE_BODY, current_theme_name, set_theme, subscribe_theme,
+        theme_names, muted_qss,
     )
     from .task_manager import TaskManager
     from ..core.engine_loader import build_default_pipeline
@@ -57,9 +61,11 @@ def build_main_window():
             self.setMinimumSize(820, 580)
 
             # 应用图标：主窗口的窗口图标、任务栏图标都跟 app.setWindowIcon 走
-            app_icon = load_app_icon()
-            if app_icon is not None:
-                self.setWindowIcon(app_icon)
+            self._refresh_app_icon()
+            # qfluentwidgets 把标题栏图标写死成 18px，太小，先放大
+            self._enlarge_titlebar_icon(TITLEBAR_ICON_SIZE)
+            # 图标底板配色取自主题主色，切主题时要重新渲染
+            subscribe_theme(self, self._refresh_app_icon)
 
             # The shared task manager. Both ParsePage and DownloadPage
             # depend on this — it must be created first.
@@ -132,6 +138,54 @@ def build_main_window():
             self.navigationInterface.setCurrentItem(
                 self.parse_interface.objectName()
             )
+
+        def _enlarge_titlebar_icon(self, size: int = TITLEBAR_ICON_SIZE) -> None:
+            """放大自绘标题栏里的应用图标。
+
+            ``qfluentwidgets.FluentTitleBar`` 把图标写死成 18×18
+            （``iconLabel.setFixedSize(18, 18)`` + ``setIcon`` 里
+            ``pixmap(18, 18)``），在 48px 高的标题栏里明显偏小。
+
+            光改 ``iconLabel`` 尺寸不够：``__init__`` 里已经把
+            ``windowIconChanged`` 连到了原始 ``setIcon`` 上，下一次换主题
+            触发信号就会把放大后的 pixmap 覆盖回 18px。所以要先断开旧连接、
+            按实例覆写 ``setIcon``、再接上新的。
+
+            整个过程对 qfluentwidgets 的内部结构有依赖，因此全程防御性处理：
+            拿不到 ``iconLabel`` 就直接放弃，不影响窗口正常工作。
+            """
+            title_bar = getattr(self, "titleBar", None)
+            label = getattr(title_bar, "iconLabel", None)
+            if title_bar is None or label is None:
+                return
+
+            label.setFixedSize(size, size)
+
+            def set_icon(icon, _label=label, _size=size) -> None:
+                _label.setPixmap(QIcon(icon).pixmap(_size, _size))
+
+            try:
+                self.windowIconChanged.disconnect(title_bar.setIcon)
+            except (TypeError, RuntimeError):
+                # 未连接 / 已析构：忽略，后面照样接上新的
+                pass
+            title_bar.setIcon = set_icon
+            self.windowIconChanged.connect(set_icon)
+            set_icon(self.windowIcon())
+
+        def _refresh_app_icon(self) -> None:
+            """按当前主题重新渲染并挂上应用图标。
+
+            两处都要设：``QApplication`` 级图标决定任务栏 / Alt+Tab 的表现，
+            窗口级图标决定标题栏。只改后者的话任务栏会残留旧配色。
+            """
+            icon = load_app_icon()
+            if icon is None:
+                return
+            self.setWindowIcon(icon)
+            app = QApplication.instance()
+            if app is not None:
+                app.setWindowIcon(icon)
 
         def _cycle_theme(self) -> None:
             """在内置主题包之间循环切换。

@@ -356,6 +356,17 @@ def build_parse_widgets():
             reparse = menu.addAction("解析此项")
             browser = menu.addAction("在浏览器中打开")
             single = menu.addAction("作为单个视频下载")
+
+            # 抖音：用户从合集 tab 复制的往往只是单条视频链接 —
+            # 提供一个入口反查它所属的合集并整体展开。
+            download_collection: Optional[object] = None
+            if (
+                item is not None
+                and not item.is_container()
+                and getattr(item.platform, "value", "") == "douyin"
+            ):
+                download_collection = menu.addAction("下载整个合集")
+
             menu.addSeparator()
             meta = menu.addAction("查看元数据")
             cover = menu.addAction("查看封面")
@@ -395,6 +406,11 @@ def build_parse_widgets():
             if chosen is collapse_episode_action:
                 self._collapse_episode(row)
                 return
+            if chosen is download_collection and item is not None:
+                asyncio.create_task(
+                    self._download_whole_collection(item),
+                )
+                return
             if item is None:
                 return
             if chosen is reparse:
@@ -411,6 +427,42 @@ def build_parse_widgets():
             elif chosen is cover:
                 if item.cover_url:
                     QDesktopServices.openUrl(QUrl(item.cover_url))
+
+        async def _download_whole_collection(self, item: MediaItem) -> None:
+            """反查抖音视频所属合集，展开整个合集并刷新结果表格。"""
+            from ...core.models import Platform
+            from ...core.registry import PlatformRegistry
+            adapter = PlatformRegistry.get(Platform.DOUYIN)
+            if adapter is None or not hasattr(adapter, "collection_of"):
+                self._toast(InfoBar.error, "获取合集失败",
+                            "未找到抖音适配器，请重启软件。")
+                return
+            try:
+                container = await adapter.collection_of(item.item_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("collection_of failed")
+                self._toast(InfoBar.error, "获取合集失败",
+                            f"{item.title or item.item_id}: {exc}")
+                return
+            if container is None:
+                self._toast(InfoBar.info, "不属于合集",
+                            f"{item.title or item.item_id} 不在任何合集中。")
+                return
+            try:
+                children = await adapter.expand(container)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("expand collection failed")
+                self._toast(InfoBar.error, "展开合集失败",
+                            f"{container.title}: {exc}")
+                return
+            if not children:
+                self._toast(InfoBar.warning, "合集为空",
+                            f"{container.title}：未获取到任何视频。")
+                return
+            self._fill_result_table(children)
+            self._toast(InfoBar.success, "合集已展开",
+                        f"{container.title}（{len(children)} 个视频），"
+                        f"请勾选后点击「下载选中」。")
 
         def _show_metadata_dialog(self, item: MediaItem) -> None:
             from qfluentwidgets import MessageBox

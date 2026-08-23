@@ -32,6 +32,7 @@ from ...core.models import (
 )
 from .api import DouyinAPI
 from .url import DouyinURLType, classify_douyin_url
+from .webapi import DouyinWebAPI, aweme_to_media_item
 
 logger = logging.getLogger("doubi.platforms.douyin.strategies")
 
@@ -51,6 +52,7 @@ class ContainerStrategy(ABC):
 
     def __init__(self, api: DouyinAPI):
         self.api = api
+        self.webapi: Optional[DouyinWebAPI] = None
 
     @abstractmethod
     async def expand(self, url: str, *, max_count: int = 0) -> list[MediaItem]:
@@ -89,12 +91,35 @@ class PostStrategy(ContainerStrategy):
     description = "Download a user's published videos"
     requires_login = False
 
+    def __init__(self, api: DouyinAPI, *, webapi: Optional[DouyinWebAPI] = None):
+        super().__init__(api)
+        self.webapi = webapi
+
     async def expand(self, url: str, *, max_count: int = 0) -> list[MediaItem]:
         sec_uid = self._extract_sec_uid(url)
         if not sec_uid:
             logger.warning("PostStrategy: not a user URL: %s", url)
             return []
 
+        # Preferred path: signed web API enumeration. yt-dlp has no
+        # Douyin user-page extractor (2026.08), so fetch_flat always
+        # fell through to the generic extractor and returned nothing.
+        if self.webapi is not None:
+            try:
+                awemes = await self.webapi.iter_user_posts(
+                    sec_uid, max_count=max_count,
+                )
+            except Exception:
+                logger.warning(
+                    "PostStrategy: web API enumeration failed for %s",
+                    sec_uid, exc_info=True,
+                )
+                return []
+            items = [aweme_to_media_item(a) for a in awemes]
+            logger.info("PostStrategy[%s]: %d items", sec_uid, len(items))
+            return items
+
+        # Fallback: legacy yt-dlp flat extraction (best effort).
         playlist_items = f"1:{max_count}" if max_count and max_count > 0 else None
         info = await self.api.fetch_flat(url, playlist_items=playlist_items)
         if not info:

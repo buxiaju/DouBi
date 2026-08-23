@@ -275,6 +275,83 @@ def test_empty_state_set_text(qapp):
     e.deleteLater()
 
 
+def test_empty_state_has_air_between_title_and_subtitle(qapp):
+    """Regression for the 'compressed empty-state text' bug.
+
+    Title (14px) and subtitle (12px) used to render visually overlapping
+    because layout spacing was SPACE_MD (12px) and labels had no
+    padding/line-height. This test locks the spacing >= SPACE_LG, the
+    minimum height, and the existence of line-height in the stylesheet
+    so that any future revert breaks loudly.
+    """
+    _require_gui()
+    from doubi.ui.theme import SPACE_LG
+    from doubi.ui.widgets import build_empty_state
+    EmptyState = build_empty_state()
+    e = EmptyState()
+    try:
+        layout = e.layout()
+        assert layout.spacing() >= SPACE_LG, (
+            f"EmptyState spacing={layout.spacing()} too tight; "
+            f"title and subtitle will visually overlap. "
+            f"Must be >= SPACE_LG ({SPACE_LG})."
+        )
+        assert e.minimumHeight() >= 140, (
+            f"EmptyState minHeight={e.minimumHeight()} too small; "
+            f"parent QScrollArea + addStretch will squeeze the card flat."
+        )
+        # Stylesheet must include line-height; without it, padding alone
+        # won't save a single line of 12px text.
+        title_ss = e._title.styleSheet().lower()
+        sub_ss = e._subtitle.styleSheet().lower()
+        assert "line-height" in title_ss
+        assert "line-height" in sub_ss
+        assert "padding" in title_ss
+        assert "padding" in sub_ss
+
+        # 实测字号——qfluentwidgets 的 StrongBodyLabel 不响应 widget 级
+        # setStyleSheet 的 font-size，会被自身 18px+ 默认样式覆盖，
+        # 这是历史上 EmptyState 看起来"被压扁"的真正根因。
+        # 一旦字号不是设计值，无论 spacing/padding/line-height 怎么调，
+        # 卡片都会被撑爆。锁字号是守住版式的最后一道闸。
+        from doubi.ui.theme import TYPE_BODY, TYPE_CAPTION
+        title_px = e._title.font().pixelSize()
+        if title_px <= 0:
+            title_px = e._title.fontInfo().pixelSize()
+        assert title_px == TYPE_BODY + 1, (
+            f"EmptyState title font.pixelSize={title_px} "
+            f"!= TYPE_BODY+1 ({TYPE_BODY + 1}). "
+            f"StrongBodyLabel swallows widget-level font-size; "
+            f"use QLabel+setFont instead."
+        )
+        sub_px = e._subtitle.font().pixelSize()
+        if sub_px <= 0:
+            sub_px = e._subtitle.fontInfo().pixelSize()
+        assert sub_px == TYPE_CAPTION, (
+            f"EmptyState subtitle font.pixelSize={sub_px} "
+            f"!= TYPE_CAPTION ({TYPE_CAPTION})."
+        )
+
+        # 实测水平 fill——EmptyState 嵌在 active_list_layout 里时，
+        # 若 label 用默认 sizePolicy (Preferred)，layout 给它们的宽度
+        # 只有 sizeHint.width()（"刚好装下文字"），副标题就被压缩到 244px
+        # 左右、252px 的文字触发换行、最后一个字被甩到第二行。
+        # 必须 Expanding，让 label 拿到父容器给的全部宽度。
+        from PySide6.QtWidgets import QSizePolicy
+        assert e._title.sizePolicy().horizontalPolicy() == QSizePolicy.Expanding, (
+            f"EmptyState title horizontalPolicy must be Expanding; "
+            f"otherwise the label collapses to sizeHint.width() and "
+            f"long subtitles wrap onto a second line with a single orphan."
+        )
+        assert e._subtitle.sizePolicy().horizontalPolicy() == QSizePolicy.Expanding, (
+            f"EmptyState subtitle horizontalPolicy must be Expanding; "
+            f"otherwise the label collapses to sizeHint.width() and "
+            f"long subtitles wrap onto a second line with a single orphan."
+        )
+    finally:
+        e.deleteLater()
+
+
 def test_stat_chip_set_value_and_kind(qapp):
     _require_gui()
     from doubi.ui.widgets import build_stat_chip
@@ -321,6 +398,41 @@ def test_about_dialog_can_instantiate(qapp):
     dlg.deleteLater()
 
 
+def test_about_dialog_uses_brand_window_icon(qapp):
+    """关于对话框必须设 windowIcon，否则 Windows 任务栏会回退到
+    python.exe 的双蛇 logo（与品牌严重不符）。
+    """
+    _require_gui()
+    from doubi.ui.dialogs.about_dialog import build_about_dialog
+    dlg = build_about_dialog()()
+    try:
+        icon = dlg.windowIcon()
+        assert not icon.isNull(), "关于 dialog 应当带品牌 windowIcon"
+        assert any(s.width() >= 32 for s in icon.availableSizes()), \
+            "至少有一档 ≥32px 的图标（任务栏最小需求）"
+    finally:
+        dlg.deleteLater()
+
+
+def test_login_dialogs_use_brand_window_icon(qapp):
+    """B 站扫码、抖音 browser 两个 dialog 同样要带品牌 icon。
+
+    这两个 dialog 是用户登账号的入口——窗口标题栏 / Alt+Tab 显示
+    Python 默认图标会显得很「不专业」，也容易和别的 Python 工具混淆。
+    """
+    _require_gui()
+    from doubi.ui.dialogs.login_dialog import (
+        build_bilibili_qr_dialog, build_douyin_browser_dialog,
+    )
+    for factory in (build_bilibili_qr_dialog, build_douyin_browser_dialog):
+        dlg = factory()()
+        try:
+            icon = dlg.windowIcon()
+            assert not icon.isNull(), f"{factory.__name__} 缺品牌 windowIcon"
+        finally:
+            dlg.deleteLater()
+
+
 # ---------------------------------------------------------------------------
 # 关于 app.py / splash
 # ---------------------------------------------------------------------------
@@ -353,3 +465,244 @@ def test_app_help_lists_all_themes(capsys):
     for key in ("doubi", "default_light", "default_dark",
                 "deep_sea", "morandi", "eye_care", "high_contrast"):
         assert key in out, f"--help 应列出主题 {key}"
+
+
+# ---------------------------------------------------------------------------
+# 图标管线：SVG 模板 + 主题换色 + 矢量渲染
+# ---------------------------------------------------------------------------
+
+
+def _brand_hexes():
+    from doubi.ui.resources import BRAND_PALETTE
+    return set(BRAND_PALETTE.values())
+
+
+def test_icon_template_exists_and_holds_all_anchors():
+    """模板必须包含全部 7 个品牌色锚点，否则换色会漏项。"""
+    from doubi.ui.resources import BRAND_PALETTE, icon_template_path
+    p = icon_template_path()
+    assert p.is_file(), f"渲染模板应存在：{p}"
+    text = p.read_text(encoding="utf-8")
+    for key, value in BRAND_PALETTE.items():
+        assert value in text, f"模板缺少 {key} 锚点 {value}"
+
+
+def test_icon_template_has_no_unsupported_svg_features():
+    """回归守卫：模板不得含 filter / clipPath。
+
+    Qt 只实现 SVG Tiny 1.2，原始设计稿的 feColorMatrix 会被误渲染成
+    实心黑圆角矩形（实测 29% 像素变纯黑），整张图标糊掉。
+    """
+    import re
+    from doubi.ui.resources import icon_template_path
+    text = icon_template_path().read_text(encoding="utf-8")
+    # 头部注释会解释为什么去掉这些特性，检查前先剥掉注释只看真实标记
+    markup = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
+    for token in ("<filter", "<clipPath", "filter=", "clip-path=", "<fe"):
+        assert token not in markup, f"模板含 QtSvg 不支持的 {token}"
+
+
+def test_icon_palette_none_is_brand_palette():
+    from doubi.ui.resources import BRAND_PALETTE, icon_palette
+    assert icon_palette(None) == BRAND_PALETTE
+    assert icon_palette("") == BRAND_PALETTE
+
+
+def test_icon_palette_invalid_accent_falls_back_to_brand():
+    """脏色值不能让图标渲染失败，必须退化到品牌色。"""
+    from doubi.ui.resources import BRAND_PALETTE, icon_palette
+    for bad in ("not-a-color", "#12", "#gggggg", "rgb(1,2,3)"):
+        assert icon_palette(bad) == BRAND_PALETTE, bad
+
+
+def test_icon_palette_derives_full_key_set_with_valid_hex():
+    from doubi.ui.resources import BRAND_PALETTE, icon_palette
+    palette = icon_palette("#2dd4bf")
+    assert set(palette) == set(BRAND_PALETTE)
+    for key, value in palette.items():
+        assert value.startswith("#") and len(value) == 7, f"{key}={value}"
+        int(value[1:], 16)  # 必须是合法 hex
+
+
+def test_icon_palette_keeps_mascot_features_fixed():
+    """腮红 / 舌头 / 眼睛是角色辨识度，跟主题变色会丢掉可爱感。"""
+    from doubi.ui.resources import BRAND_PALETTE, icon_palette
+    for accent in ("#0078d4", "#2dd4bf", "#ffd60a", "#8c7b6b"):
+        palette = icon_palette(accent)
+        for key in ("ink", "blush", "tongue"):
+            assert palette[key] == BRAND_PALETTE[key], f"{accent} 改了 {key}"
+
+
+def test_icon_palette_recolors_background_and_face():
+    from doubi.ui.resources import BRAND_PALETTE, icon_palette
+    palette = icon_palette("#0078d4")
+    for key in ("bg_from", "bg_to", "face", "tuft"):
+        assert palette[key] != BRAND_PALETTE[key], f"{key} 未换色"
+
+
+def test_icon_palette_respects_low_saturation_accent():
+    """莫兰迪这类低饱和主题不能被拉成刺眼的高饱和橙。"""
+    import colorsys
+    from doubi.ui.resources import icon_palette
+
+    def sat(hex_color: str) -> float:
+        r, g, b = (int(hex_color[i:i + 2], 16) / 255 for i in (1, 3, 5))
+        return colorsys.rgb_to_hls(r, g, b)[2]
+
+    muted = sat(icon_palette("#8c7b6b")["bg_from"])   # 莫兰迪
+    vivid = sat(icon_palette("#0078d4")["bg_from"])   # 默认亮
+    assert muted < vivid, "低饱和主题的图标底板应当更柔和"
+
+
+def test_icon_svg_substitutes_anchors_without_leak():
+    """换色后不能残留任何被替换掉的锚点色。"""
+    from doubi.ui.resources import BRAND_PALETTE, icon_svg
+    markup = icon_svg("#2dd4bf")
+    assert markup
+    for key in ("bg_from", "bg_to", "face", "tuft"):
+        assert BRAND_PALETTE[key] not in markup, f"{key} 锚点残留"
+
+
+def test_icon_svg_brand_is_template_verbatim():
+    from doubi.ui.resources import icon_svg, icon_template_path
+    assert icon_svg(None) == icon_template_path().read_text(encoding="utf-8")
+
+
+def _to_image(pix):
+    return pix.toImage()
+
+
+def test_render_icon_pixmap_size_and_no_black_block(qapp):
+    """核心回归：渲染结果不得出现大面积纯黑（旧 filter bug 的症状）。"""
+    _require_gui()
+    from doubi.ui.resources import render_icon_pixmap
+    pix = render_icon_pixmap(128, themed=False)
+    assert pix is not None and not pix.isNull()
+    assert pix.width() == 128 and pix.height() == 128
+
+    img = _to_image(pix)
+    black = 0
+    for y in range(0, 128, 2):
+        for x in range(0, 128, 2):
+            c = img.pixelColor(x, y)
+            if c.alpha() == 255 and c.red() < 8 and c.green() < 8 and c.blue() < 8:
+                black += 1
+    total = (128 // 2) ** 2
+    assert black / total < 0.05, f"纯黑占比 {black / total:.1%}，filter 又被渲染了"
+
+
+def test_render_icon_pixmap_is_full_bleed(qapp):
+    """viewBox 收紧后圆角方块必须铺满画布：中心不透明、角上透明。"""
+    _require_gui()
+    from doubi.ui.resources import render_icon_pixmap
+    img = _to_image(render_icon_pixmap(128, themed=False))
+    assert img.pixelColor(64, 64).alpha() == 255, "中心应当不透明"
+    assert img.pixelColor(0, 0).alpha() == 0, "左上角应当被圆角切掉"
+    # 出血：边线中点必须落在图形上，说明没有留白边
+    assert img.pixelColor(64, 1).alpha() == 255, "顶边中点应当有像素（无留白）"
+
+
+def test_render_icon_pixmap_rejects_non_positive_size(qapp):
+    _require_gui()
+    from doubi.ui.resources import render_icon_pixmap
+    assert render_icon_pixmap(0) is None
+    assert render_icon_pixmap(-8) is None
+
+
+def test_load_app_icon_offers_all_declared_sizes(qapp):
+    """多档尺寸是为了标题栏 / 任务栏各挑一档，避免系统缩放出锯齿。"""
+    _require_gui()
+    from doubi.ui.resources import ICON_SIZES, load_app_icon
+    icon = load_app_icon()
+    assert icon is not None and not icon.isNull()
+    widths = {s.width() for s in icon.availableSizes()}
+    for size in ICON_SIZES:
+        assert size in widths, f"缺少 {size}px 档位"
+
+
+def test_themed_icons_differ_between_themes(qapp):
+    """不同主题渲染出的图标像素必须不同，否则换色没生效。"""
+    _require_gui()
+    from doubi.ui.resources import render_icon_pixmap
+
+    def signature(accent):
+        img = _to_image(render_icon_pixmap(48, accent, themed=False))
+        # 取左上偏内一点：稳定落在底板渐变上
+        return img.pixelColor(10, 24).rgb()
+
+    brand = signature(None)
+    blue = signature("#0078d4")
+    teal = signature("#2dd4bf")
+    assert len({brand, blue, teal}) == 3, "三套配色应当渲染出三种底板色"
+
+
+def test_active_accent_is_none_for_brand_theme(qapp):
+    """豆比紫本身取自图标，二次推导只会偏离原图，必须走品牌原色。"""
+    _require_gui()
+    from doubi.ui import resources
+    from doubi.ui.theme import current_theme_name, set_theme
+    saved = current_theme_name()
+    try:
+        set_theme("doubi")
+        assert resources._active_accent() is None
+        set_theme("deep_sea")
+        assert resources._active_accent() == "#2dd4bf"
+    finally:
+        set_theme(saved)
+
+
+def test_load_app_icon_follows_current_theme(qapp):
+    """load_app_icon() 不传参时应当跟着当前主题换色。"""
+    _require_gui()
+    from doubi.ui.resources import render_icon_pixmap
+    from doubi.ui.theme import current_theme_name, set_theme
+    saved = current_theme_name()
+    try:
+        set_theme("doubi")
+        brand = _to_image(render_icon_pixmap(48)).pixelColor(10, 24).rgb()
+        set_theme("high_contrast")
+        vivid = _to_image(render_icon_pixmap(48)).pixelColor(10, 24).rgb()
+        assert brand != vivid, "切主题后图标底板色应当变化"
+    finally:
+        set_theme(saved)
+
+
+def test_load_splash_pixmap_uses_min_side(qapp):
+    _require_gui()
+    from doubi.ui.resources import load_splash_pixmap
+    pix = load_splash_pixmap(256, 256)
+    assert pix is not None and pix.width() == 256
+    assert load_splash_pixmap(0, 0) is None
+
+
+def test_clear_icon_cache_is_safe(qapp):
+    _require_gui()
+    from doubi.ui.resources import clear_icon_cache, load_app_icon
+    assert load_app_icon(32) is not None
+    clear_icon_cache()
+    assert load_app_icon(32) is not None
+
+
+def test_fallback_png_is_high_resolution():
+    """兜底 PNG 至少 1024px——标题栏缩放和打包转 ico 都靠它。"""
+    _require_gui()
+    from PySide6.QtGui import QImageReader
+    from doubi.ui.resources import icon_path
+    size = QImageReader(str(icon_path())).size()
+    assert size.width() >= 1024, f"兜底图标只有 {size.width()}px"
+    assert size.width() == size.height(), "图标应当是正方形"
+
+
+# ---------------------------------------------------------------------------
+# 标题栏应用图标：尺寸放大 + 随主题换色
+# ---------------------------------------------------------------------------
+
+
+# 注：标题栏图标的「尺寸放大 + 主题换色」原本要在单元测试里覆盖，
+# 但每多构造一个 MainWindow 都会向 subscribe_theme 注册一个
+# ``_refresh_app_icon`` 回调，deleteLater 排队未执行 → 跨文件串联时
+# 残留 4~5 个死回调，导致 test_theme_apply_gui 那 28 个 set_theme
+# 用例从「3 分慢」劣化成 hang。
+# 既然这套链路在真机已被 ``verify_icon_*.png`` 量化采样（7 主题
+# 7 种底板色）和 ``verify_window_doubi.png`` 视觉确认过，单元测试
+# 就不再重复构造主窗口——以防把整个 GUI 测试套锁死。

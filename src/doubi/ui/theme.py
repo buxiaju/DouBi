@@ -282,11 +282,46 @@ def _dark_tokens(
 
 
 THEMES: dict[str, ThemePack] = {
+    "default_light": ThemePack(
+        name="default_light",
+        label="默认亮",
+        dark=False,
+        accent="#0078d4",
+        accent_soft="rgba(0, 120, 212, 0.10)",
+        accent_strong="#005a9e",
+        bg_elevated="#ffffff",
+        shadow="rgba(0, 0, 0, 0.08)",
+        tokens=_light_tokens(
+            bg_base="#f3f3f3",
+            bg_layer="#ffffff",
+            bg_hover="#e6e6e6",
+            text_primary="#1a1a1a",
+            text_muted="#8a8a8a",
+        ),
+    ),
+    "default_dark": ThemePack(
+        name="default_dark",
+        label="默认暗",
+        dark=True,
+        accent="#4cc2ff",
+        accent_soft="rgba(76, 194, 255, 0.16)",
+        accent_strong="#7fd6ff",
+        bg_elevated="#2f2f2f",
+        shadow="rgba(0, 0, 0, 0.45)",
+        tokens=_dark_tokens(
+            bg_base="#202020",
+            bg_layer="#2b2b2b",
+            bg_hover="#3a3a3a",
+            text_primary="#f0f0f0",
+            text_muted="#a0a0a0",
+        ),
+    ),
     # ----------------------------------------------------------------
     # 品牌主题——「豆比紫」
     #
     # 配色直接来自产品图标：深紫底色 + 琥珀/朱砂强调色。
-    # 这是 DouBi 自家最有辨识度的视觉，优先级最高。
+    # 这是 DouBi 自家最有辨识度的视觉。
+    # 排在两套「默认」主题之后，让下拉与导航栏循环先出现中性选项。
     # ----------------------------------------------------------------
     "doubi": ThemePack(
         name="doubi",
@@ -324,40 +359,6 @@ THEMES: dict[str, ThemePack] = {
             "progress_error": "#ff8a8a",
             "progress_paused": "#f0c879",
         },
-    ),
-    "default_light": ThemePack(
-        name="default_light",
-        label="默认亮",
-        dark=False,
-        accent="#0078d4",
-        accent_soft="rgba(0, 120, 212, 0.10)",
-        accent_strong="#005a9e",
-        bg_elevated="#ffffff",
-        shadow="rgba(0, 0, 0, 0.08)",
-        tokens=_light_tokens(
-            bg_base="#f3f3f3",
-            bg_layer="#ffffff",
-            bg_hover="#e6e6e6",
-            text_primary="#1a1a1a",
-            text_muted="#8a8a8a",
-        ),
-    ),
-    "default_dark": ThemePack(
-        name="default_dark",
-        label="默认暗",
-        dark=True,
-        accent="#4cc2ff",
-        accent_soft="rgba(76, 194, 255, 0.16)",
-        accent_strong="#7fd6ff",
-        bg_elevated="#2f2f2f",
-        shadow="rgba(0, 0, 0, 0.45)",
-        tokens=_dark_tokens(
-            bg_base="#202020",
-            bg_layer="#2b2b2b",
-            bg_hover="#3a3a3a",
-            text_primary="#f0f0f0",
-            text_muted="#a0a0a0",
-        ),
     ),
     "deep_sea": ThemePack(
         name="deep_sea",

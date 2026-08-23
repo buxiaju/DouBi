@@ -33,6 +33,7 @@ from .api import DouyinAPI
 from .auth import load_cookie_file
 from .strategies import ContainerStrategy, LikeStrategy, PostStrategy
 from .url import DouyinURLType, classify_douyin_url
+from .webapi import DouyinWebAPI, aweme_to_media_item
 
 logger = logging.getLogger("doubi.platforms.douyin")
 
@@ -58,13 +59,18 @@ class DouyinAdapter(PlatformAdapter):
         re.compile(r"https?://(?:www\.)?douyin\.com/(?:video|note|gallery|collection|mix|music|user)/"),
         re.compile(r"https?://live\.douyin\.com/\d+"),
         re.compile(r"https?://v\.douyin\.com/"),
+        # Feed pages opening a video in a modal: /jingxuan?modal_id=...
+        re.compile(r"https?://(?:www\.)?douyin\.com/[^?\s]*[?&][^\s]*?modal_id=\d+"),
+        # Mobile share links: iesdouyin.com/share/mix/detail/{id}/ ...
+        re.compile(r"https?://(?:www\.)?iesdouyin\.com/share/(?:mix|video|note)/"),
     ]
 
     def __init__(self):
         cookies_file = load_cookie_file()
         self.api = DouyinAPI(cookies_file=cookies_file)
+        self.webapi = DouyinWebAPI(cookies_file=cookies_file)
         self._strategies: dict[str, ContainerStrategy] = {
-            "post": PostStrategy(self.api),
+            "post": PostStrategy(self.api, webapi=self.webapi),
             "like": LikeStrategy(self.api),
         }
         self._default_strategy = "post"
@@ -105,6 +111,19 @@ class DouyinAdapter(PlatformAdapter):
             logger.error("Unrecognized Douyin URL: %s", url)
             return None
 
+        # modal_id URLs (e.g. /jingxuan?modal_id=...) classify as VIDEO but
+        # are NOT recognized by yt-dlp's extractor — rewrite to the canonical
+        # /video/{id} form before fetching metadata or downloading.
+        if (
+            classified.type is DouyinURLType.VIDEO
+            and classified.item_id
+            and f"/video/{classified.item_id}" not in url
+        ):
+            url = f"https://www.douyin.com/video/{classified.item_id}"
+
+        if classified.type in (DouyinURLType.COLLECTION, DouyinURLType.MIX):
+            return await self._parse_collection(classified.item_id)
+
         if classified.type is DouyinURLType.USER:
             return await self._parse_user(url, classified.item_id)
 
@@ -139,6 +158,56 @@ class DouyinAdapter(PlatformAdapter):
         return item
 
     # ------------------------------------------------------------------
+    # collection (合集) URL → MIX container
+    # ------------------------------------------------------------------
+
+    async def _parse_collection(self, mix_id: str) -> MediaItem:
+        """Build a MIX container for a 合集 URL.
+
+        Children are NOT expanded here — the pipeline calls
+        :meth:`expand` when it sees the container. The title is
+        probed best-effort from the first page (``/mix/detail/`` is
+        often 403'd by risk control, but ``/mix/aweme/`` page 1
+        carries ``mix_info.mix_name``).
+        """
+        title = f"抖音合集 {mix_id}"
+        try:
+            page = await self.webapi.get_mix_aweme(mix_id, count=1)
+            for raw in page["items"]:
+                aweme = raw if raw.get("aweme_id") else (
+                    raw.get("aweme_info") or raw.get("aweme") or {}
+                )
+                name = ((aweme.get("mix_info") or {}).get("mix_name") or "").strip()
+                if name:
+                    title = f"抖音合集《{name}》"
+                    break
+        except Exception:
+            logger.debug("mix title probe failed for %s", mix_id, exc_info=True)
+        return MediaItem(
+            platform=self.platform,
+            item_id=mix_id,
+            title=title,
+            author=Author(),
+            media_type=MediaType.MIX,
+            source_url=f"https://www.douyin.com/collection/{mix_id}",
+            extra={"mix_id": mix_id},
+        )
+
+    async def collection_of(self, aweme_id: str) -> Optional[MediaItem]:
+        """Return the 合集 container a single video belongs to (or None).
+
+        Lets the GUI offer「下载整个合集」when the user only has a
+        link to one video of the collection.
+        """
+        detail = await self.webapi.get_video_detail(aweme_id)
+        if not detail:
+            return None
+        mix_id = (detail.get("mix_info") or {}).get("mix_id")
+        if not mix_id:
+            return None
+        return await self._parse_collection(str(mix_id))
+
+    # ------------------------------------------------------------------
     # user URL → container
     # ------------------------------------------------------------------
 
@@ -160,11 +229,20 @@ class DouyinAdapter(PlatformAdapter):
         )
 
     async def expand(self, item: MediaItem, *, strategy: str = "post", max_count: int = 0) -> list[MediaItem]:
-        """Expand a USER container using the named strategy.
+        """Expand a USER or MIX container using the named strategy.
 
         Returns the children list. Mutates ``item.children`` as a side
         effect so callers that keep the item see the expansion.
         """
+        if item.media_type is MediaType.MIX:
+            # 合集：strategy is irrelevant; enumerate via the signed
+            # web API (yt-dlp has no Douyin collection extractor).
+            awemes = await self.webapi.iter_mix_awemes(
+                item.item_id, max_count=max_count,
+            )
+            children = [aweme_to_media_item(a) for a in awemes]
+            item.children = children
+            return children
         if item.media_type is not MediaType.USER:
             return list(item.children)
         s = self._strategies.get(strategy) or self._strategies[self._default_strategy]

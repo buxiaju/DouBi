@@ -34,7 +34,8 @@ def show_splash(app) -> Optional[object]:
 
     from .resources import load_splash_pixmap
 
-    pix = load_splash_pixmap(220, 220)
+    # 256px：图标现在是矢量渲染，放大不糊，闪屏可以给足品牌存在感
+    pix = load_splash_pixmap(256, 256)
     if pix is None:
         return None
 

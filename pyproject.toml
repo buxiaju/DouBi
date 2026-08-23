@@ -34,6 +34,7 @@ dependencies = [
     "python-dateutil>=2.8.2",
     "aiosqlite>=0.19.0",
     "qrcode>=7.4",          # used by bilibili QR login in the CLI
+    "gmssl>=3.2",           # sm3 for douyin a_bogus signing (M6.7, platforms/douyin/sign)
 ]
 
 [project.optional-dependencies]

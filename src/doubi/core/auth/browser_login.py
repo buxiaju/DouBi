@@ -140,8 +140,16 @@ class _BaseBrowserLogin:
                 if on_page_ready is not None:
                     on_page_ready(page)
                 self._wait_for_success(page, context)
-                # Give the page a moment to settle any final cookie writes
-                page.wait_for_load_state("networkidle", timeout=10_000)
+                # Cookies are visible via context.cookies() the moment
+                # _wait_for_success returns — the previous
+                # ``wait_for_load_state("networkidle")`` was a bug:
+                # post-login landing pages (Douyin feed, B-station home)
+                # have *persistent* traffic (WebSocket, video feed,
+                # heartbeats) and never reach networkidle within 10s,
+                # throwing ``TimeoutError`` after the cookies are
+                # already in hand. A short fixed settle is enough for
+                # any final cookie writes that lag behind by a frame.
+                page.wait_for_timeout(500)
                 cookies = self._collect_cookies(context)
                 final_url = page.url
             finally:

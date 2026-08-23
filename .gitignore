@@ -141,3 +141,30 @@ cython_debug/
 /Bili23-Downloader-main/
 /douyin-downloader-main/
 /Downloaded/
+# 本地调试草稿（截图脚本、渲染探针等，不进版本库）
+/.scratch/
+
+# 运行时产物：本机下载历史与任务库，含个人浏览痕迹，不入库
+/doubi.db
+/doubi.db-journal
+/download_manifest.jsonl
+
+# 联网实测脚本与其抓下来的真实响应快照（含账号相关字段）
+/_test_live/
+
+# 编辑器 / 助手工作目录
+/.workbuddy/
+
+# 打包临时产物
+/_doubi_gui_launcher.py
+/installer/*.log
+
+# 注意：tools/nsis/ 里的便携版 NSIS 是**故意入库**的，
+# 目的是 clone 下来即可 python scripts/build_installer.py，
+# 不需要额外装 NSIS。它是 zlib/libpng 许可，见 tools/nsis/nsis-3.11/COPYING。
+# 但压缩包本身与解压后的目录重复，2.25 MB 白占，排除：
+/tools/nsis/*.zip
+
+# 临时抓屏，文档没引用，体积还大
+/screenshots/screen_now.png
+/screenshots/real_run.png

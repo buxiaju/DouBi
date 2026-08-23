@@ -1,6 +1,6 @@
 # DouBi 架构说明
 
-> 版本：M6.3 快照（2026-08-23） · 对应 `INTEGRATION_PLAN.md` 的 M0–M6 与 `CHANGELOG.md` 的 M6.1–M6.3
+> 版本：M6.7 快照（2026-08-23） · 对应 `INTEGRATION_PLAN.md` 的 M0–M6 与 `CHANGELOG.md` 的 M6.1–M6.7
 
 ## 1. 分层
 
@@ -8,7 +8,7 @@
 ┌─────────────────────────────────────────────────────────────┐
 │ 入口层（可互换，共享同一套 core）                              │
 │   cli/        doubi <download|auth|live|serve|mcp>          │
-│   ui/         doubi-gui（PySide6 Fluent，6 套主题包）        │
+│   ui/         doubi-gui（PySide6 Fluent，7 套主题包）        │
 │                theme.py = token 表 + set_theme 全局广播      │
 │   server/     doubi-serve（FastAPI REST）                    │
 │   mcp/        doubi-mcp（stdio JSON-RPC）                    │
@@ -27,7 +27,8 @@
 │   yt_dlp.py        YtDlpEngine（to_thread 包装）             │
 ├─────────────────────────────────────────────────────────────┤
 │ platforms/（平台适配器，自注册）                               │
-│   douyin/    adapter / api / auth / strategies / url / live │
+│   douyin/    adapter / api / auth / strategies / url / live /
+│              webapi（签名 Web API）/ sign（a_bogus / x_bogus）
 │   bilibili/  adapter / api / auth / strategies / url /      │
 │              qr_login / wbi                                 │
 └─────────────────────────────────────────────────────────────┘
@@ -39,7 +40,8 @@
 URL → PlatformRegistry.detect() → adapter.parse(url)
    → MediaItem（单条）或容器（USER/FAVLIST/MIX，children=[]）
    → pipeline.process_url():
-        容器? → adapter.expand(strategy) → process_batch(children)
+        容器?（is_container() 或 media_type ∈ {USER, MIX}）
+             → adapter.expand(strategy) → process_batch(children)
         单条? → naming.set_item_output_template(item)
               → engine.download(item, options)   # yt-dlp
               → Database.record_download()        # media_item 表
@@ -57,6 +59,13 @@ season（合集）
 
 判定规则：**必须用 `len(sections) > 1`**。无分类的普通合集也带 `ugc_season`，但 `sections`
 只有一项且 title 恒为「正片」——用 `season is not None` 会把普通合集误判成带分类合集。
+
+**抖音合集（mix）是单层容器**（M6.7）：`douyin.com/collection/{mix_id}` 或
+`iesdouyin.com/share/mix/detail/{mix_id}/` 分享链 → `MediaType.MIX` 壳（children 解析时不填）。
+yt-dlp **没有**抖音合集/用户页抽取器，展开完全走签名 Web API
+（`platforms/douyin/webapi.py`，a_bogus 签名 + 反爬重试，详见 `DEVELOPMENT.md` §14.6）。
+因为 `is_container()` 只看 children 非空，pipeline 的容器判定必须写成
+`is_container() or media_type in (USER, MIX)`——这也是 B 站 LIST 合集的同一形态。
 
 关键约定：
 
@@ -224,14 +233,14 @@ else:
 
 ## 8. 主题的全局生效链路
 
-`ui/theme.py` 是**唯一的颜色真相源**：6 套 `ThemePack`，每套自带一张完整 token 表
+`ui/theme.py` 是**唯一的颜色真相源**：7 套 `ThemePack`，每套自带一张完整 token 表
 （`bg_base` / `bg_layer` / `text_primary` / `border` / 语义色…）和自己的明度 `dark`。
 没有独立的「亮/暗/跟随系统」开关——明度是主题包的属性，不是正交维度。
 
 ### 为什么不能只调 `setTheme()`
 
 qfluentwidgets 只有 `Theme.LIGHT` / `Theme.DARK` 两套内置色板，`setThemeColor()` 又
-只改强调色。**两个 API 加起来也表达不了 6 套底色**，所以 `set_theme()` 必须在它们之上
+只改强调色。**两个 API 加起来也表达不了 7 套底色**，所以 `set_theme()` 必须在它们之上
 再补四步，才能让「每一处颜色」都跟着主题走：
 
 ```
@@ -269,3 +278,54 @@ set_theme(name)
 
 落盘只发生在设置页的「保存设置」（`_on_save()` 写 `data["theme"]`）；下拉框选中和
 导航栏画笔按钮都只是**即时预览，不写配置**。
+
+## 9. 图标管线
+
+图标有三种形态，对应三个文件 + 两个角色：
+
+| 文件 | 角色 | 运行时 | 谁来读 |
+| --- | --- | --- | --- |
+| `ui/resources/icon.svg` | 设计源稿（含 filter / clipPath） | 不参与渲染 | 设计参考 |
+| `ui/resources/icon_template.svg` | 渲染模板（QtSvg 安全子集 + 7 个换色锚点） | **是** | QtSvg |
+| `ui/resources/icon.png` | 1024px 兜底位图 | QtSvg 不可用时 | Qt |
+| `ui/resources/icon.ico` | 多档位 .ico（16/32/48/64/128/256） | 操作系统 | **打包后**的 .exe 资源段 |
+
+```
+当前主题主色
+   ↓
+icon_palette(accent) → 7 色调色板
+   ↓
+icon_svg(accent) → 一次正则替换换色
+   ↓
+render_icon_pixmap(size) → QtSvg 矢量渲染
+   ↓
+load_app_icon(sizes) → 装填到 QIcon 8 档
+   ↓
+setWindowIcon + setWindowIcon on QApplication
+   ↓
+windowIconChanged 信号 → 标题栏 / 任务栏 / Alt+Tab 同步换色
+```
+
+**主题感知**：标题栏图标 / 关于对话框 / 登录对话框 / 闪屏的图标**全部**
+跟着主题走——切到「深海」会看到青绿底 + 薄荷脸的豆比，切到「高对比」会看到
+亮黄底 + 深色脸的豆比。**豆比紫主题特殊**：它本身就是从图标反推的，
+`_active_accent()` 检测到 `name == "doubi"` 时返回 `None`，让图标走品牌
+原色——否则用主色 `#f59e6a` 二次推导会让图标偏色、丢原图味道。
+
+**主窗口图标放大**：qfluentwidgets `FluentTitleBar.setIcon` 把 pixmap 尺寸
+写死 18px。`main_window._enlarge_titlebar_icon(TITLEBAR_ICON_SIZE=28)`
+断开旧信号、改用 28px 闭包；切主题时新闭包自动被信号触发，不会再被
+18px 覆盖。
+
+**关键设计取舍**：
+- **矢量优先，PNG 是兜底**。`render_icon_pixmap` 走 QtSvg，**16px 标题栏
+  图标和 256px 闪屏图标同样锐利**。PNG 仅在 QtSvg 不可用时兜底。
+- **不强制依赖 PIL**。`build_ico.py` 手写 ICONDIR / ICONDIRENTRY，
+  绕开 `Pillow 12.3.0 + Python 3.13 + Windows` 的
+  `STATUS_STACK_BUFFER_OVERRUN` 崩溃。
+- **`BRAND_PALETTE` 与模板字面量逐字一致**。换色是一次正则替换，
+  锚点要是不一致会漏色——`test_icon_template_exists_and_holds_all_anchors`
+  守这条。
+
+详细技术细节（QtSvg 滤镜 bug / 7 套主题预览图 / 任务栏图标资源嵌入）见
+[docs/ICONS.md](./ICONS.md)。

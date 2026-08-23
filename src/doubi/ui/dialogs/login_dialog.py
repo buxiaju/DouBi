@@ -124,6 +124,17 @@ def _build_brand_hero(platform: str, accent: str) -> "QWidget":
     text_col.addWidget(sub)
     h.addLayout(text_col, 1)
 
+    # ---- 应用图标：次级品牌标 ----
+    # 左边的平台 badge 才是主标识——它回答「我在登录哪个站」，不能被替换。
+    # 应用图标放右侧、尺寸压到 32px，只做「这是豆比下载」的落款，
+    # 配色跟随主题（见 resources.load_app_icon）。
+    app_icon = load_app_icon(32)
+    if app_icon is not None and not app_icon.isNull():
+        mark = QLabel()
+        mark.setPixmap(app_icon.pixmap(32, 32))
+        mark.setStyleSheet("QLabel { background: transparent; border: none; }")
+        h.addWidget(mark, 0, Qt.AlignVCenter)
+
     return hero
 
 
@@ -148,12 +159,17 @@ def build_bilibili_qr_dialog():
         bilibili_status,
         bilibili_wait_for_scan,
     )
+    from ..resources import load_app_icon
     from ..theme import muted_qss, token
 
     class BilibiliQRDialog(QDialog):
         def __init__(self, parent=None):
             super().__init__(parent)
             self.setWindowTitle("B 站扫码登录")
+            # 不设 icon 时 Windows 会回退到 python.exe 的双蛇图——和品牌不符
+            icon = load_app_icon()
+            if icon is not None and not icon.isNull():
+                self.setWindowIcon(icon)
             self.resize(500, 600)
             self._qr_session = None
             self._qr_code = None
@@ -381,6 +397,7 @@ def build_douyin_browser_dialog():
     )
 
     from ...ui.auth_actions import douyin_login_via_browser, douyin_save_cookies
+    from ..resources import load_app_icon
     from ..theme import muted_qss, token
 
     class _BrowserDoneEvent(QEvent):
@@ -395,6 +412,10 @@ def build_douyin_browser_dialog():
         def __init__(self, parent=None):
             super().__init__(parent)
             self.setWindowTitle("抖音扫码登录")
+            # 同 B 站：补上品牌 icon，避免 Windows 兜底成 python.exe 图标
+            icon = load_app_icon()
+            if icon is not None and not icon.isNull():
+                self.setWindowIcon(icon)
             self.resize(500, 460)
             self._cancelled = False
             self._build_ui()

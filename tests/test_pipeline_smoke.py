@@ -147,6 +147,24 @@ def test_classify_douyin_unknown():
     assert c.item_id == ""
 
 
+def test_classify_douyin_modal_id_feed_url():
+    c = classify_douyin_url("https://www.douyin.com/jingxuan?modal_id=7676517073484352822")
+    assert c.type is DouyinURLType.VIDEO
+    assert c.item_id == "7676517073484352822"
+
+
+def test_classify_douyin_modal_id_with_other_params():
+    c = classify_douyin_url("https://www.douyin.com/discover?foo=1&modal_id=7676517073484352822")
+    assert c.type is DouyinURLType.VIDEO
+    assert c.item_id == "7676517073484352822"
+
+
+def test_registry_detect_douyin_modal_id():
+    adapter = PlatformRegistry.detect("https://www.douyin.com/jingxuan?modal_id=7676517073484352822")
+    assert adapter is not None
+    assert adapter.platform is Platform.DOUYIN
+
+
 # ---------------------------------------------------------------------------
 # Pipeline
 # ---------------------------------------------------------------------------
@@ -229,3 +247,124 @@ def test_cli_platforms(capsys):
     out = capsys.readouterr().out
     assert "douyin" in out
     assert "bilibili" in out
+
+
+# ---------------------------------------------------------------------------
+# Per-item cookie injection (yt-dlp needs s_v_web_id / sessionid etc.)
+# ---------------------------------------------------------------------------
+
+
+def _make_douyin_item() -> MediaItem:
+    return MediaItem(
+        platform=Platform.DOUYIN,
+        item_id="7676517073484352822",
+        title="cookie injection test",
+        media_type=MediaType.VIDEO,
+        source_url="https://www.douyin.com/video/7676517073484352822",
+    )
+
+
+def test_pipeline_injects_platform_cookie_file(monkeypatch, tmp_path):
+    """Engine must receive the platform cookie file when the caller
+    did not pin one — otherwise yt-dlp fails with "Fresh cookies
+    (not necessarily logged in) are needed" on every Douyin download."""
+    cookie_file = tmp_path / "douyin.txt"
+    cookie_file.write_text(
+        "# Netscape HTTP Cookie File\n"
+        ".douyin.com\tTRUE\t/\tTRUE\t1999999999\ts_v_web_id\tverify_x\n"
+    )
+    monkeypatch.setenv("DOUBI_DOUYIN_COOKIES", str(cookie_file))
+
+    _FakeEngine.download_calls = []
+    pipeline = DownloadPipeline(engine=_FakeEngine())
+    options = DownloadOptions(output_root=tmp_path / "out")
+    ok = asyncio.run(pipeline._download_with_progress(
+        _make_douyin_item(), options, None, "job0001",
+    ))
+    assert ok is True
+    assert len(_FakeEngine.download_calls) == 1
+    _, engine_opts = _FakeEngine.download_calls[0]
+    assert engine_opts.cookies_file == cookie_file
+    # the caller's options bag must stay untouched
+    assert options.cookies_file is None
+
+
+def test_pipeline_respects_explicit_cookie_file(monkeypatch, tmp_path):
+    """An explicitly pinned cookies_file wins over platform resolution."""
+    explicit = tmp_path / "explicit.txt"
+    explicit.write_text("# pinned\n")
+
+    platform_cookie = tmp_path / "douyin.txt"
+    platform_cookie.write_text(
+        "# Netscape HTTP Cookie File\n"
+        ".douyin.com\tTRUE\t/\tTRUE\t1999999999\ts_v_web_id\tverify_x\n"
+    )
+    monkeypatch.setenv("DOUBI_DOUYIN_COOKIES", str(platform_cookie))
+
+    _FakeEngine.download_calls = []
+    pipeline = DownloadPipeline(engine=_FakeEngine())
+    options = DownloadOptions(output_root=tmp_path / "out", cookies_file=explicit)
+    ok = asyncio.run(pipeline._download_with_progress(
+        _make_douyin_item(), options, None, "job0002",
+    ))
+    assert ok is True
+    _, engine_opts = _FakeEngine.download_calls[0]
+    assert engine_opts.cookies_file == explicit
+
+
+def test_pipeline_no_cookie_file_stays_none(monkeypatch, tmp_path):
+    """No persisted cookie file -> engine still gets cookies_file=None
+    (never crashes, never fabricates a path)."""
+    monkeypatch.setenv("DOUBI_DOUYIN_COOKIES", str(tmp_path / "missing.txt"))
+
+    _FakeEngine.download_calls = []
+    pipeline = DownloadPipeline(engine=_FakeEngine())
+    options = DownloadOptions(output_root=tmp_path / "out")
+    ok = asyncio.run(pipeline._download_with_progress(
+        _make_douyin_item(), options, None, "job0003",
+    ))
+    assert ok is True
+    _, engine_opts = _FakeEngine.download_calls[0]
+    assert engine_opts.cookies_file is None
+
+
+# ---------------------------------------------------------------------------
+# User-page modal links (video opened from a profile's compilation tab)
+# ---------------------------------------------------------------------------
+
+
+def test_classify_douyin_user_modal_id_is_video():
+    """A user-profile URL carrying modal_id points at ONE video (opened
+    from the 合集/compilation tab), not at the user's post list."""
+    c = classify_douyin_url(
+        "https://www.douyin.com/user/MS4wLjABAAAAxOhRVmiuLmYd089wiv1NYCyMXrJWG-qY3AwNDUDlTun9-9YScGFs0q1T70UnNosh"
+        "?from_tab_name=main&modal_id=7647081804364516651&relation=0&showSubTab=compilation&vid=7647081804364516651"
+    )
+    assert c.type is DouyinURLType.VIDEO
+    assert c.item_id == "7647081804364516651"
+
+
+def test_classify_douyin_user_vid_only_is_video():
+    """Compilation share variants that carry only vid= (no modal_id)
+    must still classify as the single video."""
+    c = classify_douyin_url(
+        "https://www.douyin.com/user/MS4wLjABAAAAxxxx?from_tab_name=main&vid=7647081804364516651"
+    )
+    assert c.type is DouyinURLType.VIDEO
+    assert c.item_id == "7647081804364516651"
+
+
+def test_classify_douyin_user_without_modal_stays_user():
+    """A plain profile URL (with or without query) must NOT be turned
+    into a video — it should still expand the user's post list."""
+    c = classify_douyin_url("https://www.douyin.com/user/MS4wLjABAAAAxxxx?showTab=post")
+    assert c.type is DouyinURLType.USER
+    assert c.item_id == "MS4wLjABAAAAxxxx"
+
+
+def test_registry_detect_douyin_user_modal_id():
+    adapter = PlatformRegistry.detect(
+        "https://www.douyin.com/user/MS4wLjABAAAAxxxx?modal_id=7647081804364516651"
+    )
+    assert adapter is not None
+    assert adapter.platform is Platform.DOUYIN

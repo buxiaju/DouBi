@@ -30,6 +30,10 @@ def build_about_dialog():
             self.setWindowTitle(f"关于 {APP_NAME}")
             self.setModal(True)
             self.setFixedSize(440, 520)
+            # 不设 icon 时 Windows 会回退到 python.exe 图标，跟品牌不符
+            icon = load_app_icon()
+            if icon is not None and not icon.isNull():
+                self.setWindowIcon(icon)
 
             outer = QVBoxLayout(self)
             outer.setContentsMargins(0, 0, 0, SPACE_LG)
@@ -82,10 +86,11 @@ def build_about_dialog():
             h.setContentsMargins(SPACE_LG * 2, SPACE_LG * 2, SPACE_LG * 2, SPACE_LG * 2)
             h.setSpacing(SPACE_LG)
 
-            icon = load_app_icon(72)
+            # 96px：矢量渲染，比原先 72px 更有品牌存在感且不损失锐度
+            icon = load_app_icon(96)
             if icon is not None and not icon.isNull():
                 icon_label = QLabel()
-                icon_label.setPixmap(icon.pixmap(72, 72))
+                icon_label.setPixmap(icon.pixmap(96, 96))
                 icon_label.setStyleSheet("background: transparent; border: none;")
                 h.addWidget(icon_label, 0)
 

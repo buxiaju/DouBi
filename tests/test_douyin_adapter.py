@@ -127,6 +127,63 @@ def test_write_netscape_cookies(tmp_path):
     assert "www.douyin.com\tFALSE\t/\tFALSE\t0\tmsToken\txyz" in text
 
 
+# ---------------------------------------------------------------------------
+# validate_cookies fallback (risk-control 404 → cookie presence)
+# ---------------------------------------------------------------------------
+
+
+class _FailingClient:
+    """Stands in for httpx.AsyncClient; every GET raises (simulates 404)."""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+    async def get(self, url):
+        raise RuntimeError("simulated 404 Not Found")
+
+
+def _write_cookie_file(path, names):
+    cookies = [
+        {"domain": ".douyin.com", "path": "/", "name": n, "value": "v"}
+        for n in names
+    ]
+    return auth.write_netscape_cookies(cookies, path=path)
+
+
+def test_validate_cookies_falls_back_to_session_cookie(monkeypatch, tmp_path):
+    """API 404 (risk control) + sessionid present → still logged in."""
+    import httpx
+    monkeypatch.setattr(httpx, "AsyncClient", _FailingClient)
+    p = _write_cookie_file(tmp_path / "cookies.txt", ["ttwid", "sessionid", "msToken"])
+    info = asyncio.run(auth.validate_cookies(p))
+    assert info.is_logged_in is True
+    assert info.raw["fallback"] == "cookie_presence"
+    assert "sessionid" in info.raw["matched"]
+
+
+def test_validate_cookies_fallback_guest_cookies_not_logged_in(monkeypatch, tmp_path):
+    """API failure + guest-only cookies → must NOT report logged in."""
+    import httpx
+    monkeypatch.setattr(httpx, "AsyncClient", _FailingClient)
+    p = _write_cookie_file(tmp_path / "cookies.txt", ["ttwid", "msToken", "odin_tt"])
+    info = asyncio.run(auth.validate_cookies(p))
+    assert info.is_logged_in is False
+
+
+def test_validate_cookies_fallback_no_file_not_logged_in(monkeypatch, tmp_path):
+    """API failure + no cookie file → not logged in."""
+    import httpx
+    monkeypatch.setattr(httpx, "AsyncClient", _FailingClient)
+    info = asyncio.run(auth.validate_cookies(tmp_path / "missing.txt"))
+    assert info.is_logged_in is False
+
+
 def _fake_info_dict(**overrides) -> dict:
     base = {
         "id": "7123456789012345678", "title": "测试标题", "uploader": "测试作者",
@@ -321,6 +378,39 @@ def test_adapter_parse_single_populates_metadata(monkeypatch):
     assert item.author.name == "测试作者"
 
 
+def test_adapter_parse_modal_id_url_is_canonicalized(monkeypatch):
+    """Feed/modal URLs (/jingxuan?modal_id=...) must be rewritten to the
+    canonical /video/{id} form before hitting yt-dlp and before being
+    stored as source_url — yt-dlp's extractor doesn't understand modal_id.
+    """
+    a = DouyinAdapter()
+    seen = {}
+    async def _fake_fetch(url):
+        seen["fetch_url"] = url
+        return None
+    monkeypatch.setattr(a.api, "fetch", _fake_fetch)
+    item = asyncio.run(a.parse("https://www.douyin.com/jingxuan?modal_id=7676517073484352822"))
+    assert item is not None
+    assert item.item_id == "7676517073484352822"
+    canonical = "https://www.douyin.com/video/7676517073484352822"
+    assert seen["fetch_url"] == canonical
+    assert item.source_url == canonical
+
+
+def test_adapter_parse_video_url_is_not_rewritten(monkeypatch):
+    """Already-canonical /video/{id} URLs must pass through unchanged."""
+    a = DouyinAdapter()
+    seen = {}
+    async def _fake_fetch(url):
+        seen["fetch_url"] = url
+        return None
+    monkeypatch.setattr(a.api, "fetch", _fake_fetch)
+    url = "https://www.douyin.com/video/7123456789012345678?extra=1"
+    item = asyncio.run(a.parse(url))
+    assert seen["fetch_url"] == url
+    assert item.source_url == url
+
+
 # pipeline
 
 class _SpyEngine:
@@ -511,3 +601,28 @@ def test_pipeline_parse_and_expand_failure(monkeypatch):
     item, children = asyncio.run(pipeline.parse_and_expand("https://x/bad"))
     assert item is None
     assert children == []
+
+
+def test_adapter_parse_user_modal_id_url_is_canonicalized(monkeypatch):
+    """User-profile URLs carrying modal_id (video opened from the
+    profile's 合集/compilation tab) must be treated as that single
+    video and rewritten to /video/{id} — NOT expanded as a USER
+    container (which would try to download the whole profile)."""
+    a = DouyinAdapter()
+    seen = {}
+
+    async def _fake_fetch(url):
+        seen["fetch_url"] = url
+        return None
+
+    monkeypatch.setattr(a.api, "fetch", _fake_fetch)
+    item = asyncio.run(a.parse(
+        "https://www.douyin.com/user/MS4wLjABAAAAxOhRVmiuLmYd089wiv1NYCyMXrJWG-qY3AwNDUDlTun9-9YScGFs0q1T70UnNosh"
+        "?from_tab_name=main&modal_id=7647081804364516651&relation=0&showSubTab=compilation&vid=7647081804364516651"
+    ))
+    assert item is not None
+    assert item.item_id == "7647081804364516651"
+    assert item.media_type is not MediaType.USER
+    canonical = "https://www.douyin.com/video/7647081804364516651"
+    assert seen["fetch_url"] == canonical
+    assert item.source_url == canonical

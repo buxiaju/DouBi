@@ -186,7 +186,8 @@ def build_download_widgets():
             pause_slot_layout.setSpacing(0)
 
             self.pause_btn = PushButton("暂停", self.pause_slot)
-            self.pause_btn.setFixedSize(52, 24)
+            self.pause_btn.setFixedHeight(28)
+            self.pause_btn.setMinimumWidth(56)
             self.pause_btn.clicked.connect(self._on_pause)
             pause_slot_layout.addWidget(self.pause_btn)
 
@@ -201,13 +202,15 @@ def build_download_widgets():
             retry_slot_layout.setSpacing(0)
 
             self.retry_btn = PushButton("重试", self.retry_slot)
-            self.retry_btn.setFixedSize(52, 24)
+            self.retry_btn.setFixedHeight(28)
+            self.retry_btn.setMinimumWidth(56)
             self.retry_btn.clicked.connect(self._on_retry)
             self.retry_btn.hide()
             retry_slot_layout.addWidget(self.retry_btn)
 
             self.remove_btn = PushButton("移除", self)
-            self.remove_btn.setFixedSize(52, 24)
+            self.remove_btn.setFixedHeight(28)
+            self.remove_btn.setMinimumWidth(56)
             self.remove_btn.clicked.connect(self._on_remove)
 
             layout.addWidget(self.status_label, 0)
@@ -548,7 +551,7 @@ def build_download_widgets():
             self._active_empty = EmptyState(self.active_list)
             self._active_empty.set_text(
                 "暂无正在下载的任务",
-                "去「解析」粘贴链接，把解析结果勾选加入下载队列后会出现在这里。",
+                "去「解析」粘贴链接，勾选后加入下载队列即可",
             )
             self.active_list_layout.insertWidget(0, self._active_empty)
 
@@ -586,7 +589,7 @@ def build_download_widgets():
             self._completed_empty = EmptyState(self.completed_list)
             self._completed_empty.set_text(
                 "尚无已完成的任务",
-                "任务完成后会自动归档到这一页，可统一管理 / 重试 / 清理。",
+                "下载完成后会自动归档到这里，支持重试与清理",
             )
             self.completed_list_layout.insertWidget(0, self._completed_empty)
 

@@ -226,8 +226,10 @@ def build_empty_state(parent=None):
     自身去承载视觉。这里只负责把「尚未 X」这件事说清楚。
     """
     from PySide6.QtCore import Qt
-    from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel
-    from qfluentwidgets import StrongBodyLabel
+    from PySide6.QtGui import QFont
+    from PySide6.QtWidgets import (
+        QWidget, QVBoxLayout, QLabel, QSizePolicy,
+    )
 
     from .theme import (
         SPACE_LG, SPACE_MD, FONT_FAMILY, TYPE_BODY, TYPE_CAPTION,
@@ -242,17 +244,41 @@ def build_empty_state(parent=None):
             self._subtitle_text = ""
             layout = QVBoxLayout(self)
             layout.setContentsMargins(SPACE_LG * 2, SPACE_LG * 3, SPACE_LG * 2, SPACE_LG * 3)
-            layout.setSpacing(SPACE_MD)
+            # SPACE_LG = 16px — 给标题/副标题之间留出明确空气。
+            # SPACE_MD (12px) 贴 12/14px 字号会让两行文字视觉重叠，
+            # 是历史上这个组件看起来被"压扁"过的根因。
+            layout.setSpacing(SPACE_LG)
             layout.setAlignment(Qt.AlignCenter)
 
-            self._title = StrongBodyLabel(self)
+            # 用普通 QLabel + setFont（而非 qfluentwidgets.StrongBodyLabel）：
+            # StrongBodyLabel 内部走 qss 优先级链，widget 级 setStyleSheet
+            # 改不掉它的 font-size，导致标题字号被默认的 18px+ 样式覆盖，
+            # 把整张卡片撑爆，看起来"被压扁"。setFont 优先级最高，绝对生效。
+            self._title = QLabel(self)
             self._title.setAlignment(Qt.AlignCenter)
+            self._title.setWordWrap(True)
+            # label 水平 Expanding：否则 QVBoxLayout 给它们 sizeHint.width()
+            # （"刚好装下文字" 的最小宽度，如 244px），副标题 252px 文字被
+            # 强制换行、最后一个字孤立到第二行居中。Expanding 让 label fill
+            # 父容器（如 700px），一行就能装下整段副标题。
+            self._title.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            self._title_font = QFont(FONT_FAMILY)
+            self._title_font.setPixelSize(TYPE_BODY + 1)
+            self._title_font.setWeight(QFont.Medium)
+            self._title.setFont(self._title_font)
             self._subtitle = QLabel(self)
             self._subtitle.setAlignment(Qt.AlignCenter)
             self._subtitle.setWordWrap(True)
+            self._subtitle.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            self._subtitle_font = QFont(FONT_FAMILY)
+            self._subtitle_font.setPixelSize(TYPE_CAPTION)
+            self._subtitle.setFont(self._subtitle_font)
 
             layout.addWidget(self._title)
             layout.addWidget(self._subtitle)
+
+            # 防止父布局（QScrollArea + addStretch）把整张卡片压成一条缝
+            self.setMinimumHeight(168)
 
             self._refresh()
             subscribe_theme(self, self._refresh)
@@ -273,14 +299,19 @@ def build_empty_state(parent=None):
         def _refresh(self) -> None:
             # 透明底：EmptyState 一般嵌在 CardWidget 里
             self.setStyleSheet("background: transparent; border: none;")
+            # 字号/字重由 setFont 设定（优先级高于 stylesheet，绝对生效）。
+            # 这里只设行高/颜色/padding/透明底——这些 setFont 改不掉的属性。
+            # line-height 1.6 是空态呼吸感的关键，少了就被父布局压扁。
             self._title.setStyleSheet(
-                f"font-family: {FONT_FAMILY}; font-size: {TYPE_BODY + 1}px; "
-                f"font-weight: 500; color: {token('text_primary')}; "
+                f"color: {token('text_primary')}; "
+                f"line-height: 1.6; "
+                f"padding: 10px 8px; "
                 f"background: transparent; border: none;"
             )
             self._subtitle.setStyleSheet(
-                f"font-family: {FONT_FAMILY}; font-size: {TYPE_CAPTION}px; "
                 f"color: {token('text_muted')}; "
+                f"line-height: 1.6; "
+                f"padding: 6px 8px; "
                 f"background: transparent; border: none;"
             )
 

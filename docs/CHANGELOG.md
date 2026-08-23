@@ -308,3 +308,424 @@ token 表写对了，界面却基本没变色。逐层排查发现**五个独立
 - 基线演进：280（M6.1）→ 299（P0-2）→ 309（P0-3）→ 316（P3-1）→ 328（P3-2）
   → 331（补齐 `_build_options` 转发 + 结构性守卫）→ 381（多主题系统 + 五层失效点回归）
 
+---
+
+## 0.2.0 (2026-08-23) — M6.4 / M6.5 / M6.6 品牌化与打包
+
+> 这一轮的共同主题是「让用户看到的和用到的，跟内核一样讲究」。
+> 改 UI / 改图标 / 改打包每块都有独立动因，但都遵循一条原则：所有视觉
+> 元素有可解释的取舍（写进 DEVELOPMENT 跟代码一起活），不是「我看着
+> 不舒服就改了」。
+
+### M6.4 UI 全方位品牌化
+
+`ui/theme.py` 从 6 套主题扩到 **7 套**，新增品牌主题 **`doubi`（豆比紫）**：
+- 配色从图标自身取色——深紫底 `#1a1230` + 琥珀橙主色 `#f59e6a`
+- **豆比紫是品牌默认主题**，代码里 `set_theme("doubi")` 直接拿到
+  品牌色而不是用「亮/暗 + 强调色」近似
+- 全 7 套主题的 token 表补全：`accent_soft` / `accent_strong` /
+  `bg_elevated` / `shadow` / `gradient_header` 五个之前缺位的字段
+  （旧版 dataclass 没声明，`accent_soft` 默认空串，下游按字段取色就
+  AttributeError）
+
+**Token 体系扩充**（`theme.py`）：
+- **排版常量** `TYPE_H1..TINY`：6 级字号（24/20/16/13/12/10），按尺度单调递增
+- **间距常量** `SPACE_XS..XXL`：6 级（4/8/12/16/24/32），同样单调
+- **圆角常量** `RADIUS_DEFAULT(4) / RADIUS_CARD(8) / RADIUS_PILL(20)`
+- **辅助 QSS**：`heading_qss(level)` / `body_qss()` / `card_qss(elevated)` /
+  `header_qss(level)` / `muted_qss()`。每条都有命名（而非 `setStyleSheet("color: gray;")`
+  散落），换主题时跟着 token 走，不再有「字面量 gray 在暗底上对比度不足」一类退化
+
+**共享组件**（新增 `ui/widgets.py`，每个组件一个工厂函数 `build_*` 延迟 import Qt）：
+| 组件 | 用途 |
+| --- | --- |
+| `PageHeader` | 页面级「标题 + 副标题 + 右侧动作」三段式，解析/下载/历史/设置四个页面统一 |
+| `EmptyState` | 居中展示的占位态（图标 + 主标 + 副标），下载/历史页都用它替代自定义空态 |
+| `StatChip` | 顶部统计条小方块（"3 个正在下载" 这类），4 种 kind 颜色（running/paused/completed/failed） |
+| `PlatformBadge` | 圆形彩色平台徽标（B 站蓝 / 抖音红），登录对话框与设置页都用它 |
+| `SectionDivider` | 卡片内的分组分隔线，统一「细横线 + 副标题」样式 |
+
+设计要点：
+- **不依赖 PySide6 也能 import 模块**：每个组件 `class_<Name>(<QWidget>)` 都写
+  在工厂函数内部，模块顶层只有 `build_*` 函数。`from doubi.ui.widgets import build_*`
+  在 CI 无头环境也能跑。
+- **API 一致**：所有工厂都返回 `(Class, factory)` 二元组，调用方
+  `cls = build_xxx(); widget = cls()` 拿现成组件。
+- **不强制使用**：现有 qfluentwidgets 控件（`PushButton` / `LineEdit` 等）继续直接用，
+  共享组件是「需要统一表达力」时用，**不取代** fluent 控件。
+
+**页面级美化**（统一语言落到四个页面 + 三个对话框）：
+- 解析页：PageHeader + 输入卡 + QStackedWidget 切换表格/空态；行高统一 36px
+- 下载页：4 个 StatChip + 双空态（下载中 / 已完成）+ 按钮从 24→28px
+- 历史页：2 个 StatChip + 表格/空态切换 + 数据库未启用引导
+- 设置页：拆成 5 张分组卡（账号 / 下载 / 性能 / 主题 / Cookie），每张
+  有标题 + 副标题 + 分隔线；不再是一张大表单
+- 登录对话框：B 站 / 抖音各加品牌 hero 区（圆形平台色徽章 + 标题 + 副标题），
+  右侧放 32px 应用图标作为「这是豆比下载」的次级落款
+- 关于对话框：品牌 hero + 信息卡 + 版权行
+
+**修复的细节**：
+- 空态副标题原本 56 字挤压成「宽 200px 文字溢出」状态，缩短为 ≤30 字
+- 按钮文字原本被 `setFixedHeight(24)` 压扁，统一到 28px
+- 抠掉图标的白色描边：`flood fill` BFS 阈值 240，把 20% 接近纯白的背景
+  像素变透明——之前 PNG 图标四周有一圈白边
+- QIcon 提供 8 个尺寸档（16/20/24/32/40/48/64/96/128/256），标题栏缩放
+  不再锯齿
+
+**启动体验**：
+- 闪屏：加载期间显示 256px 品牌图标
+- 任务栏图标：与窗口图标同步
+- 窗口标题：`豆比下载 0.6.0 · 多平台视频下载器`（之前是 `DouBi - main`）
+
+**主窗口**：
+- 导航栏最底部加「关于」按钮（`position=NavigationItemPosition.BOTTOM`）
+- 窗口默认尺寸 1100×760（之前是 1180×780），更贴合多数笔记本屏幕
+
+**Bug 修复**：
+- `settings.py` 启动时 `asyncio.ensure_future` 在 Qt 主线程里抛 RuntimeError，
+  现有 `try/except` 只吞了警告没解决，账号状态卡死成「未登录」。
+  修法：fallback 路径用 `asyncio.run()`，并在 `__aenter__` 防御性 try/except
+
+**测试**：`tests/test_ui_polish.py` 新增 22 个，覆盖：
+- 豆比紫主题存在性、`THEMES` 键集完整、所有主题的 dataclass 字段
+- 排版 / 间距 / 圆角常量的单调性
+- 辅助 QSS 函数返回非空字符串
+- 资源模块元数据（`APP_NAME = "Doubi"`、版本号、版权）
+- 图标路径解析到 `RESOURCE_DIR/icon.png`、且文件存在
+- `load_app_icon()` 在有/无尺寸参数下都返回非空 QIcon
+- 共享组件工厂可调用 + 实例化 + 各项 set 方法有效
+- 关于对话框可实例化、标题以「关于」开头
+- 闪屏不崩溃（图标缺失时静默退化为 None）
+
+`tests/test_ui_workers.py` 增加 1 个（`build_main_window` 可用性）。
+
+统计：381 → 403 passed / 4 skipped（+22）。
+
+---
+
+### M6.5 矢量图标管线（SVG → 多档位 Qt → 多主题配色）
+
+M6.4 上图标已经改过两版（PNG、抠白底），但都是「一张位图硬塞进所有地方」。这一轮把
+图标做成**矢量 + 主题感知**——切主题时标题栏、关于对话框、登录对话框、闪屏里的
+图标自动换色。详见 [docs/ICONS.md](../ICONS.md)（或 DEVELOPMENT §13.6）。
+
+**设计源稿**：用户提供 `icon.svg`（1124×1124，画板较大、带 `<filter>` 投影
++ `<clipPath>` 裁剪）。直接 `QSvgRenderer` 渲染有两大坑：
+
+1. **filter 失效**：Qt 只实现 SVG Tiny 1.2，原始 SVG 的 `feColorMatrix`
+   被误画成「实心黑圆角矩形」在最上层——实测 29% 像素变纯黑，整张图标
+   糊掉。
+2. **留白过大**：原始画布 1124×1124，但圆角方块只占 (50,30)-(1074,1054)，
+   四周 4.5% 是死边。图标在标题栏 / 任务栏里看着偏小就是这段留白吃掉的。
+
+**修法**（`ui/resources/icon_template.svg`）：
+- 去 `<filter>`、去 `<clipPath>`，投影由 rim-light 描边近似，clipPath 本来
+  就是 no-op（裁剪框完全包住两个腮红椭圆）
+- viewBox 收紧到 `50 30 1024 1024`，让圆角方块出血铺满整幅画布
+- 7 个品牌色 hex（`#FF8C42 / #FF5E7C / #E8552A / #FFE4D1 / #2A2A2A / #FF9AA2 / #FF6B6B`）
+  既是模板里的字面量，也是**换色锚点**——`icon_svg(accent)` 一次正则替换完成
+- 模板单独打开就是一张正常的品牌色图标，没有引入模板语法
+
+**资源模块**（`ui/resources/__init__.py`，~260 行）：
+- `BRAND_PALETTE`：7 色 → 语义名（`bg_from` / `tuft` / `face` / `ink` / `blush` / `tongue`）
+- `icon_palette(accent=None)`：按主色推导整套图标配色
+  - 底板渐变 = 主色色相 ±20°，亮度 0.63 → 0.68（莫兰迪等低饱和主题会被压到
+    `0.42 + 0.55*s`，不会刺眼）
+  - 呆毛 = 同色相再沉一档（亮度 0.52）
+  - 脸 = 主色色相的极浅色（亮度 0.90）
+  - **腮红 / 舌头 / 眼睛恒定**——这三是吉祥物辨识度的核心，跟主题变色
+    会丢掉可爱感
+- `icon_svg(accent=None)`：单次正则替换换色（不是逐色 `str.replace`，
+  避免「A 被换成 B，B 又被下一轮替换」的二次命中 bug）
+- `render_icon_pixmap(size, accent=None, *, themed=True)`：用 QtSvg 渲染到
+  任意尺寸。`themed=True` 时自动跟随当前主题的主色
+- `load_app_icon(size=None, ...)`：返回 `QIcon`，默认装填 8 档尺寸
+  （16/20/24/32/40/48/64/96/128/256），Qt 在标题栏 / 任务栏 / Alt+Tab
+  各挑最合适的一档，避免系统强制缩放产生锯齿
+- `load_splash_pixmap(w, h)`：闪屏专用，`min(w, h)` 边长的矢量渲染
+- 缓存：`_pixmap_cache` / `_icon_cache` 按 `(size, accent)` 缓存
+
+**豆比紫主题二次推导陷阱**：`doubi` 主题本身就是从图标反推的，再用主色
+`#f59e6a` 推导回图标会偏离原图。`icon_palette(doubi)` 直接返回
+`BRAND_PALETTE` 不变。`_active_accent()` 检测到 `current_theme().name == "doubi"`
+时返回 `None`，让 `themed=True` 走品牌原色。
+
+**主窗口图标全链路**：
+```
+set_theme(...)
+  → subscribe_theme(self, _refresh_app_icon) 自动触发
+  → load_app_icon() 渲染新配色
+  → self.setWindowIcon(icon)
+  → QApplication.setWindowIcon(icon)（任务栏 / Alt+Tab 同步）
+  → windowIconChanged 信号
+  → qfluentwidgets.FluentTitleBar.setIcon(icon)
+  → iconLabel.setPixmap(QIcon(icon).pixmap(18, 18))   ← 这里
+```
+
+`qfluentwidgets.FluentTitleBar.setIcon` 把 pixmap 尺寸**写死 18px**——
+48px 高的标题栏里 18px 图标明显偏小。修法：
+- `iconLabel.setFixedSize(28, 28)`
+- 断开 `windowIconChanged → title_bar.setIcon` 的旧连接
+- 改用 `set_icon(icon)` 闭包，按新尺寸重设 pixmap
+- 全程防御性处理（拿不到 `iconLabel` 就放弃，不影响主窗口）
+
+**关于 / 登录对话框补 setWindowIcon**：这三个 dialog 之前没设
+`windowIcon`，Windows 任务栏 / Alt+Tab 会回退到 **python.exe 的双蛇 logo**
+（用户报的「Python 终端图标」就是这个）。修法是 `self.setWindowIcon(load_app_icon())`
++ 工厂函数顶部 import `load_app_icon`。
+
+**真机验证**（`screenshots/` 下 `verify_*.png` + `icon_themes.png`）：
+- 7 套主题在标题栏图标底板的采样：7 种不同底板色（豆比橙、深海青绿、高对比黄等）
+- 关于对话框 96px 大图标、关于信息卡布局正确
+- 登录对话框平台徽章 + 应用图标次级落款
+
+**测试**：`test_ui_polish.py` 新增 20 个：
+- 模板存在性 + 含 7 个品牌色锚点
+- 模板无 `<filter>` / `<clipPath>`（剥注释后查）
+- `icon_palette(None)` 等于品牌调色板；脏色值回退到品牌调色板
+- `icon_palette("#2dd4bf")` 推导完整 7 键、都是合法 hex
+- 腮红 / 舌头 / 眼睛在 4 个测试主题下都保持品牌色
+- 底板 / 脸 / 呆毛在换主题时确实换色
+- 莫兰迪主色推导的底板饱和度 < 亮色主色推导的底板饱和度
+- 换色后的 SVG 不残留任何被替换的锚点色
+- `icon_svg(None)` 字节相等于模板
+- `render_icon_pixmap(128)` 不出现 >5% 的纯黑（filter bug 回归）
+- 渲染结果是全出血（中心不透明、左上角被圆角切掉、顶边中点不透明）
+- 拒绝 `size <= 0`
+- QIcon 含全部 8 档尺寸
+- 3 套主题渲染出的图标底板色互不相同
+- 豆比紫主题下 `_active_accent()` 返回 `None`（不二次推导）
+- `load_app_icon()` 默认 size=None 时跟当前主题
+
+**`scripts/build_icons.py`**：从 SVG 模板生成 1024px 兜底 PNG + 各主题预览图
+（`screenshots/icon_themes.png`），运行时只在 QtSvg 不可用时使用 PNG。
+
+**踩过的坑**：
+- `QPixmap.save(QBuffer, "PNG")` 在 `QT_QPA_PLATFORM=offscreen` 下会触发
+  `STATUS_STACK_BUFFER_OVERRUN`（0xC0000409）——某些 PySide6 6.x 版本的
+  bug。换 `QImage.save(QBuffer, "PNG")` 立即好。这条经验写进了 `build_ico.py`
+  的注释。
+- `BRAND_PALETTE` 的 hex 必须与模板里的字面量**逐字一致**（包括大小写），
+  否则 `icon_svg` 替换锚点会漏色。`BRAND_PALETTE` 写成大写、模板跟着
+  大写，避免 `ValueError: invalid hex` 类静默 bug。
+
+统计：403 → 423 passed / 4 skipped（+20）。
+
+---
+
+### M6.6 Windows 任务栏图标 + PyInstaller 打包
+
+用户报「Windows 任务栏上显示的图标也是 Python 默认那个」。这是 Python 应用的**硬伤**：
+任务栏的「应用分组」图标从 **.exe 文件资源段**读，Python 进程没这个资源，
+永远是 `python.exe` 的蓝色终端 + 双蛇。`QApplication.setWindowIcon` 只能改
+标题栏 / Alt+Tab，**改不了任务栏的应用图标**。
+
+**解决**：`PyInstaller` 打包成单文件 .exe 时把 `icon.ico` 嵌入 .exe 资源，
+Windows 任务栏读这个资源。详见 [docs/BUILD.md](../BUILD.md)。
+
+**`scripts/build_ico.py`**（手写 ICONDIR / ICONDIRENTRY）：
+- 不依赖 Pillow——`Pillow 12.3.0 + Python 3.13 + Windows` 触发
+  `STATUS_STACK_BUFFER_OVERRUN`。绕开最稳的路径
+- 6 档位（16/32/48/64/128/256）独立矢量渲染 → Qt `QImage.save(QBuffer, "PNG")`
+  → 内存 PNG 字节流
+- 按 .ico 格式手写 6 字节 ICONDIR + 6×16 字节 ICONDIRENTRY + PNG 数据
+- Windows 任务栏 / 资源管理器按目标像素挑最接近的尺寸
+
+**`scripts/build_exe.py`**（PyInstaller 包装）：
+- `--onefile` 默认 + `--windowed` 不弹控制台
+- `--icon src/doubi/ui/resources/icon.ico` —— 关键！让 .exe 资源段带图标
+- `--add-data icon_template.svg;doubi/ui/resources` —— 模板走文件系统读
+- `--collect-all qframelesswindow --collect-all qfluentwidgets` —— 第三方
+  Qt 库有隐藏的 QRC 资源 / 插件，PyInstaller 默认钩子抓不全
+- `--collect-submodules doubi` + 入口不用包内文件。`app.py` 内部是
+  `from .theme import ...` 相对导入，onefile 模式若以顶层脚本方式解包运行，
+  **`doubi` 父包不存在**，相对 import 直接挂
+- 产物：`dist/doubi-gui.exe`（~235 MB，PyInstaller onefile 把 Python
+  runtime 全打包，正常体积）
+
+> ⚠️ **后续更正（M6.8）**：本条目原先写的是「改用 `--module doubi.ui.app`
+> 走模块路径」。**PyInstaller 并没有 `--module` 选项**，6.22.2 会直接报
+> `unrecognized arguments: --module`——当时的记录是错的。真正的解法是
+> `build_exe.py` 在构建期生成一层位于包**外面**的启动壳，用绝对导入
+> `from doubi.ui.app import main` 进包，包结构因此完整保留。见
+> [docs/BUILD.md §4.2 / §5.1](./BUILD.md)。
+
+**踩过的坑**：
+- 首次打包 `app.py` 入口失败：`ImportError: attempted relative import
+  with no known parent package`。原因如上，改用包外启动壳后通过
+  （当时误记为 `--module`，见上方更正）。
+- `QPixmap.save(QBuffer, "PNG")` 在 offscreen 平台 crash（见 M6.5）。
+
+**测试**：打包产物通过 `tests/test_ui_polish.py` 的回归测试覆盖
+（图标模板 / 资源路径 / `load_app_icon` / dialog windowIcon），但
+**`build_exe.py` 本身没加测试**——打包产物验证要 `dist/*.exe` 真启动
+GUI，比单元测试贵两个量级，留给发版前的手动 check 清单。
+
+---
+
+## 0.2.0 统计
+- 源码 65 个 .py 文件，约 13,400 行
+- 测试 21 个文件，445 个用例收集：**423 passed / 4 skipped**
+  （4 个 skip 均为「无 PySide6 则跳过」的 GUI 用例）
+- 基线演进：381（M6.3）→ 403（M6.4 UI 美化 + 22 个新测试）
+  → 423（M6.5 图标管线 + 20 个新测试）→ 423（M6.6 打包，无测试）
+
+---
+
+## M6.7 (2026-08-23) — 抖音合集批量下载 + 登录链路修复
+
+> 这一轮的共同根因是「**抖音在 yt-dlp 之外还有一整个签名 Web API 世界**」：
+> 抽取器只认 `/video/{id}`，合集/用户作品/登录态判定全都要自己实现。
+
+### 抖音合集（mix）批量下载（主特性）
+
+- **核心认知**：yt-dlp 2026.08 **没有**抖音合集/用户页抽取器（离线
+  `ie.suitable()` 验证均 NO MATCH），合集列举必须走签名 Web API
+  `/aweme/v1/web/mix/aweme/?mix_id=&cursor=&count=`。
+- 新增 `platforms/douyin/sign/`：a_bogus / x_bogus 签名算法（移植自
+  douyin-downloader-main，MIT；abogus.py 依赖 `gmssl` 的 sm3）。
+- 新增 `platforms/douyin/webapi.py`：httpx 签名客户端。
+  - 反爬重试：**HTTP 200 空 body = 反爬**（最阴险的信号）、403/429/461/471/5xx
+    全部重新签名重试（延迟 1/2/5s），每次尝试重新取 msToken
+  - msToken 策略：cookie 文件优先，否则 182 随机字符伪 token 兜底
+  - `iter_mix_awemes` / `iter_user_posts` 分页枚举（cursor 卡死保护）
+  - `aweme_to_media_item` 归一化：canonical `/video/{id}`、desc 首行做标题、
+    duration ms→s、mix_info 写 extra
+- 接线（六处）：
+  - `url.py`：+iesdouyin.com/share/mix/detail/{id} 分享链分类
+  - `adapter.py`：parse() 路由 COLLECTION/MIX → `_parse_collection`（MIX 容器，
+    标题从第一页 `mix_info.mix_name` 探测——`/mix/detail/` 端点本身 403）；
+    `collection_of(aweme_id)` 反查所属合集；expand() 加 MIX 分支
+  - `strategies.py`：PostStrategy 优先走 `webapi.iter_user_posts`
+    （旧 yt-dlp fetch_flat 路径已**静默失效**，保留兜底）
+  - `core/pipeline.py`：三处容器判定（run / download_item 守卫 / parse_and_expand）
+    从 `USER` 扩为 `(USER, MIX)`——`is_container()` 只看 children，MIX 容器解析时
+    刻意不填。顺带修复 B 站 LIST 合集的同类判定
+  - `ui/pages/parse.py`：右键菜单 +「下载整个合集」
+    （collection_of → expand → 重填结果表）
+- **两种用户用法**：① 直接粘贴合集链接（`/collection/{id}` 或 iesdouyin 分享链）；
+  ② 解析任意合集内视频 → 右键 →「下载整个合集」
+- 实测：合集《我是xj》30 条视频完整分页枚举，标题/时长/canonical URL 正确；
+  从单条视频反查合集命中
+
+### 抖音链接识别扩展
+
+- `modal_id` 弹窗链接（`/jingxuan?modal_id=...`）：modal_id 就是 aweme_id，
+  adapter 将其规范化为 `/video/{id}` 再交 yt-dlp
+- 用户主页合集 tab 的单视频链接（`/user/{sec_uid}?...&modal_id=...&vid=...`）：
+  modal_id / vid 规则**必须排在 USER 之前**，否则会被误判成用户容器触发整页展开；
+  顺手收紧 USER 的 id 字符类（原会把查询串吞进 sec_uid）
+
+### 抖音登录链路修复（三轮）
+
+- **扫码后不抓 cookie**：`_DOUYIN_REQUIRED_COOKIES` 名单两个方向都错——
+  ttwid/odin_tt/passport_csrf_token 是游客 cookie，msToken 是 JS 风控 token
+  （Chromium 自动化下经常不写入），真正的登录态 cookie（sessionid/sessionid_ss/
+  sid_guard）不在名单里。改为登录 cookie 名单 + `min_present=1`
+- **登录窗口 10s 超时不关**：`browser_login.py` 在登录成功后等
+  `wait_for_load_state("networkidle")`——落地页的推荐流/WebSocket/心跳让它永远
+  到不了 networkidle。改为固定 500ms settle。B 站同路径一并修复
+- **登录态校验 404**：`user/info/self` 端点被风控（无签名必 404），
+  `validate_cookies` 降级为 session cookie 存在性判定
+
+### GUI 下载 cookie 注入（M 级 bug）
+
+- 现象：解析成功但 yt-dlp 报 `Fresh cookies (not necessarily logged in) are needed`
+- 根因：解析阶段 adapter 自己读 cookie 文件，下载阶段引擎只认
+  `DownloadOptions.cookies_file`——四个入口全都没传，引擎裸跑
+- 修在 `core/pipeline.py`（懒加载注入 + `dataclasses.replace` 副本），
+  修一处救四端（GUI/CLI/REST/MCP）
+
+### 其他
+
+- EmptyState 文字挤压回归测试（间距/minHeight/line-height 三重断言，
+  防止上次的"无记录回退"再次无声发生）
+- 真实环境 E2E 脚本：`_test_live/sanity_collection.py`（离线 stub）、
+  `_test_live/e2e_collection_live.py`（真实 API，不入正式测试套件）
+
+### 统计
+
+- 源码 70 个 .py 文件，约 17,900 行
+- 测试 21 个文件，454 个用例收集：**450 passed / 4 skipped**
+  （4 个 skip 均为「无 PySide6 则跳过」的 GUI 用例；全量跑一次约 27 分钟，
+  theme_apply_gui 的真实 Qt 渲染占大头——增量验证用单文件跑）
+- 基线演进：423（M6.6）→ 450（M6.7 登录修复 + 链接识别 + 合集功能，+31 用例）
+
+---
+
+## M6.8 (2026-08-23) — NSIS 安装包 + 版本号统一 + 主题顺序
+
+### NSIS 安装包（新增）
+
+- `installer/doubi.nsi` + `scripts/build_installer.py`：一条
+  `python scripts/build_installer.py` 出 `dist/DouBi-Setup-<version>.exe`（213.1 MB）
+- 便携版 NSIS 3.11 随仓库入库（`tools/nsis/`，zlib/libpng 许可），
+  clone 下来不装任何打包工具即可构建
+- 安装形态：`RequestExecutionLevel user` 装到 `%LOCALAPPDATA%\DouBi`，
+  **无 UAC 弹窗**；开始菜单快捷方式（必装）+ 桌面快捷方式（可选）
+- 卸载：目录 / 注册表 / 进程零残留；`~/.doubi` 的配置与下载记录默认**保留**，
+  需要清除时在卸载界面勾选独立分节
+- 打包形态选的是 **onedir 拆目录**而非 onefile：安装包本身已经压缩过一次，
+  再套 onefile 的自解压等于压两遍，且每次启动都要解包 800 MB 到 `%TEMP%`
+
+**踩过的坑**：
+
+- **`RequestExecutionLevel user` 意味着注册表只能写 HKCU**。写 HKLM
+  不会报错，是**静默失败**——控制面板里看不到卸载项，排查时容易误判成
+  卸载信息没写。
+- **便携版 NSIS 没有 `nsProcess.dll`**，检测「程序是否在运行」只能退回
+  `tasklist` 的退出码当谓词，`taskkill` 之后还要 `Sleep 1500`——
+  句柄释放是异步的，不等就会撞 `File: 无法写入`。
+- **`makensis` 必须带 `/INPUTCHARSET UTF8`**，否则中文界面文案全是乱码。
+- **NSIS 的相对路径是相对 `makensis` 的工作目录**解析的，不是相对 .nsi
+  所在目录，所以脚本里的路径一律用 `/D` 注入绝对路径。
+- **`VIProductVersion` 必须是恰好四段数字**，`0.1.0` 会直接编译失败。
+- LZMA solid 压缩 825,238,595 → 223,414,961 字节（**27.0%**）是**单线程**的，
+  约 10 分钟，期间在 `%TEMP%` 暂存约 800 MB。看着像卡死时先
+  `Get-Process makensis` 确认还活着再等，别急着 Ctrl+C。
+
+### 版本号统一 0.6.0 → 0.1.0
+
+- 现象：安装包写 `0.1.0`，装完打开标题栏却显示 `豆比下载 0.6.0`
+- 根因：版本号有**两处真源**且已漂移——`pyproject.toml` 的 `version`
+  （被 `build_installer.py` 读走注入 NSIS）与
+  `src/doubi/ui/resources/__init__.py` 的 `APP_VERSION`（标题栏 + 关于对话框 ×2）
+- 修法：`APP_VERSION` 对齐到 `0.1.0`。改版本号务必同时动这两处
+- 判据：静默装到独立目录后启动，窗口标题为
+  `豆比下载 0.1.0 · 多平台视频下载器`
+
+### 主题顺序
+
+- `ui/theme.py` 的 `THEMES` 键序调整为
+  `default_light → default_dark → doubi → deep_sea → morandi → eye_care → high_contrast`，
+  两套系统默认主题排最前面，品牌主题 `doubi` 紧随其后
+- `THEMES` 的键序同时决定设置页下拉框、导航栏循环切换与 `--theme choices`
+  的顺序，改一处三处同步
+
+### 文档
+
+- `docs/BUILD.md`：新增 §6「NSIS 安装包」（命令 / makensis 调用要点 /
+  `.nsi` 设计取舍 / 静默验证配方 / 编译卡顿判别），章节重编号至 §9，
+  验证清单补安装包检查项与版本一致性检查
+- **更正 `--module` 的错误记录**：`PyInstaller` **没有** `--module` 选项，
+  早期 BUILD.md 与 CHANGELOG 把它写成了相对导入崩溃的解法。真解法是
+  构建期生成包外启动壳，用绝对导入 `from doubi.ui.app import main` 进包
+- `README.md`：补主界面与主题截图、安装包获取路径、「数据与配置」小节
+  （`~/.doubi` 与相对路径的 `doubi.db` 不是一回事）、项目结构补
+  `scripts/` `installer/` `tools/`、文档表补 `UI_DESIGN.md`
+- 主题表顺序在 `README` / `QUICKSTART` / `DEVELOPMENT` / `UI_DESIGN`
+  四处与代码对齐——这几处都写着「键序 = 界面展示序」，表格却是旧序
+
+### 发布准备
+
+- `.gitignore` 补 `doubi.db` / `download_manifest.jsonl` / `_test_live/`
+  / `.workbuddy/` / 打包临时产物；前两者含真实下载历史，已
+  `git rm --cached` 停止跟踪（本地文件保留）
+- `tools/nsis/` 显式**不忽略**，换取「clone 即可打包」
+
+---
+
+## 0.1.0 统计（保留历史快照）
+- 源码 62 个 .py 文件，约 12,100 行
+- 测试 19 个文件，385 个用例收集：**381 passed / 4 skipped**
+

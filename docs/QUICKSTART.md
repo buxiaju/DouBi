@@ -28,6 +28,13 @@ doubi download -u "https://www.bilibili.com/favlist?fid=999" --strategy favlist
 doubi download -u "https://www.bilibili.com/watchlater" --strategy watch_later
 doubi download -u "https://www.douyin.com/user/MS4wLjABAAAAxxxx" --strategy post
 
+# 抖音合集（M6.7）——两种链接形态都可以
+doubi download -u "https://www.douyin.com/collection/7647083357288957995" -o ./Downloaded
+doubi download -u "https://www.iesdouyin.com/share/mix/detail/7647083357288957995/" -o ./Downloaded
+
+# 抖音信息流/弹窗链接（modal_id / vid 就是视频 ID，自动规范化为 /video/{id}）
+doubi download -u "https://www.douyin.com/jingxuan?modal_id=7676517073484352822"
+
 # 常用开关
 doubi download -u URL --quality 4k --container mkv --concurrent 4
 doubi download -u URL --no-database --no-manifest   # 完全跳过记录
@@ -80,16 +87,23 @@ doubi-gui --theme deep_sea   # 本次启动强制用「深海」主题
 
 ### 换主题
 
-内置 6 套主题包，每套都是一整张配色表（背景 / 文字 / 表格斑马纹 / 状态色 / 进度条），不是简单的明暗开关：
+内置 7 套主题包，每套都是一整张配色表（背景 / 文字 / 表格斑马纹 / 状态色 / 进度条），不是简单的明暗开关：
 
 | `--theme` 取值 | 界面显示 | 底色 | 适合 |
 |---|---|---|---|
 | `default_light` | 默认亮 | 浅灰白 | 默认，日常光线 |
 | `default_dark` | 默认暗 | 深灰 | 夜间 |
+| `doubi` | 豆比紫 | 深紫 | 品牌主题，与桌面图标配色一致 |
 | `deep_sea` | 深海 | 墨蓝 | 夜间，偏冷色 |
 | `morandi` | 莫兰迪 | 暖米灰 | 低饱和，久看不累 |
 | `eye_care` | 护眼 | 米黄 | 长时间盯屏 |
 | `high_contrast` | 高对比 | 纯黑 + 亮黄 | 弱视 / 强光环境 |
+
+表格顺序就是设置页下拉框与导航栏循环切换的顺序：两套系统默认主题排最前面，
+品牌主题 `doubi` 紧随其后。
+
+`doubi` 是品牌主题——配色直接取自应用图标（深紫底 + 琥珀橙主色），其他 6 套是
+通用主题。
 
 三种切换方式：
 
@@ -110,6 +124,29 @@ doubi-gui --theme deep_sea   # 本次启动强制用「深海」主题
 1. 粘贴链接 → **解析**（或 **快速下载**：解析第一个 URL 并直接入队）。
 2. 勾选要下载的行，点 **下载选中 (N)**。辅助按钮：**全选** / **全不选** / **按行号选择…**（填 `1-5,7,9-12`）。
 3. 顶部搜索框按标题 / 作者过滤。
+
+支持的抖音链接形态（M6.7）：
+
+| 链接 | 解析结果 |
+|---|---|
+| `douyin.com/video/{id}` | 单条视频 |
+| `douyin.com/jingxuan?modal_id={id}` 等带 `modal_id` 的页面 | 单条视频（自动规范化） |
+| `douyin.com/user/{sec_uid}?...&modal_id={id}&vid={id}`（主页合集 tab 复制的链接） | 单条视频（不会误展开成整个主页） |
+| `douyin.com/collection/{mix_id}` | 合集容器，展开为合集内全部视频 |
+| `www.iesdouyin.com/share/mix/detail/{mix_id}/`（APP 分享合集） | 同上 |
+| `douyin.com/user/{sec_uid}` | 用户容器（全部作品） |
+
+### 下载抖音合集
+
+两种方式：
+
+1. **直接粘贴合集链接**（上表后两种形态）→ 解析 → 勾选下载。
+2. **从单条视频反查**：解析任意一条合集内的视频（比如从用户主页合集 tab 复制的那种带
+   `modal_id` 的链接），在结果表该行上**右键 → 「下载整个合集」**——程序会自动查出这条
+   视频属于哪个合集，把整个合集展开成表格供勾选。
+
+> 抖音合集的列举走签名 Web API（自动处理 a_bogus 签名与反爬重试），无需登录即可列举；
+> 高清画质建议先在设置页完成抖音扫码登录。
 
 ### 下载「带分类的合集」
 
