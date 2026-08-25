@@ -4,7 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "doubi"
-version = "0.1.0"
+# 版本号单一真源：字面量只存在于 src/doubi/__init__.py 的 __version__。
+# setuptools 用 AST 静态读取该属性（不会 import 包，所以构建期不需要装依赖），
+# 其余所有消费者（CLI -V / REST /health / MCP serverInfo / GUI APP_VERSION /
+# NSIS PRODUCT_VERSION / CI 产物命名）一律派生，不再各抄一份。
+dynamic = ["version"]
 description = "DouBi - Multi-platform media downloader (Douyin / Bilibili / ...), backed by yt-dlp"
 readme = "README.md"
 license = { text = "GPL-3.0" }
@@ -75,6 +79,11 @@ doubi-mcp = "doubi.mcp.server:main"
 where = ["src"]
 include = ["doubi*"]
 
+# 与 [project] dynamic = ["version"] 配对：attr: 是静态 AST 读取，
+# 不 import doubi，因此 yt-dlp / PySide6 等运行期依赖不必在构建期存在。
+[tool.setuptools.dynamic]
+version = { attr = "doubi.__version__" }
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 pythonpath = ["src", "."]
@@ -88,5 +97,8 @@ target-version = "py310"
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I"]
-ignore = ["E501"]
+select = ["E", "F", "W"]
+# E402: 仓库所有 tests/ 文件都用 ``sys.path.insert(0, SRC)`` 在 import
+# 前改 path（不 install 也能跑），这必然违反「import 在最上」。这条 ignore
+# 属于测试环境的固有限制，不是规则漏洞。
+ignore = ["E501", "E402"]

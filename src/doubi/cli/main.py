@@ -1,4 +1,4 @@
-"""DouBi CLI — entry point.
+﻿"""DouBi CLI — entry point.
 
 Subcommands:
     doubi platforms          list registered platform adapters
@@ -15,12 +15,12 @@ from pathlib import Path
 from typing import Iterable
 
 from .. import __version__
-from ..core.config import load_config
+from ..core.config import AppConfig, load_config
+from ..core.engine_loader import build_default_pipeline
 from ..core.logger import quiet_external_loggers, setup_logger
 from ..core.models import DownloadOptions
-from ..core.pipeline import DownloadPipeline, ProgressEvent
+from ..core.pipeline import ProgressEvent
 from ..core.registry import PlatformRegistry
-from ..engines.yt_dlp import YtDlpEngine
 
 # Trigger platform adapter registration
 from .. import platforms  # noqa: F401
@@ -51,39 +51,61 @@ def _build_parser() -> argparse.ArgumentParser:
                       help="URL to download (can be passed multiple times)")
     p_dl.add_argument("--batch", type=Path, default=None,
                       help="path to a text file with one URL per line")
-    p_dl.add_argument("-o", "--output", type=Path, default=Path("./Downloaded"),
-                      help="output root directory (default: ./Downloaded)")
-    p_dl.add_argument("--output-template", default="{platform}/{author}/{media_type}",
-                      help="directory template relative to --output (default: '{platform}/{author}/{media_type}')")
+    # 下面这些下载选项一律 default=None，含义是「用户没说」。
+    #
+    # 不能把 config.py 的默认值抄成 argparse 的默认值：那样 argparse 会在解析时
+    # 就把它填上，运行时再也分不清「用户显式传了 --container mp4」和「这是默认
+    # 值」，于是配置文件要么永远赢（命令行失效），要么永远输（配置文件失效）。
+    # 用 None 占位，真正的三层优先级（命令行 > 配置文件 > 内置默认）交给
+    # ``_build_options()`` 去叠。
+    p_dl.add_argument("-o", "--output", type=Path, default=None,
+                      help="output root directory (config: output_root, default: ./Downloaded)")
+    p_dl.add_argument("--output-template", default=None,
+                      help="directory template relative to --output "
+                           "(config: output_dir_template, default: '{platform}/{author}/{media_type}')")
     p_dl.add_argument("--format", default=None,
                       help="yt-dlp format selector (e.g. 'bestvideo*+bestaudio/best')")
-    p_dl.add_argument("--quality", default="best",
-                      help="quality preset: best | 4k | 1080p | ... (default: best)")
-    p_dl.add_argument("--container", default="mp4", choices=["mp4", "mkv"],
-                      help="output container (default: mp4)")
-    p_dl.add_argument("--filename", default="{title}_{item_id}",
-                      help="output filename template (default: '{title}_{item_id}')")
-    p_dl.add_argument("--concurrent", type=int, default=3,
-                      help="max concurrent downloads (default: 3)")
+    p_dl.add_argument("--quality", default=None,
+                      help="quality preset: best | 4k | 1080p | ... (config: max_quality, default: best)")
+    p_dl.add_argument("--container", default=None, choices=["mp4", "mkv"],
+                      help="output container (config: container, default: mp4)")
+    p_dl.add_argument("--filename", default=None,
+                      help="output filename template (config: filename_template, "
+                           "default: '{title}_{item_id}')")
+    p_dl.add_argument("--concurrent", type=int, default=None,
+                      help="max concurrent downloads (config: concurrent_jobs, default: 3)")
     p_dl.add_argument("--rate-limit", default=None, help="rate limit, e.g. 5M")
     p_dl.add_argument("--proxy", default=None, help="HTTP proxy, e.g. http://127.0.0.1:7890")
-    p_dl.add_argument("--no-thumbnail", action="store_true")
-    p_dl.add_argument("--no-metadata", action="store_true")
-    p_dl.add_argument("--nfo", action="store_true", help="emit NFO sidecar (M5)")
-    p_dl.add_argument("--danmaku", action="store_true", help="download danmaku (M5)")
-    p_dl.add_argument("--subtitles", action="store_true", help="download subtitles (M5)")
-    p_dl.add_argument("--no-resume", action="store_true",
-                      help="restart partial downloads from scratch instead of resuming")
+
+    # BooleanOptionalAction 同时生成 ``--x`` 和 ``--no-x``，所以 --no-thumbnail /
+    # --no-metadata / --no-resume 这些已经写进文档的写法全部保持可用，同时多出了
+    # 显式打开的那一半（配置文件关掉了、只想这一次开）。default=None 才能表达
+    # 「没说」——store_true 的 False 和「用户明确要关」无法区分。
+    p_dl.add_argument("--thumbnail", action=argparse.BooleanOptionalAction, default=None,
+                      help="write cover image sidecar (config: write_thumbnail)")
+    p_dl.add_argument("--metadata", action=argparse.BooleanOptionalAction, default=None,
+                      help="write .info.json sidecar (config: write_metadata_json)")
+    p_dl.add_argument("--nfo", action=argparse.BooleanOptionalAction, default=None,
+                      help="emit NFO sidecar (config: write_nfo)")
+    p_dl.add_argument("--danmaku", action=argparse.BooleanOptionalAction, default=None,
+                      help="download danmaku (config: write_danmaku)")
+    p_dl.add_argument("--subtitles", action=argparse.BooleanOptionalAction, default=None,
+                      help="download subtitles (config: write_subtitles)")
+    p_dl.add_argument("--resume", action=argparse.BooleanOptionalAction, default=None,
+                      help="resume partial downloads instead of restarting (config: resume)")
+
     p_dl.add_argument("--strategy", default=None,
                       help="for container URLs, choose strategy (e.g. post, like, space, favlist)")
-    p_dl.add_argument("--database", type=Path, default=Path("doubi.db"),
-                      help="SQLite database for dedup/history (default: doubi.db; pass empty string to disable)")
+    p_dl.add_argument("--database", type=Path, default=None,
+                      help="SQLite database for dedup/history "
+                           "(config: database_path, default: doubi.db; use --no-database to disable)")
     p_dl.add_argument("--no-database", action="store_true",
-                      help="disable SQLite dedup/history (shorthand for --database '')")
-    p_dl.add_argument("--manifest", type=Path, default=Path("download_manifest.jsonl"),
-                      help="JSONL manifest path (default: download_manifest.jsonl; pass empty string to disable)")
+                      help="disable SQLite dedup/history for this run")
+    p_dl.add_argument("--manifest", type=Path, default=None,
+                      help="JSONL manifest path (config: manifest_path, "
+                           "default: download_manifest.jsonl; use --no-manifest to disable)")
     p_dl.add_argument("--no-manifest", action="store_true",
-                      help="disable manifest writing (shorthand for --manifest '')")
+                      help="disable manifest writing for this run")
     p_dl.set_defaults(handler=_cmd_download)
 
     # ---- auth -------------------------------------------------------
@@ -149,8 +171,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # ---- serve -------------------------------------------------------
     p_serve = sub.add_parser("serve", help="run the REST API server")
-    p_serve.add_argument("--host", default="127.0.0.1")
+    p_serve.add_argument("--host", default="127.0.0.1",
+                         help="监听地址（默认 127.0.0.1，仅本机可连）")
     p_serve.add_argument("--port", type=int, default=8000)
+    p_serve.add_argument("--token", default=None,
+                         help="API token；留空则读环境变量 DOUBI_API_TOKEN")
+    p_serve.add_argument("--allow-insecure", action="store_true",
+                         help="允许在没有 token 的情况下监听非回环地址（危险）")
     p_serve.set_defaults(handler=_cmd_serve)
 
     # ---- mcp ---------------------------------------------------------
@@ -176,6 +203,69 @@ def _cmd_platforms(args: argparse.Namespace) -> int:
     return 0
 
 
+def _pick(cli_value, cfg_value):
+    """Return the command-line value when the user actually supplied one.
+
+    ``None`` 是解析器约定的「用户没说」，此时回落到配置文件。布尔开关必须用
+    ``is not None`` 判断而不是真值判断——``--no-resume`` 传进来是 ``False``，
+    用真值判断会把它当成「没说」，于是显式关闭永远失效。
+    """
+    return cfg_value if cli_value is None else cli_value
+
+
+def _build_options(args: argparse.Namespace, cfg: AppConfig | None = None) -> DownloadOptions:
+    """Assemble :class:`DownloadOptions` for the CLI surface.
+
+    这是 CLI 端唯一的 ``AppConfig → DownloadOptions`` 搬运点，和 GUI 的
+    ``ParsePage._build_options`` / REST 的 ``server.app._build_options``
+    地位相同：引擎、file_layout、pipeline 都只读 ``DownloadOptions``，任何
+    在这里漏掉的字段都会静默回落到 dataclass 默认值，表现为「配置文件在
+    命令行下不生效」。新增配置项时这里是最容易忘的第五处。
+
+    优先级：命令行 > 配置文件 > 内置默认（内置默认由 ``load_config`` 保证，
+    所以这里只需要叠前两层）。
+
+    这里只做「搬运」，不做路径规范化：``expanduser()`` / ``resolve()`` 留给
+    调用方（见 :func:`_cmd_download`）。混进来会让本函数的输出不再逐字段等于
+    配置值，守护测试就没法用「字段是否原样到达」这一条判据了。
+    """
+    if cfg is None:
+        cfg = load_config(args.config)
+
+    # --no-database / --no-manifest 是「本次运行关掉」的一次性开关，优先级
+    # 高于 --database/--manifest 显式给的路径，也高于配置文件里的开关。
+    if args.no_database:
+        database = None
+    else:
+        database = _pick(args.database, cfg.database_path if cfg.database else None)
+
+    manifest = None if args.no_manifest else _pick(args.manifest, cfg.manifest_path)
+
+    return DownloadOptions(
+        output_root=_pick(args.output, cfg.output_root),
+        output_dir_template=_pick(args.output_template, cfg.output_dir_template),
+        filename_template=_pick(args.filename, cfg.filename_template),
+        container=_pick(args.container, cfg.container),
+        max_quality=_pick(args.quality, cfg.max_quality),
+        format_id=args.format,
+        write_thumbnail=_pick(args.thumbnail, cfg.write_thumbnail),
+        write_metadata_json=_pick(args.metadata, cfg.write_metadata_json),
+        write_nfo=_pick(args.nfo, cfg.write_nfo),
+        write_danmaku=_pick(args.danmaku, cfg.write_danmaku),
+        write_subtitles=_pick(args.subtitles, cfg.write_subtitles),
+        resume=_pick(args.resume, cfg.resume),
+        rate_limit=_pick(args.rate_limit, cfg.rate_limit),
+        proxy=_pick(args.proxy, cfg.proxy),
+        database=database,
+        manifest=manifest,
+    )
+
+
+def _resolve_concurrency(args: argparse.Namespace, cfg: AppConfig) -> int:
+    """并发数不在 DownloadOptions 上（它是调度参数，不是下载参数），单独叠。"""
+    return int(_pick(args.concurrent, cfg.concurrent_jobs))
+
+
 def _cmd_download(args: argparse.Namespace) -> int:
     setup_logger("DEBUG" if args.verbose else "INFO", verbose=args.verbose)
     quiet_external_loggers()
@@ -188,29 +278,13 @@ def _cmd_download(args: argparse.Namespace) -> int:
         return 2
 
     cfg = load_config(args.config)
-    db_path = None if args.no_database else args.database
-    manifest_path = None if args.no_manifest else args.manifest
-    options = DownloadOptions(
-        output_root=args.output.expanduser().resolve(),
-        output_dir_template=args.output_template,
-        filename_template=args.filename,
-        container=args.container,
-        max_quality=args.quality,
-        format_id=args.format,
-        write_thumbnail=not args.no_thumbnail,
-        write_metadata_json=not args.no_metadata,
-        write_nfo=args.nfo,
-        write_danmaku=args.danmaku,
-        write_subtitles=args.subtitles,
-        resume=not args.no_resume,
-        rate_limit=args.rate_limit,
-        proxy=args.proxy,
-        database=db_path,
-        manifest=manifest_path,
-    )
+    options = _build_options(args, cfg)
+    # 路径规范化在这里做而不是在 _build_options 里，理由见那边的 docstring。
+    options.output_root = Path(options.output_root).expanduser().resolve()
     options.output_root.mkdir(parents=True, exist_ok=True)
 
-    return asyncio.run(_run_downloads(urls, options, args.concurrent, args.verbose, args.strategy))
+    concurrent = _resolve_concurrency(args, cfg)
+    return asyncio.run(_run_downloads(urls, options, concurrent, args.verbose, args.strategy))
 
 
 def _cmd_migrate(args: argparse.Namespace) -> int:
@@ -274,9 +348,20 @@ def _cmd_live(args: argparse.Namespace) -> int:
 
 
 def _cmd_serve(args: argparse.Namespace) -> int:
-    """Run the REST API server."""
+    """Run the REST API server.
+
+    透传成 ``doubi-serve`` 的参数而不是直接调 ``build_app``：安全审查
+    （监听地址是否对外可达、有没有 token）住在 ``server.app.main`` 里，
+    绕过它就等于让 ``doubi serve`` 成为一条无检查的后门。
+    """
     from ..server.app import main as server_main
-    return server_main(["--host", args.host, "--port", str(args.port)])
+
+    argv = ["--host", args.host, "--port", str(args.port)]
+    if args.token:
+        argv += ["--token", args.token]
+    if args.allow_insecure:
+        argv.append("--allow-insecure")
+    return server_main(argv)
 
 
 def _cmd_mcp(args: argparse.Namespace) -> int:
@@ -287,8 +372,12 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
 
 async def _run_downloads(urls: Iterable[str], options: DownloadOptions, concurrent: int, verbose: bool,
                           strategy: str | None) -> int:
-    engine = YtDlpEngine()
-    pipeline = DownloadPipeline(engine=engine, max_concurrent=concurrent)
+    # build_default_pipeline() rather than a bare DownloadPipeline(...):
+    # it is the single place that wires the default engine, guarantees the
+    # platform adapters are registered, and switches on automatic retry.
+    # A hand-rolled pipeline here is how the CLI silently drifts away from
+    # the GUI / REST behavior (DEVELOPMENT.md pitfall 5).
+    pipeline = build_default_pipeline(max_concurrent=concurrent)
 
     def on_progress(ev: ProgressEvent) -> None:
         pct = ev.fraction * 100
@@ -296,6 +385,12 @@ async def _run_downloads(urls: Iterable[str], options: DownloadOptions, concurre
             print(f"  [done]      {ev.item.source_url}")
         elif ev.phase == "failed":
             print(f"  [failed]    {ev.item.source_url} -- {ev.message}", file=sys.stderr)
+        elif ev.extra.get("retry"):
+            # Needs its own branch: a retry notice carries phase="downloading"
+            # and fraction=0.0, so the plain-progress branches below would
+            # drop it entirely outside --verbose -- leaving the user staring
+            # at a stalled line during the backoff with no explanation.
+            print(f"  [retry]     {ev.item.source_url} -- {ev.message}", file=sys.stderr)
         elif verbose and ev.phase == "downloading":
             print(f"  [dl {pct:5.1f}%] {ev.item.source_url}")
         elif ev.phase == "downloading" and pct >= 99.0:

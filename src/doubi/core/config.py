@@ -45,6 +45,9 @@ DEFAULTS: dict[str, Any] = {
     "database_path": "doubi.db",
     "manifest_path": "download_manifest.jsonl",
     "theme": "default_light",
+    # GUI 行为偏好：下载前是否弹出选项对话框让用户覆盖画质/容器等。
+    # 默认 False 是有意为之——绝大多数下载用户就是「点一下就走」。
+    "prompt_before_download": False,
 }
 
 
@@ -70,6 +73,7 @@ class AppConfig:
     database_path: Path = Path(DEFAULTS["database_path"])
     manifest_path: Path = Path(DEFAULTS["manifest_path"])
     theme: str = DEFAULTS["theme"]
+    prompt_before_download: bool = DEFAULTS["prompt_before_download"]
     extra: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -161,5 +165,9 @@ def load_config(path: Optional[Path] = None, *, env_prefix: str = "DOUBI_") -> A
         database_path=_coerce(data["database_path"], DEFAULTS["database_path"]),
         manifest_path=_coerce(data["manifest_path"], DEFAULTS["manifest_path"]),
         theme=str(data["theme"]),
+        prompt_before_download=_coerce(
+            data.get("prompt_before_download", DEFAULTS["prompt_before_download"]),
+            DEFAULTS["prompt_before_download"],
+        ),
     )
     return cfg

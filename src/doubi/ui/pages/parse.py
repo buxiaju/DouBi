@@ -26,6 +26,100 @@ from typing import Optional
 logger = logging.getLogger("doubi.ui.pages.parse")
 
 
+# ---------------------------------------------------------------------------
+# Prompt options dialog (M6.11 下载前询问)
+# ---------------------------------------------------------------------------
+#
+# 故意放在模块顶层、不嵌进 ``build_parse_widgets`` 工厂里：
+# * 单元测试可以直接 ``from doubi.ui.pages.parse import PromptOptionsDialog``
+#   拿到实例，不需要先把整个 ParsePage / qfluentwidgets 主题表跑一遍。
+# * PySide6 / qfluentwidgets 都在 ``PromptOptionsDialog.__init__`` 内部延迟
+#   import，模块顶层不引入任何 Qt 符号——没装 PySide6 的环境（CLI / 测试
+#   收集阶段）不会因此报错。
+#
+# 这是个 ``MessageBoxBase`` 子类：两个按钮（"下载" / "取消"），点"下载"
+# 时返回 1 + 用户在表单里改的值；点"取消"或 ESC 时返回 0，不修改配置。
+# 控件挂在 ``viewLayout``（这是项目里这个版本的 qfluentwidgets 提供的
+# 容器，**不是** 文档示例里的 ``view`` widget）。选项集合刻意复用设置
+# 页已定的 ``["mp4","mkv"]`` / ``["best","8k",...]``，避免在两处维护。
+
+_QUALITY_CHOICES = ("best", "8k", "4k", "1080p", "720p", "480p")
+_CONTAINER_CHOICES = ("mp4", "mkv")
+
+
+def _build_prompt_dialog_class():
+    """Lazy-import Qt and return the dialog class.
+
+    Done in a helper so the module can be imported on machines without
+    PySide6 — the rest of ``parse.py`` is unrelated to the dialog.
+    """
+    from PySide6.QtWidgets import (
+        QCheckBox, QComboBox, QFormLayout, QWidget,
+    )
+    from qfluentwidgets import MessageBoxBase
+
+    class PromptOptionsDialog(MessageBoxBase):
+        """'Download with what options?' dialog. Two buttons (下载 / 取消).
+
+        Pre-fills from ``seed``: typically the current ``DownloadOptions``
+        so the user only tweaks what they want to change.
+        """
+
+        def __init__(self, parent: QWidget, seed):
+            super().__init__(parent)
+            # 默认按钮文案是 'OK' / 'Cancel'——这个版本的 qfluentwidgets
+            # 没有提供 label 自带的 setTitle 之外的文案入口，直接改。
+            self.yesButton.setText("下载")
+            self.cancelButton.setText("取消")
+
+            self.quality = QComboBox(self)
+            self.quality.addItems(_QUALITY_CHOICES)
+            self.container = QComboBox(self)
+            self.container.addItems(_CONTAINER_CHOICES)
+            self.thumb = QCheckBox("生成缩略图 (.jpg)", self)
+            self.metadata_json = QCheckBox("写入 metadata.json", self)
+
+            # seed -> 控件当前值
+            self.quality.setCurrentText(str(seed.max_quality))
+            self.container.setCurrentText(str(seed.container))
+            self.thumb.setChecked(bool(seed.write_thumbnail))
+            self.metadata_json.setChecked(bool(seed.write_metadata_json))
+
+            form = QFormLayout()
+            form.setSpacing(8)
+            form.addRow("最高画质", self.quality)
+            form.addRow("容器格式", self.container)
+            form.addRow("附加产物", self.thumb)
+            form.addRow("", self.metadata_json)
+            self.viewLayout.addLayout(form)
+
+    return PromptOptionsDialog
+
+
+def collect_prompt_overrides(dialog) -> dict:
+    """Pure-function helper: read a PromptOptionsDialog's controls.
+
+    Kept module-level so unit tests can verify field collection without
+    ``exec()`` (which would block in offscreen tests). Returns a dict
+    that can be passed straight into ``dataclasses.replace(options, **x)``.
+    Only the four fields the dialog exposes are ever set — no spillover.
+    """
+    return {
+        "max_quality": dialog.quality.currentText(),
+        "container": dialog.container.currentText(),
+        "write_thumbnail": dialog.thumb.isChecked(),
+        "write_metadata_json": dialog.metadata_json.isChecked(),
+    }
+
+
+# 模块顶层的轻量引用，仅当 Qt 可用时才被解析；测试在没装 Qt 的环境下
+# 仍可 ``import doubi.ui.pages.parse``。
+try:  # pragma: no cover - import availability gate
+    PromptOptionsDialog = _build_prompt_dialog_class()
+except Exception:  # noqa: BLE001
+    PromptOptionsDialog = None  # type: ignore[assignment]
+
+
 def build_parse_widgets():
     from PySide6.QtCore import QObject, Qt, QUrl, Signal
     from PySide6.QtGui import QDesktopServices
@@ -76,6 +170,39 @@ def build_parse_widgets():
 
         def set_task_manager(self, manager) -> None:
             self._task_manager = manager
+
+        def set_prompt_before_download(self, enabled: bool) -> None:
+            """设置页保存后由主窗口转发下来：是否下载前先弹选项框。"""
+            self._prompt_before_download = enabled
+
+        def _ask_prompt_overrides(self) -> Optional[dict]:
+            """弹「下载选项」对话框。返回 None 表示用户取消。
+
+            默认行为是「点一下就走」：``self._prompt_before_download`` 未
+            开启时直接返回空 dict，让 ``_options_for_overrides`` 走默认
+            配置——这条路径在测试里也大量存在，不能被破坏。
+            """
+            if not getattr(self, "_prompt_before_download", False):
+                return {}
+            # 模块顶层可能在没装 Qt 的环境下把 ``PromptOptionsDialog`` 置
+            # 成 None——这是理论兜底，正常 GUI 环境总是可用。
+            if PromptOptionsDialog is None:
+                return {}
+            dlg = PromptOptionsDialog(self, self._build_options())
+            if not dlg.exec():
+                return None
+            return collect_prompt_overrides(dlg)
+
+        def current_options(self) -> DownloadOptions:
+            """今天的配置对应的下载选项，供窗口级调用方复用。
+
+            断点续传恢复需要一份 ``DownloadOptions``：数据库路径在里面，
+            而快照缺失的字段也要拿它来补默认值。开这个公开出口，是为了
+            让主窗口不必自己再拼一遍 ``AppConfig -> DownloadOptions``——
+            那个搬运只允许存在一处（见 ``_build_options`` 与四端同名的
+            ``test_build_options_covers_every_shared_config_field``）。
+            """
+            return self._build_options()
 
         # ---- UI build ------------------------------------------------
 
@@ -265,7 +392,12 @@ def build_parse_widgets():
                     self._toast(InfoBar.warning, "无可下载内容",
                                 "该链接没有可下载的子项。")
                     return
-                opts = self._build_options()
+                # 弹「下载选项」对话框：用户取消 = 整批不入队；用户确认 = 用
+                # 弹窗里的覆盖项拼出 options。没启用提示时直接走默认配置。
+                overrides = self._ask_prompt_overrides()
+                if overrides is None:
+                    return
+                opts = self._options_for_overrides(overrides)
                 for it in targets:
                     self._task_manager.add(it, opts)
                 self._toast(InfoBar.success, "已加入下载队列",
@@ -357,6 +489,15 @@ def build_parse_widgets():
             browser = menu.addAction("在浏览器中打开")
             single = menu.addAction("作为单个视频下载")
 
+            # ``item`` is what the legacy actions operate on — fall back
+            # to the deepest item we have so reparse / open / single still
+            # work when the user right-clicks an inserted episode/page row.
+            #
+            # 这个赋值必须在任何读 ``item`` 的分支**之前**：它是本闭包的局部
+            # 变量，编译期就被判定为 local，先读会直接 UnboundLocalError，
+            # 不会回落到外层作用域。
+            item = episode_item or top_item
+
             # 抖音：用户从合集 tab 复制的往往只是单条视频链接 —
             # 提供一个入口反查它所属的合集并整体展开。
             download_collection: Optional[object] = None
@@ -371,10 +512,6 @@ def build_parse_widgets():
             meta = menu.addAction("查看元数据")
             cover = menu.addAction("查看封面")
 
-            # ``item`` is what the legacy actions operate on — fall back
-            # to the deepest item we have so reparse / open / single still
-            # work when the user right-clicks an inserted episode/page row.
-            item = episode_item or top_item
             if item is None:
                 for a in (reparse, browser, single, meta, cover):
                     a.setEnabled(False)
@@ -420,7 +557,7 @@ def build_parse_widgets():
                 QDesktopServices.openUrl(QUrl(item.source_url))
             elif chosen is single:
                 if self._task_manager is not None:
-                    self._task_manager.add(item, self._build_options())
+                    self._task_manager.add(item, self._options_for_overrides())
                     self._toast(InfoBar.success, "已加入下载队列", item.title or item.item_id)
             elif chosen is meta:
                 self._show_metadata_dialog(item)
@@ -1015,7 +1152,12 @@ def build_parse_widgets():
                     self._toast(InfoBar.warning, "无可下载内容",
                                 "勾选项展开后没有分集。")
                     return
-                opts = self._build_options()
+                # 弹「下载选项」对话框：用户取消 = 整批不入队；用户确认 = 用
+                # 弹窗里的覆盖项拼出 options。没启用提示时直接走默认配置。
+                overrides = self._ask_prompt_overrides()
+                if overrides is None:
+                    return
+                opts = self._options_for_overrides(overrides)
                 for it in targets:
                     self._task_manager.add(it, opts)
                 self._toast(InfoBar.success, "已加入下载队列", f"共 {len(targets)} 项。")
@@ -1183,6 +1325,25 @@ def build_parse_widgets():
                     continue
                 out.append(s)
             return out
+
+        def _options_for_overrides(self, overrides: Optional[dict] = None) -> DownloadOptions:
+            """所有「准备入队一条下载」的地方都走这个出口。
+
+            ``_build_options`` 是唯一负责 ``AppConfig -> DownloadOptions``
+            搬运的函数，弹窗里改的字段只能在这条流水线**之后**叠加，绝
+            不能直接拼进 ``_build_options``（否则 ``test_build_options_covers_every_shared_config_field``
+            会拒绝任何「只在弹窗里有意义」的字段）。``overrides`` 是来自
+            弹窗的覆盖项，以 dataclasses.replace 形式叠加，None 表示无覆盖。
+            """
+            opts = self._build_options()
+            if not overrides:
+                return opts
+            import dataclasses
+            valid = {f.name for f in dataclasses.fields(DownloadOptions)}
+            clean = {k: v for k, v in overrides.items() if k in valid}
+            if not clean:
+                return opts
+            return dataclasses.replace(opts, **clean)
 
         def _build_options(self) -> DownloadOptions:
             return DownloadOptions(

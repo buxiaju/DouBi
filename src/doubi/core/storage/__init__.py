@@ -2,7 +2,16 @@
 
 from __future__ import annotations
 
-from .database import Database, MediaItemRow, TaskRow
+from .database import (
+    Database,
+    MediaItemRow,
+    PendingTaskRow,
+    TaskRow,
+    item_from_json,
+    item_to_json,
+    options_from_json,
+    options_to_json,
+)
 from .file_layout import (
     DEFAULT_DIR_TEMPLATE,
     already_downloaded_on_disk,
@@ -22,6 +31,11 @@ __all__ = [
     "Database",
     "MediaItemRow",
     "TaskRow",
+    "PendingTaskRow",
+    "options_to_json",
+    "options_from_json",
+    "item_to_json",
+    "item_from_json",
     "ManifestRecord",
     "ManifestWriter",
     "NFO_SUFFIX",

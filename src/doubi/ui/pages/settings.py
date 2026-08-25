@@ -77,7 +77,7 @@ def _find_settings_page(widget):
 
 
 def build_settings_widgets():
-    from PySide6.QtCore import Qt, QTimer
+    from PySide6.QtCore import Qt, QTimer, Signal as pyqtSignal
     from PySide6.QtWidgets import (
         QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QFileDialog, QLabel,
         QScrollArea, QSizePolicy,
@@ -105,6 +105,12 @@ def build_settings_widgets():
     )
 
     class SettingsPage(QWidget):
+        # 保存后通知主窗口把 prompt_before_download 推到 parse_page，
+        # 这样不重启也能生效。仅这一个字段需要即时下发——其他字段的
+        # 变更要么重启生效（database_path / theme），要么下一次下载
+        # 入队时自然重新读（container / max_quality 等）。
+        promptBeforeDownloadChanged = pyqtSignal(bool)
+
         def __init__(self, parent: Optional[QWidget] = None):
             super().__init__(parent)
             self.setObjectName("settingsPage")
@@ -117,6 +123,12 @@ def build_settings_widgets():
             self._build_ui()
             self._load_from_cfg()
             self.theme.currentIndexChanged.connect(self._on_theme_combo_changed)
+            # SwitchButton 没有「用户主动切换」与「程序改值」的区分——直接
+            # 连它自身的 checkedChanged 信号就够了，程序改值时不会跑
+            # 回调（加载在构造时就完成，那时还没 connect）。
+            self.prompt_before_download.checkedChanged.connect(
+                self.promptBeforeDownloadChanged.emit
+            )
             # 别处（导航栏主题按钮、CLI）切换主题时，下拉框跟着走。
             subscribe_theme(self, self._sync_theme_combo)
             # Populate the account block asynchronously
@@ -246,6 +258,11 @@ def build_settings_widgets():
             self.theme = ComboBox(self._appearance_card["body"])
             self.theme.addItems(theme_labels())
             appearance_form.addRow("主题", self.theme)
+
+            # GUI 行为偏好：是否在解析页点下载时先弹选项对话框。
+            # 默认 False——「点一下就走」是绝大多数用户的心智模型。
+            self.prompt_before_download = SwitchButton(self._appearance_card["body"])
+            appearance_form.addRow("下载前询问选项", self.prompt_before_download)
             body_layout.addWidget(self._appearance_card["widget"])
 
             # ---- Cookie 与存储 ----
@@ -414,6 +431,7 @@ def build_settings_widgets():
             self.concurrent.setText(str(self._cfg.concurrent_jobs))
             self.rate_limit.setText(self._cfg.rate_limit or "")
             self.database.setChecked(self._cfg.database)
+            self.prompt_before_download.setChecked(self._cfg.prompt_before_download)
             self._sync_theme_combo()
             self.cookies_dir_label.setText(
                 str(Path.home() / ".doubi" / "cookies")
@@ -586,6 +604,7 @@ def build_settings_widgets():
                 data["concurrent_jobs"] = 3
             data["rate_limit"] = self.rate_limit.text().strip() or None
             data["database"] = self.database.isChecked()
+            data["prompt_before_download"] = self.prompt_before_download.isChecked()
 
             theme_name = self._selected_theme_name()
             data["theme"] = theme_name

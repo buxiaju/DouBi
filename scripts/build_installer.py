@@ -30,6 +30,10 @@ NSI = ROOT / "installer" / "doubi.nsi"
 SRC_DIR = ROOT / "dist" / "doubi-gui"
 APP_EXE = SRC_DIR / "doubi-gui.exe"
 
+#: 版本号单一真源。``pyproject.toml`` 自己也是从这里 ``attr:`` 派生的，
+#: 所以打包脚本直接读源头，少一层间接。
+VERSION_FILE = ROOT / "src" / "doubi" / "__init__.py"
+
 # 便携版解压位置。makensis.exe 在根目录和 Bin/ 下都有一份，
 # 按顺序探测，谁在用谁。
 MAKENSIS_CANDIDATES = (
@@ -39,15 +43,18 @@ MAKENSIS_CANDIDATES = (
 
 
 def read_version() -> str:
-    """从 pyproject.toml 抠出 version。
+    """从 ``src/doubi/__init__.py`` 抠出 ``__version__``。
 
-    不用 tomllib 是因为只要一个字段，正则足够，也省得关心
-    ``[project]`` 之外还有没有同名 key——这里锚定了行首。
+    不 import doubi 是刻意的：打包脚本可能在没装 yt-dlp / PySide6 的
+    干净环境里跑，import 会连带炸掉。正则锚定行首，足够稳。
+
+    也不再读 pyproject.toml——那里现在是 ``dynamic = ["version"]``，
+    没有 version 字面量可读了。
     """
-    text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    m = re.search(r'^version\s*=\s*"([^"]+)"', text, re.MULTILINE)
+    text = VERSION_FILE.read_text(encoding="utf-8")
+    m = re.search(r'^__version__\s*=\s*"([^"]+)"', text, re.MULTILINE)
     if not m:
-        raise SystemExit("pyproject.toml 里找不到 version")
+        raise SystemExit(f"{VERSION_FILE} 里找不到 __version__")
     return m.group(1)
 
 

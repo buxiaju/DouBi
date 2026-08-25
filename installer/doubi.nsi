@@ -32,8 +32,16 @@ ManifestDPIAware true
 ; 相对路径——NSIS 的相对路径按 makensis 的工作目录解析，从别处
 ; 调用就会找不到文件。
 ;--------------------------------------------------------------------
+; 兜底值刻意写成 0.0.0 而不是某个真实版本号：真源是
+; src/doubi/__init__.py 的 __version__，由 scripts/build_installer.py
+; 读出后用 /DPRODUCT_VERSION 注进来。万一漏传，产物会叫
+; DouBi-Setup-0.0.0.exe，一眼能看出来没传版本号，而不是打出一个
+; 版本号对不上的正式包。
+;
+; 不写成 0.0.0-dev 之类：下面 VIProductVersion 要求四段纯数字，
+; 带字母后缀会让 makensis 直接编译失败。
 !ifndef PRODUCT_VERSION
-  !define PRODUCT_VERSION "0.1.0"
+  !define PRODUCT_VERSION "0.0.0"
 !endif
 !ifndef SRC_DIR
   !define SRC_DIR "${__FILEDIR__}\..\dist\doubi-gui"

@@ -47,9 +47,18 @@ _ILLEGAL_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _TRAILING_DOTS_RE = re.compile(r"[\. ]+$")
 _WHITESPACE_RE = re.compile(r"\s+")
 
-# Maximum basename length. NTFS/HFS+/ext4 all support > 255 but common
-# copy operations and shells break earlier, so we cap conservatively.
-MAX_BASENAME = 200
+# Maximum basename length (the ``{title}_{item_id}`` piece *before*
+# extension / ``_P001`` suffix / yt-dlp's ``.part`` suffix).
+#
+# Historical note: was 200. 200 chars on the basename + 80 chars for the
+# collection/section dirs + output_root on Windows easily blew past
+# MAX_PATH (260) for standalone videos; yt-dlp then opened the part file
+# and failed with ``[Errno 2] No such file`` because the parent dir
+# creation itself uses the same truncated path. 120 gives comfortable
+# headroom: a full Windows path of
+# ``C:\Users\foo\Downloaded\youtube\author\video\very-long-title_xxx.f401.mp4.part``
+# ≈ 50 + 8 + 20 + 8 + 120 + 25 = ~231 chars under the 260 ceiling.
+MAX_BASENAME = 120
 
 
 def _sanitize(value: str) -> str:

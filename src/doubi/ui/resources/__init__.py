@@ -29,6 +29,8 @@ import re
 from pathlib import Path
 from typing import Any, Optional
 
+from ... import __version__
+
 logger = logging.getLogger("doubi.ui.resources")
 
 __all__ = [
@@ -57,7 +59,9 @@ __all__ = [
 APP_NAME = "DouBi"
 APP_DISPLAY_NAME = "豆比下载"
 APP_TAGLINE = "一站式多平台视频下载"
-APP_VERSION = "0.1.0"
+#: 从 ``doubi.__version__`` 派生，不再手抄。关于窗口标题 / 关于对话框显示的
+#: 版本号因此与 ``doubi -V``、REST ``/health``、安装包文件名恒等。
+APP_VERSION = __version__
 APP_COPYRIGHT = "© 2026 DouBi Contributors · GPL-3.0"
 
 RESOURCE_DIR = Path(__file__).resolve().parent

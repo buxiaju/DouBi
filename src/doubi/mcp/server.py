@@ -42,7 +42,7 @@ from ..core.engine_loader import build_default_pipeline
 from ..core.models import DownloadOptions
 from ..core.config import load_config
 from ..core.registry import PlatformRegistry
-from ..platforms import douyin, bilibili  # noqa: F401  -- ensure registration
+from .. import platforms  # noqa: F401  -- ensure all platform adapters are registered on startup
 
 logger = logging.getLogger("doubi.mcp.server")
 

@@ -49,6 +49,20 @@ logger = logging.getLogger("doubi.engines.yt_dlp")
 #: video apart while leaving plain single-video filenames untouched.
 PART_INDEX_SUFFIX = "%(playlist_index&_P{:03d}|)s"
 
+#: Default user agent when the caller did not pin one.
+#:
+#: YouTube (and increasingly other platforms) reject bare ``yt-dlp/x.y.z``
+#: UAs with HTTP 403. The YouTube adapter already uses a Chrome UA for
+#: its metadata fetch; using the same string here keeps **parse and
+#: download on an equal footing** — otherwise you get the classic
+#: "YouTube 可以解析但下载失败" symptom because parse uses Chrome UA
+#: while the engine falls through to yt-dlp's built-in string.
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0 Safari/537.36"
+)
+
 
 class _LocalDownloadCancelled(Exception):
     """Fallback abort signal when ``yt_dlp.utils.DownloadCancelled`` is absent.
@@ -191,8 +205,12 @@ class YtDlpEngine(Engine):
             opts["proxy"] = options.proxy
         if options.rate_limit:
             opts["ratelimit"] = options.rate_limit
-        if options.user_agent:
-            opts["user_agent"] = options.user_agent
+        # UA：显式传了就用显式的，否则用 DEFAULT_USER_AGENT（Chrome UA）。
+        # 不能留空让 yt-dlp 决定——它的默认 UA 是 ``yt-dlp/<版本号>``，
+        # YouTube 会对这个 UA 直接 403。于是出现「解析能拿到标题/作者
+        # （adapter._extract_meta 用的是浏览器 UA）但下载阶段 403」的
+        # 不对称失败。详见 DEFAULT_USER_AGENT 处的注释。
+        opts["user_agent"] = options.user_agent or DEFAULT_USER_AGENT
         return opts
 
     @staticmethod

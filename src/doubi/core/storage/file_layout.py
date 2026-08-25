@@ -6,23 +6,31 @@ Default layout::
     ├── {platform}/
     │   └── {author}/
     │       └── {media_type}/
-    │           ├── {collection_title}/      # one folder per collection
-    │           │   ├── ep1.mp4
-    │           │   └── ep2.mp4
+    │           ├── {collection_title}/      # flat collection
+    │           │   ├── ep1_title_ep1id.mp4
+    │           │   └── ep2_title_ep2id.mp4
     │           ├── {collection_title}/      # categorised collection
     │           │   └── {section_title}/     # ← the site's category tabs
     │           │       └── {episode_title}/
-    │           │           └── {episode_title}_P001.mp4
-    │           └── {video_title}/           # standalone video
-    │               └── {video_title}.mp4
+    │           │           └── ep_title_epid_P001.mp4
+    │           └── standalone_title_id.mp4  # standalone, no subdir
 
 The leaf directory is named after ``item.extra["collection_title"]``
-when the item belongs to a collection (so all episodes share a single
-folder) and after ``item.title`` otherwise. Collections that group
-their episodes into categories additionally carry
-``item.extra["section_title"]``, which inserts the category level and
-gives every episode its own folder. Only the media files are kept
-there; thumbnails / metadata sidecars are opt-in.
+for flat collections (all episodes share one folder) and
+``collection/section/episode[/page]`` for categorised ugc seasons.
+
+**Standalone videos intentionally have no per-item leaf subdir.**
+Their basename already carries the full sanitised title plus the
+unique item id, so removing the redundant same-named subdir halves
+the title footprint on disk and avoids the classic Windows
+``[Errno 2] No such file or directory`` MAX_PATH failure seen when a
+long YouTube title is duplicated across both a subdir and the
+filename (e.g. ``Garden design … / Garden design …_id.mp4.part``).
+
+Sidecar files (thumbnail / NFO / JSON / subtitles / danmaku) are
+opt-in and fall next to the main media file, sharing the basename
+prefix so the filesystem itself naturally groups them per item even
+without a dedicated subfolder.
 
 The directory template and the per-item filename template are
 configurable. Tokens use the same ``{name}`` syntax as the filename
@@ -42,9 +50,18 @@ from typing import Optional
 from ..models import DownloadOptions, MediaItem
 from .. import naming
 
-# Maximum path length for any single relative path component. NTFS
-# allows 255; we cap at 120 to stay under even exotic path schemes.
-MAX_COMPONENT = 120
+# Maximum length for any single relative path component. NTFS caps at
+# 255 unicode chars; we stay well under so the sum of the default
+# template + a long video title never tips past MAX_PATH on Windows.
+#
+# Historical note: was 120. Reduced to 80 after a YouTube standalone
+# video with a ~95-char title hit ``[Errno 2] No such file or directory``
+# because the old layout placed the title both as a per-item leaf dir
+# AND as the filename prefix — doubling it. The layout no longer nests
+# standalone titles under a same-named dir, but keeping the component
+# cap at 80 still guards against collection/section/episode cascades
+# of three 120-char dir names adding ~360 chars on their own.
+MAX_COMPONENT = 80
 
 #: Default directory template.
 DEFAULT_DIR_TEMPLATE = "{platform}/{author}/{media_type}"
@@ -198,7 +215,15 @@ def item_leaf_parts(item: MediaItem) -> list[str]:
       collection ▸ category ▸ episode hierarchy.
     * Episode of a flat collection (``collection_title`` only) →
       ``[collection]``, i.e. every episode shares one folder.
-    * Standalone video → ``[title]``.
+    * **Standalone video → ``[]`` (no extra leaf dir).**
+
+    The standalone case deliberately avoids a ``{title}/`` subdir because
+    the basename rendered by :mod:`naming` already contains the full
+    title (``{title}_{item_id}.%(ext)s``). Adding an identically-named
+    directory would double the title in the final path and easily blow
+    past Windows' ``MAX_PATH`` (260 chars) for long titles — producing
+    ``[Errno 2] No such file or directory: '...<title>/<title>_id.mp4'``
+    at yt-dlp open-for-write time.
     """
     collection = collection_title_of(item)
     section = section_title_of(item)
@@ -218,15 +243,25 @@ def item_leaf_parts(item: MediaItem) -> list[str]:
         ]
     if collection:
         return [_sanitize_component(collection, fallback="collection")]
-    return [_sanitize_component(item.title, fallback="untitled")]
+    # Standalone video: no leaf dir.  The filenames already embed the
+    # sanitised title (plus item_id for collision safety), so sidecar
+    # files (thumbnail / NFO / JSON / subtitles / danmaku) stay naturally
+    # grouped by the common basename prefix even inside the shared
+    # <platform>/<author>/<media_type> folder.
+    return []
 
 
 def item_leaf_name(item: MediaItem) -> str:
     """Name of the innermost per-item directory.
 
-    Equivalent to the last component of :func:`item_leaf_parts`.
+    Equivalent to the last component of :func:`item_leaf_parts`. Falls
+    back to the sanitised title when the standalone-video case yields no
+    explicit per-item leaf directory.
     """
-    return item_leaf_parts(item)[-1]
+    parts = item_leaf_parts(item)
+    if parts:
+        return parts[-1]
+    return _sanitize_component(item.title, fallback="untitled")
 
 
 def resolve_item_dir(

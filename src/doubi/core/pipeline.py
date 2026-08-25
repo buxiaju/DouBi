@@ -71,6 +71,38 @@ def _resolve_platform_cookie_file(platform: Platform) -> Optional[Any]:
     except Exception:
         return None
 
+
+def _is_cancelled(options: DownloadOptions) -> bool:
+    """Has the caller asked us to stop?
+
+    ``cancel_check`` rides on :class:`DownloadOptions` rather than the
+    engine signature because the engine runs inside ``asyncio.to_thread``
+    where ``Task.cancel()`` cannot reach it. The retry loop must consult
+    it: a user-requested stop surfaces as ``ok is False``, exactly like a
+    genuine error (``engines.yt_dlp`` swallows its own DownloadCancelled),
+    so without this probe a paused download would be silently retried.
+
+    A misbehaving probe must never take the download down with it, hence
+    the blanket except: "cannot tell" degrades to "not cancelled", which
+    at worst costs one extra attempt.
+    """
+    probe = getattr(options, "cancel_check", None)
+    if probe is None:
+        return False
+    try:
+        return bool(probe())
+    except Exception:   # noqa: BLE001
+        return False
+
+
+# Retry defaults live on the *factory* (engine_loader.build_default_pipeline),
+# not here: a bare ``DownloadPipeline(...)`` stays a single-attempt primitive
+# so callers that want exactly one engine call keep getting exactly one.
+# yt-dlp already retries internally ("retries": 3, see engines.yt_dlp), so
+# these outer attempts multiply that budget -- keep them small.
+DEFAULT_MAX_RETRIES = 2
+DEFAULT_RETRY_BACKOFF = 2.0
+
 logger = logging.getLogger("doubi.core.pipeline")
 
 
@@ -100,9 +132,25 @@ class ProgressEvent:
 class DownloadPipeline:
     """Orchestrates ``parse → expand → download`` for one or more URLs / items."""
 
-    def __init__(self, engine: Any, max_concurrent: int = 3):
+    def __init__(
+        self,
+        engine: Any,
+        max_concurrent: int = 3,
+        *,
+        max_retries: int = 0,
+        retry_backoff: float = DEFAULT_RETRY_BACKOFF,
+    ):
+        """
+        ``max_retries`` counts *extra* engine attempts, so 0 (the default)
+        means the historical behavior: one call, no retry. The surfaces opt
+        in through :func:`core.engine_loader.build_default_pipeline`; keeping
+        the primitive at 0 is what lets tests with deterministically failing
+        stub engines stay fast and keep their call-count assertions exact.
+        """
         self.engine = engine
         self._sem = asyncio.Semaphore(max_concurrent)
+        self._max_retries = max(0, int(max_retries))
+        self._retry_backoff = max(0.0, float(retry_backoff))
 
     # ---- public API ---------------------------------------------------
 
@@ -336,12 +384,21 @@ class DownloadPipeline:
             logger.debug("naming hook not available; engine will use raw template")
 
         # Dedup: skip if the DB already has this (platform, item_id) row.
+        #
+        # ``async with Database(...)`` instead of a hand-rolled
+        # initialize()/try/finally: Database already implements the protocol,
+        # and every hand-written copy of that boilerplate is another chance to
+        # forget the ``finally`` -- which is exactly how pitfall #7
+        # ("aiosqlite Event loop closed") comes back.
+        #
+        # The two DB touch points (this probe, and _record_success afterwards)
+        # stay two short cycles rather than one spanning the download on
+        # purpose: a transfer can run for hours, and aiosqlite backs every
+        # open connection with a live thread.
         if options.database:
             try:
                 from .storage.database import Database
-                db = Database(options.database)
-                await db.initialize()
-                try:
+                async with Database(options.database) as db:
                     if await db.is_downloaded(item.platform.value, item.item_id):
                         logger.info("[%s] already in DB; skipping %s/%s",
                                     job_id[:8], item.platform.value, item.item_id)
@@ -350,8 +407,6 @@ class DownloadPipeline:
                             fraction=1.0, message="already downloaded (DB)",
                         ))
                         return True
-                finally:
-                    await db.close()
             except Exception as exc:
                 logger.debug("DB check failed (continuing): %s", exc)
 
@@ -374,25 +429,111 @@ class DownloadPipeline:
                 logger.debug("[%s] using %s cookies: %s",
                              job_id[:8], item.platform.value, cookie_file)
 
-        async with self._sem:
-            try:
-                ok = await self.engine.download(
-                    item, engine_options,
-                    on_progress=(
-                        lambda ev: on_progress(ProgressEvent(
-                            job_id=job_id, item=item,
-                            phase="downloading", fraction=ev.fraction,
-                            message=ev.message, extra=ev.extra or {},
-                        )) if on_progress else None
-                    ),
-                )
-            except Exception as exc:
-                logger.exception("[%s] engine.download raised: %s", job_id[:8], exc)
-                self._emit(on_progress, ProgressEvent(
-                    job_id=job_id, item=item, phase="failed",
-                    fraction=0.0, message=f"Exception: {exc}",
-                ))
-                return False
+        # Retry loop. Three non-obvious rules:
+        #
+        # 1. A retry must trigger on ``ok is False`` too, not just on a
+        #    raised exception. ``engines.yt_dlp`` funnels *every* real-world
+        #    failure into ``return False``, so an exception-only retry would
+        #    be dead code in production.
+        # 2. The backoff sleep sits *outside* ``self._sem``. Sleeping while
+        #    holding the semaphore would park a concurrency slot doing
+        #    nothing for the whole backoff, starving healthy downloads.
+        # 3. The engine's detailed error (``"yt-dlp error: HTTP 403"`` etc.)
+        #    must not be swallowed. The engine reports it through the
+        #    progress hook, so we wrap the progress callback with a
+        #    closure that captures the latest error-y message into
+        #    ``last_engine_error``. Without this the final event always
+        #    says ``"engine returned False"`` — the GUI can't tell a 403
+        #    from a timeout from a filesystem error.
+        attempts = self._max_retries + 1
+        ok = False
+        last_error = ""
+        # Shared mutable bag — the lambda closes over it, so each engine
+        # attempt writes into the same box and the loop below reads it
+        # after await returns. A plain ``str`` local wouldn't work because
+        # ``var = "..."`` in the lambda re-binds it instead of mutating.
+        last_engine_error: dict[str, str] = {"msg": ""}
+
+        for attempt in range(1, attempts + 1):
+            last_engine_error["msg"] = ""   # reset per attempt
+
+            def _wrap_engine_progress(ev):
+                # Engine-side signal of a hard failure. engines.yt_dlp emits
+                # either ``"yt-dlp error: <exc>"`` (exception branch) or
+                # ``"yt-dlp reported error"`` (progress-hook status=error).
+                # Both precede ``return False`` and carry actionable info
+                # that the generic fallback doesn't.
+                if ev.message and (
+                    ev.message.startswith("yt-dlp error:")
+                    or ev.message.startswith("yt-dlp reported")
+                ):
+                    last_engine_error["msg"] = ev.message
+                # Always re-emit outward: the UI needs every progress tick.
+                if on_progress:
+                    on_progress(ProgressEvent(
+                        job_id=job_id, item=item,
+                        phase="downloading", fraction=ev.fraction,
+                        message=ev.message, extra=ev.extra or {},
+                    ))
+
+            async with self._sem:
+                try:
+                    ok = await self.engine.download(
+                        item, engine_options,
+                        on_progress=_wrap_engine_progress,
+                    )
+                    # Priority order: caller-supplied specific text > the
+                    # generic placeholder. If the engine raised we'd land
+                    # in the except below; if it returned False cleanly we
+                    # rely on the progress-hook capture. Both branches
+                    # fall through to "engine returned False" only when
+                    # nothing more specific exists.
+                    if ok:
+                        last_error = ""
+                    else:
+                        last_error = (
+                            last_engine_error["msg"].strip()
+                            or "engine returned False"
+                        )
+                except Exception as exc:
+                    logger.exception("[%s] engine.download raised: %s", job_id[:8], exc)
+                    ok = False
+                    last_error = (
+                        last_engine_error["msg"].strip()
+                        or f"Exception: {exc}"
+                    )
+
+            if ok:
+                break
+
+            # A stop the user requested reaches us as ``ok is False`` -- the
+            # engine reports failure after swallowing its own cancellation.
+            # Indistinguishable from a genuine error without this probe, and
+            # retrying here would mean re-downloading what the user paused.
+            if _is_cancelled(options):
+                logger.info("[%s] cancelled; not retrying %s/%s",
+                            job_id[:8], item.platform.value, item.item_id)
+                break
+
+            if attempt >= attempts:
+                break
+
+            delay = self._retry_backoff * (2 ** (attempt - 1))
+            logger.warning("[%s] attempt %d/%d failed (%s); retrying in %.1fs",
+                           job_id[:8], attempt, attempts, last_error, delay)
+            # fraction=0.0 is honest: the next attempt restarts the transfer
+            # (from the ``.part`` file when resume is on, but from 0% as far
+            # as the engine's own progress reporting is concerned).
+            self._emit(on_progress, ProgressEvent(
+                job_id=job_id, item=item, phase="downloading",
+                fraction=0.0,
+                message=f"retrying ({attempt}/{self._max_retries}) in {delay:.0f}s: {last_error}",
+                extra={"retry": attempt, "max_retries": self._max_retries,
+                       "delay": delay, "reason": last_error},
+            ))
+            # Interruptible on purpose: ``Task.cancel()`` lands here, which is
+            # how ui.task_manager stops an attempt that is between retries.
+            await asyncio.sleep(delay)
 
         # M4: post-download persistence
         if ok:
@@ -403,7 +544,7 @@ class DownloadPipeline:
             job_id=job_id, item=item,
             phase="done" if ok else "failed",
             fraction=1.0 if ok else 0.0,
-            message="ok" if ok else "engine returned False",
+            message="ok" if ok else (last_error or "engine returned False"),
         ))
         return ok
 
@@ -487,9 +628,7 @@ class DownloadPipeline:
         if options.database:
             try:
                 from .storage.database import Database
-                db = Database(options.database)
-                await db.initialize()
-                try:
+                async with Database(options.database) as db:
                     # Compute relative save dir under output_root
                     _, resolve_save_dir = _import_file_layout()
                     save_dir = str(resolve_save_dir(item, options))
@@ -510,8 +649,6 @@ class DownloadPipeline:
                     )
                     logger.debug("[%s] recorded %s/%s in DB", job_id[:8],
                                  item.platform.value, item.item_id)
-                finally:
-                    await db.close()
             except Exception as exc:
                 logger.warning("DB record failed: %s", exc)
 
