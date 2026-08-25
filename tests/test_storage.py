@@ -7,8 +7,10 @@ import datetime as dt
 import json
 import sqlite3
 import sys
+import threading
 from pathlib import Path
 
+import aiosqlite
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -22,8 +24,19 @@ from doubi.core.models import (  # noqa: E402
     MediaItem,
     MediaType,
     Platform,
+    Stream,
 )
-from doubi.core.storage.database import Database, MediaItemRow, TaskRow  # noqa: E402
+from doubi.core.storage.database import (  # noqa: E402
+    Database,
+    MediaItemRow,
+    PendingTaskRow,
+    TaskRow,
+    _path_typed_fields,
+    item_from_json,
+    item_to_json,
+    options_from_json,
+    options_to_json,
+)
 from doubi.core.storage.file_layout import (  # noqa: E402
     DEFAULT_DIR_TEMPLATE,
     already_downloaded_on_disk,
@@ -132,16 +145,23 @@ def test_resolve_save_dir_returns_path(tmp_path):
     assert tmp_path.exists()
 
 
-def test_resolve_item_dir_creates_leaf(tmp_path):
-    """A standalone video's leaf dir is named exactly after the video."""
+def test_resolve_item_dir_standalone_no_leaf_subdir(tmp_path):
+    """Standalone videos do NOT create a title-named subdir.
+
+    Historically we used to nest under ``{video_title}/``, but that
+    duplicated the title already present in the ``{title}_{id}``
+    basename and routinely blew past MAX_PATH on Windows for long
+    YouTube titles.  See ``Errno 2 "No such file or directory"``.
+    """
     item = MediaItem(platform=Platform.DOUYIN, item_id="1", title="t",
                      author=Author(name="张三"), media_type=MediaType.VIDEO,
                      source_url="x", publish_time=dt.datetime(2026, 1, 15))
     options = DownloadOptions(output_root=tmp_path)
     item_dir = resolve_item_dir(item, options)
     assert item_dir.exists()
-    assert item_dir.name == "t"
-    assert item_dir.parent == resolve_save_dir(item, options)
+    # For standalone items the "item dir" IS the shared save_dir.
+    assert item_dir == resolve_save_dir(item, options)
+    assert item_dir.name == "video"
 
 
 def test_resolve_item_dir_collection_episodes_share_one_folder(tmp_path):
@@ -162,14 +182,21 @@ def test_resolve_item_dir_collection_episodes_share_one_folder(tmp_path):
     assert d1.name == "鸿蒙开发教程"
 
 
-def test_resolve_item_dir_sanitizes_illegal_chars_in_leaf(tmp_path):
-    item = MediaItem(platform=Platform.BILIBILI, item_id="1",
-                     title='a/b:c*d?e', author=Author(name="UP主"),
-                     media_type=MediaType.VIDEO, source_url="x")
+def test_resolve_item_dir_sanitizes_illegal_chars_in_collection_leaf(tmp_path):
+    """Collection dir name (not standalone) must still be sanitised."""
+    item = MediaItem(
+        platform=Platform.BILIBILI, item_id="1",
+        title='ep title', author=Author(name="UP主"),
+        media_type=MediaType.VIDEO, source_url="x",
+        extra={"collection_title": 'a/b:c*d?e'},   # illegal chars in COLLECTION
+    )
     options = DownloadOptions(output_root=tmp_path)
     item_dir = resolve_item_dir(item, options)
     assert item_dir.exists()
+    # The shared collection dir is what carries the sanitised name; the
+    # standalone case deliberately uses no title leaf dir at all.
     assert item_dir.name == "a_b_c_d_e"
+    assert item_dir.parent.name == "video"
 
 
 def test_already_downloaded_on_disk_basename_scopes_shared_folder(tmp_path):
@@ -368,6 +395,282 @@ async def test_database_init_creates_tables(db_path):
         assert "increment_checkpoint" in names
 
 
+class _SelfReportingConnection(sqlite3.Connection):
+    """A raw handle that records whether it was ever closed.
+
+    Kept for diagnostics only -- see the test for why ``was_closed`` cannot
+    be the assertion. sqlite3 has no ``closed`` flag, and its cross-thread
+    guard fires *before* its closed check, so probing a handle created on
+    aiosqlite's worker thread can never observe closedness from here.
+    """
+
+    was_closed = False
+
+    def close(self) -> None:
+        self.was_closed = True
+        super().close()
+
+
+@pytest.mark.asyncio
+async def test_cancelling_an_open_does_not_orphan_the_connection(db_path, monkeypatch):
+    """Cancelling ``initialize()`` mid-connect must not leak a handle.
+
+    aiosqlite opens the file on a worker thread, and ``initialize()`` shields
+    that open so a cancellation aimed at it does not abort a half-created
+    database. The open therefore completes -- but our await already raised,
+    so nothing ever collects the result and the wrapper becomes garbage
+    while still holding a live handle. When the GC reaps it, aiosqlite
+    queues a stop onto the event loop that created it, which by then is
+    typically closed, and its worker thread raises ``Event loop is closed``
+    where no one is listening.
+
+    The GUI cancels exactly these tasks on exit, so this is a real leak and
+    not a test artefact.
+
+    Picking the right thing to assert on took some doing, so it is worth
+    recording what does *not* work:
+
+    * ``db._conn`` is ``None`` either way -- a cancelled open correctly
+      yields no usable database -- so it says nothing about the leak.
+    * Whether the raw handle got closed is also useless, because the GC
+      closes it too: aiosqlite's ``__del__`` calls ``stop()``, which queues
+      the close onto its worker thread. "It got closed eventually" is true
+      of the broken code as well.
+
+    What actually separates the two is *who* closed it, and the cleanest
+    proxy is the aiosqlite wrapper's own ``_connection`` attribute: an
+    orderly teardown clears it, and that is exactly what stops ``__del__``
+    from complaining. A leaked wrapper still has a handle hanging off it.
+
+    (Asserting on a ``ResourceWarning`` after ``gc.collect()`` looks
+    tempting but does not work here: ``pytest.raises`` holds the
+    ``CancelledError``, whose traceback keeps the ``initialize`` frame --
+    and therefore the wrapper -- alive, so nothing is ever collected.)
+    """
+    opened: list[_SelfReportingConnection] = []
+    real_connect = sqlite3.connect
+
+    def _tracking_connect(*args, **kwargs):
+        kwargs["factory"] = _SelfReportingConnection
+        conn = real_connect(*args, **kwargs)
+        opened.append(conn)
+        return conn
+
+    monkeypatch.setattr(sqlite3, "connect", _tracking_connect)
+
+    wrappers: list[aiosqlite.Connection] = []
+    real_aioconnect = aiosqlite.connect
+
+    def _tracking_aioconnect(*args, **kwargs):
+        wrapper = real_aioconnect(*args, **kwargs)
+        wrappers.append(wrapper)
+        return wrapper
+
+    monkeypatch.setattr(aiosqlite, "connect", _tracking_aioconnect)
+
+    db = Database(db_path)
+    task = asyncio.ensure_future(db.initialize())
+    await asyncio.sleep(0)  # let the connect reach the worker thread
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # The open was already in flight, so the worker thread completes it
+    # regardless; wait for the handle to actually show up.
+    for _ in range(100):
+        if opened:
+            break
+        await asyncio.sleep(0.01)
+
+    assert db._conn is None, "a cancelled open must not leave a usable connection"
+    assert wrappers, "expected initialize() to have started an open"
+
+    # Teardown is queued onto the worker thread, so give it a moment.
+    for _ in range(100):
+        if all(w._connection is None for w in wrappers):
+            break
+        await asyncio.sleep(0.01)
+
+    leaked = [w for w in wrappers if w._connection is not None]
+    assert not leaked, (
+        f"{len(leaked)} connection(s) were abandoned still holding a live "
+        "sqlite3 handle: nothing will close them until the GC intervenes, "
+        "which is where the 'Event loop is closed' noise comes from"
+    )
+
+    # And the database is still perfectly usable afterwards.
+    monkeypatch.setattr(sqlite3, "connect", real_connect)
+    async with Database(db_path) as db2:
+        conn = await db2._conn_required()
+        async with conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ) as cur:
+            rows = await cur.fetchall()
+        assert "media_item" in {r[0] for r in rows}
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_close_does_not_poison_the_database(db_path):
+    """A cancelled ``close()`` must leave the object reusable, not bricked.
+
+    Closing is cancellable but not abortable. ``aiosqlite.Connection.close()``
+    hands the real ``sqlite3.close`` to its worker thread and clears its own
+    ``_connection`` in a ``finally``, so a cancellation arriving at our await
+    cannot call any of that back: the handle is closed and the worker retires
+    either way. That is why this test does *not* look for a leaked handle --
+    there isn't one, in either ordering of the race.
+
+    The damage was subtler and strictly worse than an error. ``self._conn``
+    used to be cleared *after* the await, so a cancellation skipped it and left
+    this object holding a reference to a connection that was already dead. And
+    it could never recover: ``initialize()`` returns early while ``_conn is not
+    None``, so re-opening was a silent no-op and every subsequent query raised
+    ``ValueError: no active connection`` -- for the rest of the object's life.
+
+    The assertion therefore has to be about *reuse*, because that is the only
+    place the poisoning is observable. Checking the handle, the worker thread,
+    or warnings would pass just as happily before the fix as after it.
+    """
+    db = Database(db_path)
+    await db.initialize()
+
+    task = asyncio.ensure_future(db.close())
+    await asyncio.sleep(0)  # started, but nowhere near finished
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert db._conn is None, (
+        "a cancelled close left the object pointing at a connection that is "
+        "already being torn down"
+    )
+
+    # The real proof: the object heals. Before the fix this re-open was a
+    # no-op and the query below raised ValueError instead.
+    await db.initialize()
+    assert await db.count() == 0
+
+    await db.close()
+    assert db._conn is None
+
+
+@pytest.mark.asyncio
+async def test_a_handle_born_after_the_cancellation_is_still_closed(
+    db_path, monkeypatch
+):
+    """The nastier half of the same leak: the handle is created *after* we quit.
+
+    The test above cancels an open that has already produced a handle. This
+    one pins down the opposite order, which is the one that actually escaped
+    into production: the cancellation lands first, and only then does
+    aiosqlite's worker thread get around to calling ``sqlite3.connect``.
+
+    That order is not exotic -- it is what a loop shutdown produces. A runner
+    teardown cancels *every* task in ``asyncio.all_tasks()``, so an
+    ``asyncio.shield`` around the open buys nothing: the shielded task is on
+    that list too and is cancelled directly. Meanwhile the connector is still
+    sitting in aiosqlite's queue, and the worker thread will happily run it
+    afterwards.
+
+    What made it invisible is that every layer had a reason to stay quiet.
+    aiosqlite's own cleanup guards its close with
+    ``if self._connection is not None`` -- and at that moment it is still
+    ``None``, so it closes nothing. ``Connection.__del__`` returns early for
+    exactly the same reason, so not even a ``ResourceWarning`` is emitted. A
+    close queued behind the connector never runs either, because the worker
+    dies first trying to deliver the result to a loop that has since closed.
+    The only trace left is CPython's own "unclosed database".
+
+    Nothing outside that worker thread can fix it -- ``sqlite3`` rejects
+    cross-thread use, and its cross-thread check fires *before* its closed
+    check, so we cannot even ask. Hence the assertion here is again the
+    wrapper's ``_connection``, and hence the fix has to live inside the
+    connector itself.
+
+    The ordering is forced rather than raced: the connector is held *inside*
+    ``sqlite3.connect`` until the cancellation has fully landed, and we wait
+    for it to actually get there before cancelling -- otherwise the abandoned
+    flag could be raised while the connector is still sitting in the queue,
+    which is a different (and much easier) branch.
+    """
+    entered = threading.Event()
+    gate = threading.Event()
+    opened: list[sqlite3.Connection] = []
+    real_connect = sqlite3.connect
+
+    def _gated_connect(*args, **kwargs):
+        # Runs on aiosqlite's worker thread. Blocking here is what makes the
+        # cancellation win the race deterministically.
+        entered.set()
+        gate.wait(5.0)
+        conn = real_connect(*args, **kwargs)
+        opened.append(conn)
+        return conn
+
+    monkeypatch.setattr(sqlite3, "connect", _gated_connect)
+
+    wrappers: list[aiosqlite.Connection] = []
+    real_aioconnect = aiosqlite.connect
+
+    def _tracking_aioconnect(*args, **kwargs):
+        wrapper = real_aioconnect(*args, **kwargs)
+        wrappers.append(wrapper)
+        return wrapper
+
+    monkeypatch.setattr(aiosqlite, "connect", _tracking_aioconnect)
+
+    db = Database(db_path)
+    task = asyncio.ensure_future(db.initialize())
+    for _ in range(500):
+        if entered.is_set():
+            break
+        await asyncio.sleep(0.01)
+    assert entered.is_set(), "the open never reached the worker thread"
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert wrappers, "expected initialize() to have started an open"
+    assert not opened, "the gate should still be holding the open"
+
+    # Only now let the worker thread proceed. Everything it does from here
+    # happens with no one waiting for it -- which is the whole point.
+    gate.set()
+
+    for _ in range(100):
+        if all(w._connection is None for w in wrappers) and not any(
+            w._thread.is_alive() for w in wrappers
+        ):
+            break
+        await asyncio.sleep(0.01)
+
+    assert db._conn is None, "a cancelled open must not leave a usable connection"
+
+    leaked = [w for w in wrappers if w._connection is not None]
+    assert not leaked, (
+        f"{len(leaked)} connection(s) opened after the cancellation were left "
+        "holding a live sqlite3 handle that nothing will ever close: not "
+        "aiosqlite's cleanup, not __del__, only CPython's finalizer "
+        "complaining about an 'unclosed database'"
+    )
+
+    for wrapper in wrappers:
+        assert not wrapper._thread.is_alive(), (
+            "the worker thread outlived the open it was created for"
+        )
+
+    # And the database is still perfectly usable afterwards.
+    monkeypatch.setattr(sqlite3, "connect", real_connect)
+    async with Database(db_path) as db2:
+        conn = await db2._conn_required()
+        async with conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ) as cur:
+            rows = await cur.fetchall()
+        assert "media_item" in {r[0] for r in rows}
+
+
 @pytest.mark.asyncio
 async def test_database_record_and_query_download(db_path):
     async with Database(db_path) as db:
@@ -486,6 +789,304 @@ async def test_database_checkpoint(db_path):
         await db.set_checkpoint("douyin", "user1", "post", "newer", 1735689700)
         cp = await db.get_checkpoint("douyin", "user1", "post")
         assert cp == ("newer", 1735689700)
+
+
+# ---------------------------------------------------------------------------
+# pending_task (cross-process resume)
+# ---------------------------------------------------------------------------
+
+
+def _path_fields_via_typing() -> set[str]:
+    """Independent oracle for :func:`_path_typed_fields`.
+
+    Deliberately uses a *different* mechanism (resolved type hints) than
+    the implementation (annotation substring match). If the two ever
+    disagree, the cheap heuristic has drifted from reality.
+    """
+    import typing
+
+    hints = typing.get_type_hints(DownloadOptions)
+    out = set()
+    for name, hint in hints.items():
+        if hint is Path or Path in typing.get_args(hint):
+            out.add(name)
+    return out
+
+
+def test_path_typed_fields_matches_the_real_model():
+    derived = set(_path_typed_fields(DownloadOptions))
+    assert derived == _path_fields_via_typing()
+    # Pinned explicitly too: adding a new Path option must break this and
+    # force a look at the snapshot round trip.
+    assert derived == {"output_root", "cookies_file", "database", "manifest"}
+
+
+def test_options_snapshot_round_trip():
+    opts = DownloadOptions(
+        output_root=Path("D:/dl"),
+        cookies_file=Path("cookies.txt"),
+        max_quality="1080p",
+        write_nfo=True,
+        rate_limit="2M",
+        cancel_check=lambda: True,
+    )
+    data = options_to_json(opts)
+
+    # Must survive real serialization, not just look plausible.
+    json.dumps(data)
+
+    # The live callable is bound to *this* process's stop flag; persisting
+    # it would either fail or resurrect a dead flag after restart.
+    assert "cancel_check" not in data
+    assert isinstance(data["output_root"], str)
+
+    back = options_from_json(data, DownloadOptions(output_root=Path(".")))
+    assert isinstance(back.output_root, Path)
+    assert back.output_root == Path("D:/dl")
+    assert isinstance(back.cookies_file, Path)
+    assert back.max_quality == "1080p"
+    assert back.write_nfo is True
+    assert back.rate_limit == "2M"
+    assert back.cancel_check is None
+
+
+def test_options_from_json_tolerates_stale_and_unknown_keys():
+    base = DownloadOptions(output_root=Path("/base"), max_quality="720p")
+    # A snapshot written by another version: one field we no longer have,
+    # and one we do. The unknown key must not raise.
+    restored = options_from_json({"nope_removed": 1, "max_quality": "4k"}, base)
+    assert restored.max_quality == "4k"
+    assert restored.output_root == Path("/base")
+    # Missing fields fall back to the caller's freshly built options.
+    assert restored.container == base.container
+
+
+def test_options_from_json_empty_returns_base():
+    base = DownloadOptions(output_root=Path("/base"))
+    assert options_from_json(None, base) is base
+    assert options_from_json({}, base) is base
+
+
+def test_options_from_json_keeps_none_paths_none():
+    data = options_to_json(DownloadOptions(output_root=Path("/o")))
+    assert data["cookies_file"] is None
+    back = options_from_json(data, DownloadOptions(output_root=Path(".")))
+    assert back.cookies_file is None
+
+
+def _snapshot_item() -> MediaItem:
+    return MediaItem(
+        platform=Platform.BILIBILI,
+        item_id="BV1xx",
+        title="标题/带非法字符",
+        author=Author(id="u9", name="UP主"),
+        publish_time=dt.datetime(2024, 5, 6, 7, 8, 9),
+        media_type=MediaType.VIDEO,
+        source_url="https://example.com/BV1xx",
+        streams=[
+            Stream(
+                stream_id="s1",
+                kind="video",
+                url="https://signed.example/expires-soon",
+            )
+        ],
+        extra={"collection_title": "Season 1"},
+    )
+
+
+def test_item_snapshot_round_trip():
+    data = item_to_json(_snapshot_item())
+
+    # Must survive real serialization, not merely look plausible.
+    json.dumps(data)
+
+    back = item_from_json(data)
+    assert isinstance(back.platform, Platform) and back.platform is Platform.BILIBILI
+    assert isinstance(back.media_type, MediaType) and back.media_type is MediaType.VIDEO
+    assert back.publish_time == dt.datetime(2024, 5, 6, 7, 8, 9)
+    assert isinstance(back.author, Author) and back.author.name == "UP主"
+    assert back.source_url == "https://example.com/BV1xx"
+    assert back.extra == {"collection_title": "Season 1"}
+
+
+def test_item_snapshot_drops_expiring_streams():
+    data = item_to_json(_snapshot_item())
+    # Stream URLs are signed and short-lived; a snapshot is reloaded *later*,
+    # so persisting them would restore a task pointing at dead links. Nothing
+    # in the codebase reads item.streams -- source_url is what gets downloaded.
+    assert "streams" not in data
+    assert "children" not in data
+    assert "output_template" not in data
+    assert item_from_json(data).streams == []
+
+
+def test_item_snapshot_resolves_to_the_same_save_dir(tmp_path):
+    # The property that makes resume work at all: if a round trip changed the
+    # rendered directory, the restored task would download into a *different*
+    # folder and orphan the .part file left behind by the previous process.
+    item = _snapshot_item()
+    opts = DownloadOptions(output_root=tmp_path)
+    before = resolve_save_dir(item, opts)
+    after = resolve_save_dir(item_from_json(item_to_json(item)), opts)
+    assert before == after
+
+
+def test_item_from_json_tolerates_unknown_and_garbage():
+    # Runs at GUI startup -- the one moment a user cannot recover from an
+    # exception -- so a database written by a newer build must not crash here.
+    back = item_from_json(
+        {
+            "platform": "not-a-platform",
+            "media_type": "not-a-type",
+            "publish_time": "yesterday",
+            "author": "a bare string, not a dict",
+            "field_from_the_future": 1,
+        }
+    )
+    assert back.platform is Platform.UNKNOWN
+    assert back.media_type is MediaType.VIDEO
+    assert back.publish_time is None
+    assert isinstance(back.author, Author)
+    assert back.item_id == "" and back.title == ""
+
+
+def test_item_from_json_empty_returns_none():
+    assert item_from_json(None) is None
+    assert item_from_json({}) is None
+
+
+@pytest.mark.asyncio
+async def test_pending_task_insert_list_delete(db_path):
+    async with Database(db_path) as db:
+        assert await db.list_unfinished() == []
+        await db.upsert_pending_task(PendingTaskRow(
+            task_id="T0001", platform="bilibili", source_url="https://x/1",
+            item_id="BV1", title="first",
+        ))
+        rows = await db.list_unfinished()
+        assert len(rows) == 1
+        assert rows[0].task_id == "T0001"
+        assert rows[0].item_id == "BV1"
+        assert rows[0].status == "queued"
+        assert rows[0].created_at is not None
+
+        assert await db.delete_pending_task("T0001") is True
+        assert await db.list_unfinished() == []
+        # Deleting something already gone is not an error, just False.
+        assert await db.delete_pending_task("T0001") is False
+
+
+@pytest.mark.asyncio
+async def test_pending_task_progress_update_preserves_snapshot(db_path):
+    """A progress tick must not erase what only the submit path knows."""
+    snap = options_to_json(DownloadOptions(output_root=Path("D:/dl")))
+    async with Database(db_path) as db:
+        await db.upsert_pending_task(PendingTaskRow(
+            task_id="T0001", platform="bilibili", source_url="https://x/1",
+            title="real title", options_snapshot=snap,
+            item_snapshot={"id": "BV1"},
+        ))
+        first = (await db.list_unfinished())[0]
+
+        # The progress path only knows id/status/fraction -- it passes no
+        # title and no snapshots.
+        await db.upsert_pending_task(PendingTaskRow(
+            task_id="T0001", platform="bilibili", source_url="https://x/1",
+            status="downloading", fraction=0.42, title="", message="42%",
+        ))
+        row = (await db.list_unfinished())[0]
+        assert row.fraction == pytest.approx(0.42)
+        assert row.status == "downloading"
+        assert row.message == "42%"
+        assert row.title == "real title"
+        assert row.options_snapshot == snap
+        assert row.item_snapshot == {"id": "BV1"}
+        # Ordering by submission time depends on this staying put.
+        assert row.created_at == first.created_at
+        # Still exactly one row -- upsert, not append.
+        assert len(await db.list_unfinished()) == 1
+
+
+@pytest.mark.asyncio
+async def test_pending_task_snapshot_survives_a_restart(db_path):
+    """The whole point: a *different* connection must see the same state."""
+    snap = options_to_json(DownloadOptions(
+        output_root=Path("D:/dl"), cookies_file=Path("c.txt"), max_quality="1080p",
+    ))
+    async with Database(db_path) as db:
+        await db.upsert_pending_task(PendingTaskRow(
+            task_id="T0007", platform="douyin", source_url="https://y/7",
+            status="downloading", fraction=0.8, options_snapshot=snap,
+        ))
+
+    async with Database(db_path) as db2:
+        rows = await db2.list_unfinished()
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.fraction == pytest.approx(0.8)
+        # from_row must hand back a decoded dict, not the raw JSON text.
+        assert isinstance(row.options_snapshot, dict)
+        rebuilt = options_from_json(
+            row.options_snapshot, DownloadOptions(output_root=Path("."))
+        )
+        assert rebuilt.output_root == Path("D:/dl")
+        assert rebuilt.cookies_file == Path("c.txt")
+        assert rebuilt.max_quality == "1080p"
+
+
+@pytest.mark.asyncio
+async def test_pending_task_ordering_and_clear(db_path):
+    async with Database(db_path) as db:
+        # Same created_at on purpose: the task_id tiebreaker must make the
+        # order deterministic anyway.
+        for tid in ("T0003", "T0001", "T0002"):
+            await db.upsert_pending_task(PendingTaskRow(
+                task_id=tid, platform="bilibili", source_url="u" + tid,
+                created_at=1735689600,
+            ))
+        assert [r.task_id for r in await db.list_unfinished()] == [
+            "T0001", "T0002", "T0003",
+        ]
+        # limit=0 is clamped to >= 1, matching list_recent.
+        assert len(await db.list_unfinished(limit=0)) == 1
+        assert await db.clear_pending_tasks() == 3
+        assert await db.list_unfinished() == []
+
+
+@pytest.mark.asyncio
+async def test_pending_task_table_created_on_a_preexisting_database(db_path):
+    """Guards the reason this is a new table instead of new columns.
+
+    Every SCHEMA statement is ``CREATE TABLE IF NOT EXISTS`` and there is
+    no schema-version mechanism, so a *column* added to an existing table
+    would be silently skipped and every later INSERT would fail with
+    ``no such column``. A brand-new table is created on old files too.
+
+    The "old" database is produced by the real ``Database`` and then has
+    ``pending_task`` dropped, rather than by hand-copying an older schema
+    -- a hand-written copy would rot the moment the real schema changes.
+    """
+    async with Database(db_path) as db:
+        await db.record_download(
+            platform="bilibili", item_id="BV1", save_dir="D:/dl/BV1",
+            title="pre-existing",
+        )
+
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("DROP TABLE pending_task")
+    conn.commit()
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(media_item)")]
+    conn.close()
+    assert cols, "the simulated old database should still have media_item"
+
+    # Reopening must recreate only what is missing, and must not disturb
+    # the rows that were already there.
+    async with Database(db_path) as db:
+        await db.upsert_pending_task(PendingTaskRow(
+            task_id="T0001", platform="bilibili", source_url="https://x/1",
+        ))
+        assert len(await db.list_unfinished()) == 1
+        assert await db.is_downloaded("bilibili", "BV1") is True
 
 
 # ---------------------------------------------------------------------------

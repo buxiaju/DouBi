@@ -107,6 +107,28 @@ def test_build_options_forwards_sidecar_switches_and_resume(qapp):
     assert options.resume is False
 
 
+def test_current_options_is_the_same_bag_as_build_options(qapp):
+    """The window-level accessor must not become a second transfer point.
+
+    ``MainWindow`` needs a ``DownloadOptions`` at startup to restore
+    unfinished tasks, and the temptation is to map ``AppConfig`` ->
+    ``DownloadOptions`` again over there. That second copy is exactly what
+    ``test_build_options_covers_every_shared_config_field`` cannot see, so a
+    newly added switch would keep working in the parse flow and be silently
+    dropped on restore. Asserting equality here keeps ``_build_options`` the
+    only place that mapping exists.
+    """
+    from doubi.core.config import AppConfig
+
+    page = _make_page(qapp)
+    cfg = AppConfig()
+    cfg.write_nfo = True
+    cfg.resume = False
+    page._cfg = cfg
+
+    assert page.current_options() == page._build_options()
+
+
 def test_build_options_covers_every_shared_config_field(qapp):
     """Guard against the *next* added field being forgotten here.
 
