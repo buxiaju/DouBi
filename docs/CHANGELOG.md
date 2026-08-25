@@ -310,12 +310,18 @@ token 表写对了，界面却基本没变色。逐层排查发现**五个独立
 
 ---
 
-## 0.2.0 (2026-08-23) — M6.4 / M6.5 / M6.6 品牌化与打包
+## 0.2.0 (2026-08-25) — M6.4–M6.15 品牌化、合集、跨进程恢复、直播与多引擎
 
-> 这一轮的共同主题是「让用户看到的和用到的，跟内核一样讲究」。
-> 改 UI / 改图标 / 改打包每块都有独立动因，但都遵循一条原则：所有视觉
-> 元素有可解释的取舍（写进 DEVELOPMENT 跟代码一起活），不是「我看着
-> 不舒服就改了」。
+> 这一轮涵盖 12 个里程碑（M6.4–M6.15），共同主题是「让用户看到的和用到的，
+> 跟内核一样讲究」——视觉品牌化、抖音合集、跨进程断点续传、REST 安全收口、
+> YouTube 适配器、i18n 基础设施、B 站直播录制、aria2 多线程引擎。每条改动
+> 都有可解释的取舍（写进 DEVELOPMENT 跟代码一起活），不是「我看着不舒服就改了」。
+>
+> 0.1.0 快照（M0–M6.3）见下方独立节。本节内部按里程碑顺序排列：M6.4 UI 品牌化 →
+> M6.5 矢量图标管线 → M6.6 Windows 任务栏图标与 PyInstaller 打包 → M6.7 抖音合集 →
+> M6.8 NSIS 安装包 → M6.9 安全敞口收口 → M6.10 跨进程断点续传恢复 →
+> M6.11 下载前选项对话框 → M6.12 YouTube 适配器 → M6.13 YouTube 下载双故障修复 →
+> M6.14 代码健康/UX/功能/工程化一揽子 → M6.15 B 站直播 + aria2 引擎。
 
 ### M6.4 UI 全方位品牌化
 
@@ -560,15 +566,6 @@ Windows 任务栏读这个资源。详见 [docs/BUILD.md](../BUILD.md)。
 （图标模板 / 资源路径 / `load_app_icon` / dialog windowIcon），但
 **`build_exe.py` 本身没加测试**——打包产物验证要 `dist/*.exe` 真启动
 GUI，比单元测试贵两个量级，留给发版前的手动 check 清单。
-
----
-
-## 0.2.0 统计
-- 源码 65 个 .py 文件，约 13,400 行
-- 测试 21 个文件，445 个用例收集：**423 passed / 4 skipped**
-  （4 个 skip 均为「无 PySide6 则跳过」的 GUI 用例）
-- 基线演进：381（M6.3）→ 403（M6.4 UI 美化 + 22 个新测试）
-  → 423（M6.5 图标管线 + 20 个新测试）→ 423（M6.6 打包，无测试）
 
 ---
 
@@ -1107,6 +1104,31 @@ RPC 客户端是注入的（`Aria2RpcClient` Protocol），测试用内存 Mock 
 | `test_aria2_engine.py` | 18（新增文件） | supports、_build_options（fragments/rate_limit/proxy/ua/resume/omission）、download（success/error/cancel/no_url/addUri_failure）、engine_loader（default/aria2/unknown/pipeline）、辅助函数 |
 
 回归 687 + 8 + 18 = 713 passed / 4 skipped。
+
+---
+
+## 0.2.0 统计（M6.4–M6.15 累计）
+
+- 源码约 75 个 .py 文件，约 19,500 行
+- 测试 26 个文件，**713 passed / 4 skipped**
+  （4 个 skip 均为「无 PySide6 则跳过」的 GUI 用例）
+- 基线演进（按里程碑顺序）：
+  - 381（M6.3 起点）→ 403（M6.4 UI 品牌化 +22）→ 423（M6.5 矢量图标 +20）
+  - → 450（M6.7 抖音合集 +31）→ M6.8 打包无新测试
+  - → M6.9 安全收口 +81 → M6.10 跨进程恢复 +12 → M6.11 选项弹窗 +11
+  - → M6.12 YouTube 适配器 → M6.13 双故障修复
+  - → 687（M6.14 一揽子改进）→ 713（M6.15 直播 + aria2 +26）
+- 视觉/打包产出：
+  - 7 套主题包 + 矢量图标管线（QtSvg 8 档尺寸 + 7 色锚点换色）
+  - `dist/doubi-gui.exe`（onefile，~235 MB）+ `dist/DouBi-Setup-0.2.0.exe`（NSIS LZMA，~213 MB）
+- 主要新增能力：
+  - 抖音合集批量下载（签名 Web API + a_bogus）
+  - 跨进程断点续传恢复（`pending_task` 表 + 启动询问流程）
+  - REST 安全收口（默认绑回环 + token 鉴权 + 计时侧信道防护）
+  - YouTube 适配器（不到 200 行，验证架构按平台调整 adapter 厚度）
+  - i18n 基础设施（JSON 词表 + 模块级 `tr()`，GUI/CLI/REST 通用）
+  - B 站直播录制（URL 识别 + 类型映射 + 引擎 HLS 适配三层）
+  - aria2 多线程引擎（JSON-RPC + `direct_url` 加速，回退 yt-dlp）
 
 ---
 
