@@ -121,8 +121,8 @@ except Exception:  # noqa: BLE001
 
 
 def build_parse_widgets():
-    from PySide6.QtCore import QObject, Qt, QUrl, Signal
-    from PySide6.QtGui import QDesktopServices
+    from PySide6.QtCore import QObject, Qt, QUrl, Signal, QTimer
+    from PySide6.QtGui import QDesktopServices, QGuiApplication
     from PySide6.QtWidgets import (
         QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPlainTextEdit,
         QAbstractItemView, QHeaderView, QMenu,
@@ -159,12 +159,62 @@ def build_parse_widgets():
             self._build_ui()
             # 提示文字的颜色写在 stylesheet 里，换主题时得重刷。
             subscribe_theme(self, self._on_theme_changed)
+            # 剪贴板监听：用户在浏览器 / APP 里复制链接后，不用切回豆比
+            # 再粘贴——直接弹 InfoBar 提示「检测到链接，已填入」。1.5s
+            # 轮询足够即时，又不至于在打字时抢焦点。对比上次内容，只在
+            # 新链接出现时弹，避免每次 focus 都弹一遍。
+            self._last_clipboard_text: str = ""
+            self._clipboard_timer = QTimer(self)
+            self._clipboard_timer.setInterval(1500)
+            self._clipboard_timer.timeout.connect(self._poll_clipboard)
+            self._clipboard_timer.start()
 
         def _on_theme_changed(self) -> None:
             """换主题后刷新自绘颜色的控件。"""
             # hint 文案由 PageHeader 的副标题承载——但有些旧调用点（解析按钮
             # loading 文本）仍会读 hint，这里留空实现保持 ABI 兼容。
             pass
+
+        # ---- 剪贴板监听 ----------------------------------------------
+
+        def _poll_clipboard(self) -> None:
+            """1.5s 轮询剪贴板，检测到新链接时填入输入框并提示。
+
+            用 ``PlatformRegistry.detect()`` 判断剪贴板文本是否是已知
+            链接（含裸编号），而不是用字符串匹配——这样新增平台自动覆盖，
+            不用每次在这里加 URL pattern。只在文本变化时触发，避免重复
+            弹窗。如果用户正在输入框里打字（光标在 url_input 里），
+            不自动填入——避免打断输入。
+            """
+            try:
+                clip = QGuiApplication.clipboard()
+                text = (clip.text() or "").strip()
+            except Exception:
+                return
+            if not text or text == self._last_clipboard_text:
+                return
+            self._last_clipboard_text = text
+
+            # 用 registry 判断是否是已知链接
+            from ...core.registry import PlatformRegistry
+            adapter = PlatformRegistry.detect(text)
+            if adapter is None:
+                return
+
+            # 用户正在输入框里打字时不自动覆盖
+            if self.url_input.hasFocus():
+                return
+
+            # 填入并提示
+            current = self.url_input.toPlainText().strip()
+            if text in (current or ""):
+                return
+            if current:
+                self.url_input.setPlainText(current + "\n" + text)
+            else:
+                self.url_input.setPlainText(text)
+            self._toast(InfoBar.information, "检测到链接",
+                        f"已从剪贴板填入：{text[:60]}")
 
         # ---- public API ----------------------------------------------
 
@@ -1365,6 +1415,7 @@ def build_parse_widgets():
                 write_danmaku=self._cfg.write_danmaku,
                 write_subtitles=self._cfg.write_subtitles,
                 resume=self._cfg.resume,
+                duplicate_policy=self._cfg.duplicate_policy,
                 database=self._cfg.database_path if self._cfg.database else None,
                 manifest=self._cfg.manifest_path,
                 proxy=self._cfg.proxy,

@@ -1,0 +1,24 @@
+{
+  "app.title_suffix": "Multi-platform Video Downloader",
+  "app.tagline": "All-in-one multi-platform video downloader",
+
+  "nav.parse": "Parse",
+  "nav.download": "Download",
+  "nav.history": "History",
+  "nav.settings": "Settings",
+  "nav.theme_tooltip": "Switch theme (cycle through built-in theme packs)",
+  "nav.about_tooltip": "About",
+
+  "common.ok": "OK",
+  "common.cancel": "Cancel",
+  "common.save": "Save",
+  "common.yes": "Yes",
+  "common.no": "No",
+
+  "theme.switched": "Theme switched",
+  "theme.section_title": "Theme & Appearance",
+  "theme.section_subtitle": "Theme changes apply instantly; click \"Save\" to write to config",
+
+  "language.label": "Language",
+  "language.restart_hint": "Restart the app after switching language for it to take effect"
+}

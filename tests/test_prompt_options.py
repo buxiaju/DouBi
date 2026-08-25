@@ -23,6 +23,9 @@ import dataclasses
 import pytest
 
 
+pytestmark = pytest.mark.gui
+
+
 # ---- 守卫：「无 PySide6 就跳过」是项目统一约定 ----------------------------
 
 

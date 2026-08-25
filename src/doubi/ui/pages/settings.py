@@ -259,6 +259,21 @@ def build_settings_widgets():
             self.theme.addItems(theme_labels())
             appearance_form.addRow("主题", self.theme)
 
+            # 语言：切换后需重启生效（已渲染的控件不会自动重译），
+            # 所以这里只写配置、不实时切——和 theme 的「实时预览」不同档。
+            from ..i18n import (
+                available_languages, current_language, language_labels, tr,
+            )
+            self.language = ComboBox(self._appearance_card["body"])
+            self.language.addItems(language_labels())
+            # 把当前生效语言反映到下拉框（不触发 set_language）。
+            langs = available_languages()
+            try:
+                self.language.setCurrentIndex(langs.index(current_language()))
+            except ValueError:
+                pass
+            appearance_form.addRow(tr("language.label"), self.language)
+
             # GUI 行为偏好：是否在解析页点下载时先弹选项对话框。
             # 默认 False——「点一下就走」是绝大多数用户的心智模型。
             self.prompt_before_download = SwitchButton(self._appearance_card["body"])
@@ -610,6 +625,15 @@ def build_settings_widgets():
             data["theme"] = theme_name
             set_theme(theme_name)
 
+            # 语言：写入配置即可，下次启动时 app.py 读 config 调 set_language。
+            # 这里不实时切语言——已渲染的控件不会重译，切了反而半中半英。
+            from ..i18n import available_languages, language_labels
+            lang_labels = language_labels()
+            lang_idx = self.language.currentIndex()
+            if 0 <= lang_idx < len(lang_labels):
+                langs = available_languages()
+                data["language"] = langs[lang_idx]
+
             cfg_path = DEFAULT_CONFIG_PATH
             try:
                 # 先 dump 到内存再落盘：open(..., "w") 会立即截断文件，
@@ -630,10 +654,11 @@ def build_settings_widgets():
 
             InfoBar.success(
                 title="设置已保存",
-                content=f"已写入 {cfg_path}",
+                content=f"已写入 {cfg_path}。大部分设置下次下载时即生效；"
+                        f"如遇异常请重启应用。",
                 parent=self,
                 position=InfoBarPosition.TOP,
-                duration=3000,
+                duration=4000,
             )
             logger.info("settings saved to %s", cfg_path)
 

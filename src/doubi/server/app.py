@@ -82,6 +82,7 @@ async def _execute_download(url: str, options: DownloadOptions) -> dict:
         # Parse failed, or a single-item download returned False:
         # process_url collapses both into None.
         total, succeeded, failed = 1, 0, 1
+        failed_items = []
     elif "child_count" in item.extra:
         # The pipeline took the container branch and recorded how its
         # children fared, so those numbers are the answer.
@@ -98,8 +99,10 @@ async def _execute_download(url: str, options: DownloadOptions) -> dict:
         succeeded = int(item.extra.get("downloaded_count") or 0)
         failed = int(item.extra.get("failed_count") or 0)
         total = int(item.extra.get("child_count") or 0)
+        failed_items = item.extra.get("failed_items") or []
     else:
         total, succeeded, failed = 1, 1, 0
+        failed_items = []
 
     return {
         "total": total,
@@ -108,6 +111,9 @@ async def _execute_download(url: str, options: DownloadOptions) -> dict:
         "item_title": item.title if item else None,
         "item_author": item.author.name if item and item.author else None,
         "item_id": item.item_id if item else None,
+        # 失败子项的 (platform, item_id, source_url) 列表，供客户端做
+        # 子项级重试：``POST /api/v1/download`` 重新提交这些 URL 即可。
+        "failed_items": failed_items,
     }
 
 
@@ -136,6 +142,7 @@ def _build_options() -> DownloadOptions:
         write_danmaku=cfg.write_danmaku,
         write_subtitles=cfg.write_subtitles,
         resume=cfg.resume,
+        duplicate_policy=cfg.duplicate_policy,
         database=cfg.database_path if cfg.database else None,
         manifest=cfg.manifest_path,
         proxy=cfg.proxy,

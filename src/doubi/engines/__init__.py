@@ -9,5 +9,6 @@ from __future__ import annotations
 
 from .base import Engine
 from .yt_dlp import YtDlpEngine
+from .aria2 import Aria2Engine
 
-__all__ = ["Engine", "YtDlpEngine"]
+__all__ = ["Engine", "YtDlpEngine", "Aria2Engine"]

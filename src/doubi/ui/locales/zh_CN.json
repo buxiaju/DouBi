@@ -1,0 +1,24 @@
+{
+  "app.title_suffix": "多平台视频下载器",
+  "app.tagline": "一站式多平台视频下载",
+
+  "nav.parse": "解析",
+  "nav.download": "下载",
+  "nav.history": "历史",
+  "nav.settings": "设置",
+  "nav.theme_tooltip": "切换主题（在内置主题包之间循环）",
+  "nav.about_tooltip": "关于",
+
+  "common.ok": "确定",
+  "common.cancel": "取消",
+  "common.save": "保存",
+  "common.yes": "是",
+  "common.no": "否",
+
+  "theme.switched": "已切换主题",
+  "theme.section_title": "主题与外观",
+  "theme.section_subtitle": "切换主题包会立即生效；点「保存设置」才会写入配置文件",
+
+  "language.label": "语言",
+  "language.restart_hint": "切换语言后需重启应用生效"
+}

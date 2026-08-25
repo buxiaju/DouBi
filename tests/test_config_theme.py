@@ -27,6 +27,9 @@ from doubi.core.config import AppConfig, load_config  # noqa: E402
 from doubi.ui import theme as theme_mod  # noqa: E402
 
 
+pytestmark = pytest.mark.gui
+
+
 # ---------------------------------------------------------------------------
 # 保存路径：to_dict() 必须是 yaml.safe_dump 可表示的
 # ---------------------------------------------------------------------------

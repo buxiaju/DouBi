@@ -21,7 +21,6 @@ from .models import (
     DownloadJob,
     DownloadOptions,
     MediaItem,
-    MediaType,
     Platform,
 )
 from .registry import PlatformRegistry
@@ -188,7 +187,7 @@ class DownloadPipeline:
             ))
             return None
 
-        if item.is_container() or item.media_type in (MediaType.USER, MediaType.MIX):
+        if item.needs_expansion():
             return await self._process_container(
                 item, options, on_progress, job_id,
                 strategy=container_strategy, max_count=container_max,
@@ -220,7 +219,7 @@ class DownloadPipeline:
         # through. Fail loudly and clearly instead of silently handing
         # the engine an un-dereferenceable playlist URL (which used to
         # surface as the vague "engine returned False").
-        if item.is_container() or item.media_type in (MediaType.USER, MediaType.MIX):
+        if item.needs_expansion():
             msg = (
                 f"Refusing to download container item "
                 f"(media_type={item.media_type!r}, "
@@ -263,7 +262,7 @@ class DownloadPipeline:
         if item is None:
             return None, []
 
-        if item.is_container() or item.media_type in (MediaType.USER, MediaType.MIX):
+        if item.needs_expansion():
             adapter = PlatformRegistry.get(item.platform)
             expand = getattr(adapter, "expand", None)
             if callable(expand):
@@ -302,6 +301,13 @@ class DownloadPipeline:
         # values, so callers had no way to learn what actually happened.
         job.succeeded = sum(1 for r in results if r is True)
         job.failed = len(results) - job.succeeded
+        # 记录失败子项的标识，供上层做子项级重试。``source_url`` 在
+        # 容器展开时由 adapter 设置；没有 URL 时用 item_id 兜底。
+        job.failed_items = [
+            (it.platform.value, it.item_id, it.source_url or it.item_id)
+            for it, r in zip(items, results)
+            if r is not True
+        ]
         if job.failed and not job.succeeded:
             job.status = "failed"
         else:
@@ -364,6 +370,7 @@ class DownloadPipeline:
         container.extra["downloaded_count"] = child_job.succeeded
         container.extra["failed_count"] = child_job.failed
         container.extra["child_count"] = len(children)
+        container.extra["failed_items"] = child_job.failed_items
         return container
 
     async def _download_with_progress(
@@ -400,13 +407,19 @@ class DownloadPipeline:
                 from .storage.database import Database
                 async with Database(options.database) as db:
                     if await db.is_downloaded(item.platform.value, item.item_id):
-                        logger.info("[%s] already in DB; skipping %s/%s",
-                                    job_id[:8], item.platform.value, item.item_id)
-                        self._emit(on_progress, ProgressEvent(
-                            job_id=job_id, item=item, phase="done",
-                            fraction=1.0, message="already downloaded (DB)",
-                        ))
-                        return True
+                        policy = getattr(options, "duplicate_policy", "skip")
+                        if policy == "redownload":
+                            logger.info("[%s] already in DB but policy=redownload; "
+                                        "re-downloading %s/%s",
+                                        job_id[:8], item.platform.value, item.item_id)
+                        else:
+                            logger.info("[%s] already in DB; skipping %s/%s",
+                                        job_id[:8], item.platform.value, item.item_id)
+                            self._emit(on_progress, ProgressEvent(
+                                job_id=job_id, item=item, phase="done",
+                                fraction=1.0, message="already downloaded (DB)",
+                            ))
+                            return True
             except Exception as exc:
                 logger.debug("DB check failed (continuing): %s", exc)
 

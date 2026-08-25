@@ -118,10 +118,145 @@ def test_classify_bilibili_short():
     assert c.type is BilibiliURLType.SHORT
 
 
+# ---------------------------------------------------------------------------
+# 直播 URL 识别（live.bilibili.com/{room_id}）
+# ---------------------------------------------------------------------------
+
+
+def test_classify_bilibili_live_plain():
+    c = classify_bilibili_url("https://live.bilibili.com/12345")
+    assert c.type is BilibiliURLType.LIVE
+    assert c.item_id == "12345"
+
+
+def test_classify_bilibili_live_h5_prefix():
+    c = classify_bilibili_url("https://live.bilibili.com/h5/12345")
+    assert c.type is BilibiliURLType.LIVE
+    assert c.item_id == "12345"
+
+
+def test_classify_bilibili_live_with_query():
+    c = classify_bilibili_url("https://live.bilibili.com/12345?share_source=copy_web")
+    assert c.type is BilibiliURLType.LIVE
+    assert c.item_id == "12345"
+
+
+def test_classify_bilibili_live_not_confused_with_space():
+    """``bilibili.com/12345`` 是 SPACE（纯数字 UID），不是直播。
+
+    直播必须挂在 ``live.bilibili.com`` 子域，这条用例守住两种纯数字 URL
+    的边界，防止 LIVE pattern 误吞 SPACE。
+    """
+    c = classify_bilibili_url("https://www.bilibili.com/12345")
+    assert c.type is BilibiliURLType.SPACE
+
+
+def test_bilibili_adapter_matches_live_url():
+    """适配器 ``match_url`` 必须认 live.bilibili.com，否则会被路由到 UNKNOWN。"""
+    from doubi.platforms.bilibili.adapter import BilibiliAdapter
+    assert BilibiliAdapter().match_url("https://live.bilibili.com/12345") is True
+
+
+def test_bilibili_adapter_classify_live_to_media_type():
+    """LIVE URL 类型映射到 ``MediaType.LIVE``。"""
+    from doubi.platforms.bilibili.adapter import _classify_single_type
+    assert _classify_single_type(BilibiliURLType.LIVE) is MediaType.LIVE
+
+
+def test_classify_media_type_recognizes_live_extractor():
+    """yt-dlp 的直播 extractor ``ie_key=BiliBiliLive`` 被识别为 LIVE。"""
+    from doubi.platforms.bilibili.api import _classify_media_type
+    info = {"ie_key": "BiliBiliLive", "extractor": "BiliBiliLive"}
+    assert _classify_media_type(info) is MediaType.LIVE
+
+
+def test_bilibili_adapter_supports_live_media_type():
+    from doubi.platforms.bilibili.adapter import BilibiliAdapter
+    assert MediaType.LIVE.value in BilibiliAdapter().supported_media_types()
+
+
 def test_classify_bilibili_unknown():
     c = classify_bilibili_url("https://example.com/something")
     assert c.type is BilibiliURLType.UNKNOWN
     assert c.item_id == ""
+
+
+# ---------------------------------------------------------------------------
+# 裸编号归一化（纯编号解析）
+# ---------------------------------------------------------------------------
+
+
+def test_classify_bare_bv_id():
+    c = classify_bilibili_url("BV1GJ411x7h7")
+    assert c.type is BilibiliURLType.VIDEO
+    assert c.item_id == "BV1GJ411x7h7"
+    assert c.normalized_url == "https://www.bilibili.com/video/BV1GJ411x7h7"
+
+
+def test_classify_bare_av_id():
+    c = classify_bilibili_url("av170001")
+    assert c.type is BilibiliURLType.VIDEO
+    assert c.item_id == "av170001"
+    assert c.normalized_url == "https://www.bilibili.com/video/av170001"
+
+
+def test_classify_bare_ep_id():
+    c = classify_bilibili_url("ep374668")
+    assert c.type is BilibiliURLType.BANGUMI
+    assert c.item_id == "ep374668"
+    assert c.normalized_url == "https://www.bilibili.com/bangumi/play/ep374668"
+
+
+def test_classify_bare_ss_id():
+    c = classify_bilibili_url("ss34244")
+    assert c.type is BilibiliURLType.BANGUMI
+    assert c.item_id == "ss34244"
+    assert c.normalized_url == "https://www.bilibili.com/bangumi/play/ss34244"
+
+
+def test_classify_bare_ml_id():
+    c = classify_bilibili_url("ml12345")
+    assert c.type is BilibiliURLType.LIST
+    assert c.item_id == "ml12345"
+    assert c.normalized_url == "https://www.bilibili.com/list/ml12345"
+
+
+def test_classify_bare_id_with_whitespace():
+    """用户复制时可能带前后空白。"""
+    c = classify_bilibili_url("  BV1GJ411x7h7  ")
+    assert c.type is BilibiliURLType.VIDEO
+    assert c.item_id == "BV1GJ411x7h7"
+
+
+def test_classify_bare_id_does_not_match_url_fragment():
+    """完整 URL 里的 BV 片段不能被裸编号 pattern 误中。"""
+    c = classify_bilibili_url("https://www.bilibili.com/video/BV1GJ411x7h7")
+    assert c.type is BilibiliURLType.VIDEO
+    assert c.normalized_url == "https://www.bilibili.com/video/BV1GJ411x7h7"
+
+
+def test_classify_bare_id_rejects_invalid_bv():
+    """短了一截的 BV 不是合法编号。"""
+    c = classify_bilibili_url("BV1GJ411")
+    assert c.type is BilibiliURLType.UNKNOWN
+
+
+def test_match_url_accepts_bare_bv():
+    """PlatformRegistry.detect 必须把裸编号路由到 BilibiliAdapter。"""
+    from doubi.platforms.bilibili.adapter import BilibiliAdapter
+    adapter = BilibiliAdapter.__new__(BilibiliAdapter)
+    assert adapter.match_url("BV1GJ411x7h7") is True
+    assert adapter.match_url("av170001") is True
+    assert adapter.match_url("ep374668") is True
+    assert adapter.match_url("ss34244") is True
+    assert adapter.match_url("ml12345") is True
+
+
+def test_registry_detect_bare_bv():
+    from doubi.core.registry import PlatformRegistry
+    adapter = PlatformRegistry.detect("BV1GJ411x7h7")
+    assert adapter is not None
+    assert adapter.platform is Platform.BILIBILI
 
 
 # ---------------------------------------------------------------------------

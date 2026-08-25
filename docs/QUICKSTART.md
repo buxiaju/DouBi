@@ -62,6 +62,21 @@ doubi download -u URL --proxy "http://127.0.0.1:7890"
 doubi download -u URL --no-resume
 ```
 
+## 下载引擎（M6.15）
+
+默认用 yt-dlp（解析网页 + 下载一体）。也可以切到 aria2 多线程引擎加速大文件下载：
+
+```yaml
+# ~/.doubi/config.yml
+engine: aria2
+aria2_rpc_url: http://127.0.0.1:6800/jsonrpc   # aria2 守护进程地址
+aria2_secret: null                              # RPC token，没有就 null
+```
+
+> aria2 是纯下载器（不解析网页），只对解析后带 `direct_url` 的 item 生效，
+> 其余自动回退 yt-dlp。要先启动 aria2 守护进程（`aria2c --enable-rpc`）。
+> 适合大文件 / 慢源加速，不适合取代 yt-dlp 的网页解析。
+
 ## 登录
 
 ```bash
@@ -78,9 +93,17 @@ doubi auth douyin --legacy-json config/cookies.json   # 旧 douyin-downloader �
 ## Live 录制
 
 ```bash
-doubi live -u "https://live.douyin.com/123456789" -o ./Lives            # 录到下播
+doubi live -u "https://live.douyin.com/123456789" -o ./Lives            # 抖音，录到下播
 doubi live -u "https://live.douyin.com/123456789" --max-duration 3600   # 限时 1 小时
+
+# B 站直播（M6.15）——直播 URL 直接用 download 子命令即可
+doubi download -u "https://live.bilibili.com/12345" -o ./Lives
+doubi download -u "https://live.bilibili.com/h5/12345" -o ./Lives       # h5 前缀也认
 ```
+
+> B 站直播走 yt-dlp 的 `BiliBiliLive` extractor。直播流是 HLS，引擎自动
+> 启用 `live_from_start`（从开播点时移录制）并提高断流重连次数。
+> 真实直播录制效果取决于直播状态与网络，建议先用小房间测试。
 
 ## GUI
 
@@ -122,6 +145,15 @@ doubi-gui --theme deep_sea   # 本次启动强制用「深海」主题
 优先级（高到低）：`--theme` > `DOUBI_THEME=eye_care` 环境变量 > `~/.doubi/config.yml` > 内置默认（默认亮）。给了 `--theme` 就完全不看后面几项。
 
 > 主题是**全局立即生效**的：已经打开的表格、卡片、下拉框、以及切换之后才新建的对话框和右键菜单都会一起变色，不需要重启。
+
+### 换语言（M6.14）
+
+设置页「外观」卡片有「语言」下拉框（简体中文 / English）。选完点「保存设置」
+写入配置，**重启应用后生效**——已渲染的控件不会自动重译，所以语言属于
+「重启生效」档（和 `database_path` 一样）。
+
+> 当前已迁移导航标签、窗口标题、tooltip 等核心可见字符串。其余 UI 字符串
+> 仍为中文，会逐步迁移到词表。基础设施（`tr()` + JSON 词表）已就绪。
 
 ### 解析页操作
 

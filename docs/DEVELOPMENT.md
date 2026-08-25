@@ -1,7 +1,7 @@
 # DouBi 开发文档（面向 AI / 开发者）
 
 > 目标：任何有能力的 AI 或开发者读完本文档，就能安全地修改、扩展、维护 DouBi，而不需要重新逆向整个项目。
-> 版本对应：M0–M6.6（2026-08-23 快照）。配套文档：`docs/ARCHITECTURE.md`（分层图）、`docs/QUICKSTART.md`（用户操作）、`docs/CHANGELOG.md`（变更史）、`docs/ICONS.md`（图标管线）、`docs/BUILD.md`（打包）、`INTEGRATION_PLAN.md`（整合原始方案）。
+> 版本对应：M0–M6.15（2026-08-25 快照）。配套文档：`docs/ARCHITECTURE.md`（分层图）、`docs/QUICKSTART.md`（用户操作）、`docs/CHANGELOG.md`（变更史）、`docs/ICONS.md`（图标管线）、`docs/BUILD.md`（打包）、`INTEGRATION_PLAN.md`（整合原始方案）。
 
 ---
 
@@ -111,11 +111,13 @@ DouBi/
 │   │   └── auth/                  #   browser_login.py（Playwright 自动登录）
 │   ├── engines/                   # 下载引擎（见 §7）
 │   │   ├── base.py                #   Engine ABC + EngineProgress
-│   │   └── yt_dlp.py              #   YtDlpEngine（默认引擎）
+│   │   ├── yt_dlp.py              #   YtDlpEngine（默认引擎）
+│   │   └── aria2.py               #   Aria2Engine（M6.15，多线程分片下载）
 │   ├── platforms/                 # 平台适配器（见 §6）
 │   │   ├── base.py                #   PlatformAdapter ABC
 │   │   ├── douyin/                #   adapter / api / auth / strategies / url / live
 │   │   └── bilibili/              #   adapter / api / auth / strategies / url / qr_login / wbi
+│   │                              #   （M6.15 起 url.py 识别 live.bilibili.com 直播）
 │   ├── cli/                       # main.py（download/auth/live/migrate/platforms）+ auth_cmd.py
 │   ├── server/                    # app.py（FastAPI）+ jobs.py（JobManager）+ schemas.py
 │   ├── mcp/                       # server.py（stdio JSON-RPC 2.0）
@@ -126,6 +128,8 @@ DouBi/
 │       ├── workers.py             #   DownloadWorker（GUI 任务包装）
 │       ├── auth_actions.py        #   登录流程的纯 Python 包装
 │       ├── theme.py               #   主题包 / token 表 / set_theme（见 §13.4）
+│       ├── i18n.py                #   JSON 词表 + tr() 翻译（M6.14，见 §17）
+│       ├── locales/               #   zh_CN.json / en.json 词表
 │       ├── pages/                 #   parse / download / history / settings
 │       └── dialogs/               #   login_dialog.py
 └── tests/                         # 25 个测试文件（见 §15）
@@ -359,11 +363,51 @@ class Engine(ABC):
 - 进度钩子：每 ≥0.5% 才 emit 一次，避免刷爆 UI。
 - `supports()` 只检查 `bool(item.source_url)`。
 
-### 7.3 如何新增一个引擎（例如 aria2）
+### 7.3 Aria2Engine（`engines/aria2.py`，M6.15）
+
+aria2 是纯下载器，不解析网页。`Aria2Engine.supports()` 只认有
+`item.extra["direct_url"]` 的 item——没有直链的 item 自动回退 yt-dlp。
+
+**RPC 协议**：通过 JSON-RPC 2.0 over HTTP 控制 aria2 守护进程：
+
+* `aria2.addUri(uris, options)` → 返回 GID（任务 ID）
+* `aria2.tellStatus(gid)` → 查进度（轮询，间隔 1 秒）
+* `aria2.remove(gid)` → 取消任务
+
+**客户端注入**：`Aria2RpcClient` 是 Protocol，生产用 `_HttpxAria2Client`
+（基于 httpx），测试用内存 Mock（不依赖 aria2 二进制）。
+
+**参数映射**（`_build_options`）：
+
+| DownloadOptions | aria2 参数 |
+| --- | --- |
+| `concurrent_fragments` | `split` + `max-connection-per-server` |
+| `rate_limit` | `max-download-limit`（透传 `5M` 格式） |
+| `proxy` | `all-proxy` |
+| `user_agent` | `user-agent` |
+| `resume` | `continue` |
+
+**取消**：`cancel_check` 返回 True 时调 `remove(gid)`，和 yt-dlp 一样是协作式。
+
+### 7.4 引擎选择（`engine_loader.build_default_engine(cfg)`）
+
+按 `cfg.engine` 选择引擎：
+
+| 配置值 | 引擎 | 说明 |
+| --- | --- | --- |
+| `yt-dlp`（默认） | `YtDlpEngine` | 解析+下载一体，平台覆盖最广 |
+| `aria2` | `Aria2Engine` | 多线程分片下载，只接 `direct_url` |
+| 其他 | `YtDlpEngine` | 未知引擎名回退，避免配置写错让应用起不来 |
+
+`build_default_pipeline(cfg=...)` 透传 cfg 给 `build_default_engine`。
+CLI / REST / GUI 三端都走这个工厂，行为一致。
+
+### 7.5 如何新增一个引擎
 
 1. 继承 `Engine`，实现 `supports` / `download`。
-2. 在 `engine_loader.build_default_engine()` 里按配置切换（现在是硬编码 `YtDlpEngine()`）。
-3. 在 `DownloadOptions.extra` 里放引擎私有参数。
+2. 在 `config.py::DEFAULTS` 加引擎名（如 `"my_engine"`）和引擎私有配置字段。
+3. 在 `engine_loader.build_default_engine(cfg)` 里加分支。
+4. 测试用 Mock（参考 `test_aria2_engine.py`），不依赖真实二进制。
 
 ---
 
@@ -1349,7 +1393,7 @@ python -m pytest --collect-only -q 2>&1 | Select-Object -Last 3
 19. **结构性测试必须用非默认值填充，否则是假保险**：`test_build_options_covers_every_shared_config_field` 第一版直接拿 `AppConfig()` 原值比对，把 `resume=self._cfg.resume` 删掉竟然照样通过——两个 dataclass 的 `resume` 默认值都是 `True`，「漏转发」和「转发了」结果完全相等。凡是「拿默认对象比对默认值」的测试都有这个盲区：**先把每个字段推离默认值再比**，并对没覆盖到的字段类型 `pytest.fail`（而不是跳过），否则新类型一进来检查强度就悄悄降级。改完后分别删 `resume`、`max_quality` 各验证一次变红，才算这层保险是真的。
 20. **抖音 modal_id / vid 规则必须排在 USER 规则之前**（`url.py::_PATTERNS`）：用户主页「合集」tab 打开的单视频链接形如 `/user/{sec_uid}?...&modal_id={id}&vid={id}`，先匹配 USER 会把单视频误判成用户容器，触发整个主页的作品展开。顺序即语义。
 21. **抖音风控的「空 200」**：HTTP 200 + 空 body 不是成功，是反爬拦截（见 §14.6）。任何抖音 Web API 响应解析前必须判空，命中则重新签名重试。
-22. **`is_container()` 只看 children 非空，不看 media_type**：容器解析时 children 刻意不填（惰性展开），所以 pipeline 三处容器判定都要补 `media_type is MIX`。新增一种惰性容器类型时，`run()` / `download_item()` 守卫 / `parse_and_expand()` 三处必须同步，漏一处就是「能展开但拒绝下载」或反之。
+22. **容器判定必须用 `needs_expansion()`，不要散写**：容器解析时 children 刻意不填（惰性展开），`is_container()` 只看 children 非空会漏掉 `USER`/`MIX` 这类无 children 的惰性容器。M6.14 起统一为 `item.needs_expansion()`——它同时覆盖「children 非空」和「`media_type ∈ CONTAINER_MEDIA_TYPES`」两种情况。新增一种惰性容器类型时，把它加进 `CONTAINER_MEDIA_TYPES` 即可，pipeline 各处 `needs_expansion()` 调用点自动跟上；不要再回到 `is_container() or media_type in (...)` 的散写。
 23. **登录成功后的落地页永远到不了 networkidle**：feed 流 / WebSocket 长连接 / 心跳是常态。Playwright 里不要用 `wait_for_load_state("networkidle")` 当「登录完成」信号，用固定短 settle 或直接轮询 `context.cookies()`。
 24. **判定平台登录态要用「登录后才会出现的 cookie」**：sessionid / sessionid_ss / sid_guard（抖音）；不要用设备标识（ttwid / odin_tt——游客也有）或 JS 风控 token（msToken——自动化下经常不写入）。名单错向两个方向都翻过车：真登录抓不到 + 游客误判成功。
 25. **引擎阶段的 cookie 与解析阶段是两条通道**：解析在 adapter（自己读 cookie 文件），下载在 engine（只认 `DownloadOptions.cookies_file`）。四个入口都不传 cookies_file 时引擎裸跑。M6.7 起在 pipeline 层懒加载注入（显式指定优先），修一处救四端。
@@ -1362,6 +1406,136 @@ python -m pytest --collect-only -q 2>&1 | Select-Object -Last 3
 32. **qfluentwidgets 的 `MessageBoxBase` 没有 `view` widget，只有 `viewLayout`**：项目里这个版本（1.x）的 `MessageBoxBase.__init__` 直接 `self.viewLayout = QVBoxLayout()` 然后 `self.vBoxLayout.addLayout(self.viewLayout, 1)`——没有 `self.view`。GitHub 上 README 的示例（包括 `addWidget(self.view)`、`viewLayout.addLayout(...)` 的混用）是不同版本的混合印象，**看本地源码为准**。同理，按钮文案默认是 `OK / Cancel`（`PrimaryPushButton(self.tr('OK'))`），不是 `yesButton / cancelButton` 之外另有标签入口——直接在子类的 `__init__` 末尾 `self.yesButton.setText("下载")` 改掉。**别去 `setWindowTitle`**——它会被父类的 `MaskDialogBase.__initWidget` 重新设一次，运行时看不见，但写测试时容易掉进去。
 33. **qfluentwidgets 的 `SwitchButton` 暴露的是 `checkedChanged(bool)`，不是 `toggled(bool)`**：`SwitchButton` 不是 `QCheckBox`，它**重命名了** Qt 标准的 `toggled` 信号；`hasattr(switch, 'toggled')` 是 False，`self.prompt_before_download.toggled.connect(...)` 会抛 `AttributeError`。同理 `QAbstractButton` 的 `stateChanged(int)` 在它身上也没有。只能 `checkedChanged` / 自定义 `clicked` 那一套。看到现有设置页用 `self.database.isChecked()` 读值、用 `self.database.setChecked(cfg.database)` 写值，但**没接信号**——说明旧代码要么不需要在切换时做事，要么把状态变化归到「点保存按钮」一次性读取而不是每个控件的信号回调。新增「切换即生效」的偏好时，记得连的是 `checkedChanged`。
 34. **YouTube video ID 必须定长 + 锚定**：ID 是 11 字符 `[A-Za-z0-9_-]`，但单写 `{11}` 不够——``watch?v=dQw4w9WgXcQextra`` 会把前 11 个字符匹配上，剩 ``extra`` 被当成「后续参数」，于是你**以为**拿到合法 video ID 实际是合法 ID + 尾巴。正确做法：watch 模式后面接 ``(?:[&#]|$)``（参数分隔符或字符串结尾），短链 youtu.be 模式后面接 ``(?:[?#]|$)``。这是 YouTube adapter 第一个回归测试期望（``test_sabotage_wrong_id_length_misses_url``）就专门盯着的——任何「我去掉那个锚」都会让 12 字符 ID 测试变红。
+
+---
+
+## 16.5 i18n 基础设施（M6.14）
+
+### 设计取舍：为什么不用 Qt `.ts` / `.qm`
+
+Qt 的 `tr()` 绑死 `QObject` 子类——模块级函数（CLI、REST、日志）用不了，
+翻译覆盖面被「有没有继承 QObject」切一刀；`lupdate` / `lrelease` 两步构建
+依赖工具链，CI 上多一层麻烦。
+
+改用 **JSON 词表 + 模块级 `tr()`**：
+
+* 词表是普通 JSON，人能直接读改，无需编译步骤。
+* `tr()` 是模块级纯函数，任何代码都能调（GUI / CLI / REST / 日志通用）。
+* 回退顺序：当前语言 → `zh_CN`（源语言/兜底）→ key 本身。
+
+### 核心文件
+
+| 文件 | 职责 |
+| --- | --- |
+| `ui/i18n.py` | `tr()` / `translate()` / `set_language()` / `available_languages()` |
+| `ui/locales/zh_CN.json` | 源语言词表（key 的来源） |
+| `ui/locales/en.json` | 英文词表 |
+
+### 新增可译字符串
+
+1. 往 `locales/zh_CN.json` 加 `"my.key": "中文文案"`。
+2. 往 `locales/en.json` 加同一把 key（漏译会被测试守卫红测）。
+3. 代码里 `from ..i18n import tr; tr("my.key")`。
+
+**无需改 `i18n.py`**——词表运行时首次访问加载并缓存。
+
+### 启动接入
+
+`ui/app.py` 在建窗口前调 `set_language(load_config(None).language)`，
+和 `set_theme()` 同位——导航标签等首次渲染就走正确词表。
+
+### 设置页语言选择
+
+外观卡片有语言下拉框，保存时写入 `cfg.language`。**切语言需重启生效**
+（已渲染的 Qt 控件不会自动重译），与 `database_path` / `theme` 同属
+「重启生效」档，设置页有提示。
+
+### 测试守卫
+
+`tests/test_i18n.py`（14 例）钉死：
+
+* 词表是合法 JSON 且每个语言文件结构正确。
+* 非源语言必须覆盖源语言全部 key（漏译红测）。
+* `tr` 能取到译文、找不到时回退到源语言再回退到 key 本身。
+* `set_language` 切换后后续 `tr` 走新语言，未知语言回退源语言。
+* 语言枚举 / 标签 API 稳定（设置页下拉依赖它）。
+
+## 16.6 B 站直播录制（M6.15）
+
+### 三层适配
+
+直播走和点播同一套 pipeline，区别只在三层：
+
+| 层 | 改动 | 文件 |
+| --- | --- | --- |
+| URL 识别 | `BilibiliURLType.LIVE`，匹配 `live.bilibili.com/{room_id}` | `platforms/bilibili/url.py` |
+| 类型映射 | `LIVE → MediaType.LIVE`；`_classify_media_type` 识别 `BiliBiliLive` extractor | `platforms/bilibili/adapter.py`、`api.py` |
+| 引擎参数 | 直播流不 `merge_output_format`、`live_from_start`、`fragment_retries=10` | `engines/yt_dlp.py::_build_opts` |
+
+### 直播与点播在引擎层的区别
+
+```python
+is_live = item.media_type == MediaType.LIVE
+if is_live:
+    # HLS 无片尾，中途 remux 会失败
+    opts["live_from_start"] = True          # 从开播点时移录制
+    opts["fragment_retries"] = 10            # 断流重连
+else:
+    opts["merge_output_format"] = options.container
+```
+
+### URL pattern 顺序
+
+LIVE pattern（`live.bilibili.com/{room_id}`）必须排在 SPACE（`bilibili.com/{数字}`）
+**之前**——两者都是纯数字，顺序错了 SPACE 会吞掉直播房间号。这是
+`test_classify_bilibili_live_not_confused_with_space` 守卫的边界。
+
+### 测试边界
+
+`test_bilibili_adapter.py` +8 例覆盖 URL 识别（plain/h5/query）、不误吞 SPACE、
+`match_url`、类型映射、extractor 识别、`supported_media_types`。真实直播循环
+（断流重连、时移边界）需真实直播流，留给集成测试。
+
+## 16.7 aria2 多线程引擎（M6.15）
+
+### 实现要点
+
+| 文件 | 职责 |
+| --- | --- |
+| `engines/aria2.py` | `Aria2Engine` + `Aria2RpcClient` Protocol + `_HttpxAria2Client` |
+| `core/config.py` | `engine` / `aria2_rpc_url` / `aria2_secret` 配置字段 |
+| `core/engine_loader.py` | `build_default_engine(cfg)` 按配置选引擎 |
+
+### RPC 客户端注入
+
+`Aria2RpcClient` 是 Protocol，`Aria2Engine(rpc_client=...)` 接受注入：
+
+* 生产：`_HttpxAria2Client`（基于 httpx，直接发 JSON-RPC）。
+* 测试：内存 Mock（`_MockRpcClient`），不依赖 aria2 二进制。
+
+这样 `download()` 的所有逻辑（addUri 参数构造、进度轮询、取消）都能用
+Mock 单测，参考 `tests/test_aria2_engine.py`（18 例）。
+
+### `supports()` 的直链守卫
+
+```python
+def supports(self, item: MediaItem) -> bool:
+    return bool(item.extra.get("direct_url") or item.source_url)
+```
+
+aria2 不解析网页——没有直链的 item 回退 yt-dlp。直链由 yt-dlp 解析阶段
+注入 `item.extra["direct_url"]`。
+
+### 引擎选择回退
+
+`build_default_engine(cfg)` 未知引擎名回退 yt-dlp，避免配置写错让应用起不来：
+
+```python
+if engine_name == "aria2":
+    return Aria2Engine(rpc_url=..., secret=...)
+# 未知引擎名回退 yt-dlp
+return YtDlpEngine()
+```
 
 ---
 
@@ -1435,4 +1609,4 @@ python -m pytest --collect-only -q 2>&1 | Select-Object -Last 3
 
 ---
 
-*文档生成时间：2026-08-23 · 与 `docs/CHANGELOG.md` 的 M6.7 快照对应。维护者更新本文档时，保持"结构 + 关键 API + 踩坑记录"三要素即可，避免写与代码重复的长篇源码引用。*
+*文档生成时间：2026-08-25 · 与 `docs/CHANGELOG.md` 的 M6.13 快照对应。维护者更新本文档时，保持"结构 + 关键 API + 踩坑记录"三要素即可，避免写与代码重复的长篇源码引用。*

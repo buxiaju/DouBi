@@ -60,6 +60,21 @@ class MediaType(str, Enum):
     COLLECTION = "collection"    # 通用容器
 
 
+#: Media types that the pipeline must *expand* even while ``children`` is
+#: still empty. ``MediaItem.is_container()`` only checks ``children``, but
+#: MIX / USER containers are deliberately parsed **without** children (the
+#: children arrive from ``adapter.expand()``, not ``adapter.parse()``), so
+#: "should this item go through expansion" is a strictly different question
+#: than "does this item have children".
+#:
+#: This used to be spelled out as ``item.media_type in (MediaType.USER,
+#: MediaType.MIX)`` at three separate call sites in ``core.pipeline`` --
+#: each new container-flavored media type silently required editing all
+#: three. Keep every consumer pointed at :meth:`MediaItem.needs_expansion`
+#: so the rule lives in exactly one place.
+CONTAINER_MEDIA_TYPES: tuple["MediaType", ...] = (MediaType.USER, MediaType.MIX)
+
+
 # ---------------------------------------------------------------------------
 # Building blocks
 # ---------------------------------------------------------------------------
@@ -125,6 +140,25 @@ class MediaItem:
     def is_container(self) -> bool:
         return bool(self.children)
 
+    def needs_expansion(self) -> bool:
+        """True if this item must be expanded before it can be downloaded.
+
+        Unifies the two container criteria that used to be checked
+        separately (and inconsistently) at pipeline call sites:
+
+        * ``is_container()`` -- children already attached (favlist,
+          collection, B 站 section / episode containers parsed eagerly);
+        * ``media_type in CONTAINER_MEDIA_TYPES`` -- a container whose
+          children are *not* attached yet (抖音 MIX / USER arrive from
+          ``adapter.expand()``, not ``parse()``).
+
+        The pipeline refuses to download anything for which this returns
+        ``True``; it routes such items to :meth:`PlatformAdapter.expand`
+        instead. See :data:`CONTAINER_MEDIA_TYPES` for why this cannot
+        simply be ``is_container()``.
+        """
+        return bool(self.children) or self.media_type in CONTAINER_MEDIA_TYPES
+
     def total_duration(self) -> Optional[float]:
         if not self.is_container():
             return self.duration
@@ -174,6 +208,14 @@ class DownloadOptions:
     #: stragglers out of the intermediate cleanup, since deleting them
     #: is exactly what makes a resume impossible.
     resume: bool = True
+    #: 重复下载策略（当 DB 里已有同一 platform+item_id 记录时）：
+    #: ``"skip"``       — 跳过，返回成功（默认，历史行为）
+    #: ``"redownload"`` — 忽略已有记录，重新下载
+    #: ``"ask"``        — 交给上层（GUI 弹窗 / CLI 提示）决定
+    #: ``ask`` 模式下 pipeline 不自行决定，而是通过 ``on_progress``
+    #: 发一个 ``phase="duplicate"`` 事件，等上层调用 ``download_item``
+    #: 或取消。CLI / REST 默认 ``skip``，GUI 可以设成 ``ask``。
+    duplicate_policy: str = "skip"
     #: Cooperative cancellation probe. Called periodically from the
     #: engine's download loop; returning ``True`` aborts the transfer.
     #:
@@ -216,6 +258,9 @@ class DownloadJob:
     # so a still-running job reports 0/0 rather than an optimistic guess.
     succeeded: int = 0
     failed: int = 0
+    #: 失败子项的 ``(platform, item_id, source_url)`` 列表，供 REST / GUI
+    #: 做子项级重试。只在 ``process_batch`` 里填充；单条下载的 job 留空。
+    failed_items: list[tuple[str, str, str]] = field(default_factory=list)
 
     def total_count(self) -> int:
         return len(self.items)

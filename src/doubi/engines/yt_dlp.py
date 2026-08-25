@@ -35,7 +35,7 @@ from typing import Any, Optional
 
 import yt_dlp
 
-from ..core.models import DownloadOptions, MediaItem
+from ..core.models import DownloadOptions, MediaItem, MediaType
 from ..core.storage.file_layout import resolve_item_dir
 from .base import Engine, EngineProgress, EngineProgressCallback
 
@@ -164,10 +164,17 @@ class YtDlpEngine(Engine):
         # M4: resolve the per-item directory under output_root
         out_dir = resolve_item_dir(item, options)
 
+        # 直播流是 HLS，与点播有几个本质区别：
+        # * 没有片尾，merge_output_format 在直播录制中途没意义，
+        #   强行设 mp4 会在结束时做一次 remux，可能失败。
+        # * ``live_from_start`` 让 yt-dlp 从直播开播时间点开始录
+        #   （时移），而不是从加入那一刻才开始。B 站支持该特性。
+        # * 片段重试次数调高：直播中途断流很常见。
+        is_live = item.media_type == MediaType.LIVE
+
         opts: dict[str, Any] = {
             "outtmpl": self._resolve_template(item, options, out_dir),
             "format": options.format_id or self._quality_to_format(options.max_quality),
-            "merge_output_format": options.container,
             "writethumbnail": options.write_thumbnail,
             "writeinfojson": options.write_metadata_json,
             "noprogress": True,
@@ -182,6 +189,13 @@ class YtDlpEngine(Engine):
             # is contractual rather than inherited.
             "continuedl": options.resume,
         }
+        if is_live:
+            # 直播流不 merge：HLS 分片是 ts，合并 mp4 需要完整流，
+            # 直播中途 remux 会因流未结束而失败。
+            opts["live_from_start"] = True
+            opts["fragment_retries"] = 10
+        else:
+            opts["merge_output_format"] = options.container
         # Point yt-dlp at an ffmpeg binary (PATH or the bundled static
         # one from imageio-ffmpeg) so bestvideo+bestaudio merging works
         # even on machines without a system ffmpeg install.

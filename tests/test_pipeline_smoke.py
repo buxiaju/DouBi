@@ -368,3 +368,54 @@ def test_registry_detect_douyin_user_modal_id():
     )
     assert adapter is not None
     assert adapter.platform is Platform.DOUYIN
+
+
+# ---------------------------------------------------------------------------
+# needs_expansion 收敛（容器判定单一真源）
+# ---------------------------------------------------------------------------
+
+
+def test_needs_expansion_children_present():
+    """children 已挂的容器（favlist / section）两个判据都应命中。"""
+    parent = MediaItem(platform=Platform.BILIBILI, item_id="ml123", title="fav",
+                       media_type=MediaType.FAVLIST)
+    parent.children.append(
+        MediaItem(platform=Platform.BILIBILI, item_id="BV1xx411c7mD", title="child"))
+    assert parent.is_container()
+    assert parent.needs_expansion()
+
+
+def test_needs_expansion_mix_without_children():
+    """抖音 MIX 容器解析时刻意不填 children -- is_container() 是 False，
+    但 pipeline 必须走 expand。这正是 needs_expansion 存在的理由。"""
+    item = MediaItem(platform=Platform.DOUYIN, item_id="712345", title="mix",
+                     media_type=MediaType.MIX)
+    assert not item.is_container()
+    assert item.needs_expansion()
+
+
+def test_needs_expansion_user_without_children():
+    item = MediaItem(platform=Platform.DOUYIN, item_id="MS4wLj", title="u",
+                     media_type=MediaType.USER)
+    assert not item.is_container()
+    assert item.needs_expansion()
+
+
+def test_needs_expansion_single_video_false():
+    item = MediaItem(platform=Platform.BILIBILI, item_id="BV1xx411c7mD", title="v")
+    assert not item.is_container()
+    assert not item.needs_expansion()
+
+
+def test_pipeline_source_has_no_inline_container_check():
+    """结构性守卫：pipeline 不得再出现 ``media_type in (MediaType.USER, ...)``
+    的手写判定 -- 三处调用点历史上正是靠「同步三处」的口头约定维持，
+    曾经因为只改了一处而漏修（M6.7 顺带修复 LIST 合集同类判定）。
+    想改判定规则只能改 ``MediaItem.needs_expansion``。"""
+    import doubi.core.pipeline as pipeline_mod
+    src = Path(pipeline_mod.__file__).read_text(encoding="utf-8")
+    assert "media_type in (MediaType.USER" not in src, (
+        "pipeline.py 里出现了内联容器判定；请改用 MediaItem.needs_expansion()"
+    )
+    # 收敛后的三处调用点必须还在（防止有人把守卫整个删掉）
+    assert src.count("needs_expansion()") >= 3

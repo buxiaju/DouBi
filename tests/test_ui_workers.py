@@ -34,6 +34,9 @@ from doubi.ui import GUIUnavailableError, is_gui_available  # noqa: E402
 from doubi.ui.workers import DownloadWorker, DownloadTask  # noqa: E402
 
 
+pytestmark = pytest.mark.gui
+
+
 # ---------------------------------------------------------------------------
 # Availability
 # ---------------------------------------------------------------------------

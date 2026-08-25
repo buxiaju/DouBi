@@ -43,6 +43,7 @@ def build_main_window():
         build_download_widgets, build_history_widgets,
         build_parse_widgets, build_settings_widgets,
     )
+    from .i18n import tr
     from .resources import APP_DISPLAY_NAME, APP_NAME, APP_VERSION, load_app_icon
     from .theme import (
         FONT_FAMILY, TYPE_BODY, current_theme_name, set_theme, subscribe_theme,
@@ -61,7 +62,7 @@ def build_main_window():
             super().__init__()
             # 窗口标题：应用名 · 版本 + 一个可读的副标题
             self.setWindowTitle(
-                f"{APP_DISPLAY_NAME} {APP_VERSION}  ·  多平台视频下载器"
+                f"{APP_DISPLAY_NAME} {APP_VERSION}  ·  {tr('app.title_suffix')}"
             )
             self.resize(1100, 760)
             self.setMinimumSize(820, 580)
@@ -83,7 +84,7 @@ def build_main_window():
             self.addSubInterface(
                 self.parse_interface,
                 FluentIcon.SEARCH,
-                "解析",
+                tr("nav.parse"),
                 position=NavigationItemPosition.TOP,
             )
             self.parse_interface.set_task_manager(self.task_manager)
@@ -94,7 +95,7 @@ def build_main_window():
             self.addSubInterface(
                 self.download_interface,
                 FluentIcon.DOWNLOAD,
-                "下载",
+                tr("nav.download"),
                 position=NavigationItemPosition.TOP,
             )
             self.download_interface.set_task_manager(self.task_manager)
@@ -105,9 +106,11 @@ def build_main_window():
             self.addSubInterface(
                 self.history_interface,
                 FluentIcon.HISTORY,
-                "历史",
+                tr("nav.history"),
                 position=NavigationItemPosition.TOP,
             )
+            # 历史页「重新解析」：把 URL 填入解析页输入框并跳转过去
+            self.history_interface.set_reparse_callback(self._reparse_from_history)
 
             # ---- 设置 -----------------------------------------------
             self.settings_interface = SettingsPage(self)
@@ -115,7 +118,7 @@ def build_main_window():
             self.addSubInterface(
                 self.settings_interface,
                 FluentIcon.SETTING,
-                "设置",
+                tr("nav.settings"),
                 position=NavigationItemPosition.BOTTOM,
             )
             # 把 GUI 偏好推到解析页：启动时一次性下发，之后设置页切换会
@@ -129,7 +132,7 @@ def build_main_window():
 
             # 主题循环按钮固定在导航栏底部
             self.theme_toggle = NavigationToolButton(FluentIcon.BRUSH)
-            self.theme_toggle.setToolTip("切换主题（在内置主题包之间循环）")
+            self.theme_toggle.setToolTip(tr("nav.theme_tooltip"))
             self.navigationInterface.addWidget(
                 routeKey="themeToggle",
                 widget=self.theme_toggle,
@@ -139,7 +142,7 @@ def build_main_window():
 
             # 关于按钮同样放底部——比「帮助」更准确
             self.about_btn = NavigationToolButton(FluentIcon.INFO)
-            self.about_btn.setToolTip("关于")
+            self.about_btn.setToolTip(tr("nav.about_tooltip"))
             self.navigationInterface.addWidget(
                 routeKey="about",
                 widget=self.about_btn,
@@ -333,6 +336,18 @@ def build_main_window():
                 parent=self,
                 position=InfoBarPosition.TOP,
                 duration=1500,
+            )
+
+        def _reparse_from_history(self, url: str) -> None:
+            """历史页「重新解析」回调：填入 URL 并跳到解析页。"""
+            current = self.parse_interface.url_input.toPlainText().strip()
+            if current:
+                self.parse_interface.url_input.setPlainText(current + "\n" + url)
+            else:
+                self.parse_interface.url_input.setPlainText(url)
+            self.stackedWidget.setCurrentWidget(self.parse_interface)
+            self.navigationInterface.setCurrentItem(
+                self.parse_interface.objectName()
             )
 
         def _show_about(self) -> None:

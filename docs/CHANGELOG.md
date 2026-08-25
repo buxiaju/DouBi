@@ -1019,6 +1019,97 @@ pipeline 自己抛出的异常分支同样优先用捕获内容，只有真的�
 
 ---
 
+## M6.14 (2026-08-25) — 代码健康 / UX / 功能 / 工程化 一揽子改进
+
+> 按「代码健康 → UX 补齐 → 功能缺口 → 工程化」四象限评审后落地的改进批次。
+> 每条都带测试，回归 687 passed / 4 skipped。
+
+### 一、代码健康
+
+| # | 改动 | 文件 |
+| --- | --- | --- |
+| 1 | **容器判定收敛**：`is_container()` 与 `media_type in (USER, MIX)` 两套发散判定统一为 `MediaItem.needs_expansion()`，pipeline 全量替换 | `core/models.py`、`core/pipeline.py` |
+| 2 | **测试提速**：引入 `pytest-xdist` 并行 + `gui`/`slow` 分层标记，全量 ~25min → ~10min | `pyproject.toml` |
+| 3 | **静态检查**：`ruff`（lint）+ `mypy`（类型）配置入 `pyproject.toml` | `pyproject.toml` |
+| 4 | **修正文档快照漂移**：DEVELOPMENT.md 快照版本对齐到 M6.13 | `docs/DEVELOPMENT.md` |
+
+### 二、UX 补齐
+
+| # | 改动 | 文件 |
+| --- | --- | --- |
+| 1 | **纯编号解析**：B 站裸 `BV/av/ep/ss/ml` 归一化为完整 URL | `platforms/bilibili/url.py` |
+| 2 | **剪贴板监听**：复制链接后自动填入解析输入框 | `ui/pages/parse.py` |
+| 3 | **解析历史**：记录 + 右键「重新解析」一键回填 | `ui/main_window.py` |
+| 4 | **重复下载策略**：`duplicate_policy`（skip/redownload/ask）+ DB 去重 | `core/models.py`、`core/pipeline.py` |
+
+### 三、功能缺口
+
+| # | 改动 | 文件 |
+| --- | --- | --- |
+| 5 | **REST/MCP 容器子项级重试**：`process_batch` 追踪 `failed_items`，REST 暴露给前端做粒度重试；修掉 `UnboundLocalError` | `core/pipeline.py`、`server/app.py` |
+
+### 四、工程化
+
+| # | 改动 | 文件 |
+| --- | --- | --- |
+| 8 | **配置热重载提示**：需重启字段（database_path/theme/language）标注 | `ui/pages/settings.py` |
+| 9 | **i18n 基础设施**：JSON 词表 + 模块级 `tr()`（不走 Qt `.ts/.qm` 工具链），`zh_CN.json` / `en.json` 双语言，设置页语言下拉，配置 `language` 字段 | `ui/i18n.py`、`ui/locales/*`、`ui/app.py`、`ui/main_window.py`、`ui/pages/settings.py`、`core/config.py` |
+| 10 | **启动闪屏时序前移**：`show_splash` 后 `app.processEvents()` 让闪屏先渲染 | `ui/app.py` |
+
+### i18n 设计取舍
+
+不用 Qt 自带 `.ts/.qm` 工具链：`lupdate`/`lrelease` 两步构建依赖工具链，且 Qt 的 `tr()` 绑死 `QObject` 子类，模块级函数和 CLI/REST 用不了。改用 **JSON 词表 + 纯函数 `tr()`**：词表人能直接读改无需编译，`tr()` 任何代码都能调，回退顺序「当前语言 → `zh_CN` → key 本身」。
+
+GUI 切语言后需重启生效（已渲染控件不自动重译），与 `database_path`/`theme` 同属「重启生效」档。本次迁移导航标签 / 窗口标题 / tooltip 等核心可见字符串，其余字符串后续按词表 key 逐步迁移即可，基础设施已就绪。
+
+### 测试
+
+新增 `tests/test_i18n.py`（14 例）：词表完整性、回退、占位符、语言切换、未知语言兜底、源语言全覆盖校验。回归 687 passed / 4 skipped。
+
+---
+
+## M6.15 (2026-08-25) — B站直播录制 + aria2 多线程引擎
+
+> 把两项「需要外部环境」的功能做成了可独立测试的形态：
+> 直播录制的 URL 识别 / 类型映射 / 引擎适配可单测；
+> aria2 引擎用注入式 RPC 客户端，测试用 Mock 不依赖 aria2 二进制。
+
+### 三-6 B站直播录制
+
+| 层 | 改动 | 文件 |
+| --- | --- | --- |
+| URL 识别 | 新增 `BilibiliURLType.LIVE`，匹配 `live.bilibili.com/{room_id}`（含 h5/blanc 前缀和查询参数） | `platforms/bilibili/url.py` |
+| 适配器映射 | `LIVE → MediaType.LIVE`，加入 `url_patterns` 和 `supported_media_types` | `platforms/bilibili/adapter.py` |
+| extractor 识别 | `_classify_media_type` 识别 yt-dlp 的 `BiliBiliLive` extractor key | `platforms/bilibili/api.py` |
+| 引擎适配 | 直播流不 `merge_output_format`（HLS 无片尾）、`live_from_start`（时移录制）、`fragment_retries=10`（断流重连） | `engines/yt_dlp.py` |
+
+设计取舍：直播录制的真实循环（断流重连、时移边界、房间状态查询）需要真实直播流才能端到端验证，这部分留给集成测试。本次落地的是「识别 + 路由 + 引擎参数」三层，每一层都纯函数可单测，是直播功能的可靠地基。
+
+### 三-7 aria2 多线程引擎
+
+| 层 | 改动 | 文件 |
+| --- | --- | --- |
+| 引擎实现 | `Aria2Engine`：JSON-RPC 客户端、`addUri` / `tellStatus` / `remove` 三方法、进度轮询、取消、续传 | `engines/aria2.py`（新增） |
+| 配置 | `engine`（yt-dlp / aria2）、`aria2_rpc_url`、`aria2_secret` | `core/config.py` |
+| 引擎选择 | `build_default_engine(cfg)` 按配置选引擎，未知引擎名回退 yt-dlp | `core/engine_loader.py` |
+
+设计取舍：
+
+aria2 是纯下载器（不解析网页），所以 `Aria2Engine.supports()` 只认有 `item.extra["direct_url"]` 的 item——没有直链的 item 自动回退 yt-dlp。aria2 引擎的角色是「加速下载后端」，不取代 yt-dlp 的网页解析。
+
+RPC 客户端是注入的（`Aria2RpcClient` Protocol），测试用内存 Mock 验证 `addUri` 参数构造、进度轮询、取消逻辑，不依赖 aria2 二进制。生产用 `_HttpxAria2Client`（基于 httpx，直接发 JSON-RPC）。
+
+### 测试
+
+| 文件 | 用例数 | 覆盖 |
+| --- | --- | --- |
+| `test_bilibili_adapter.py` | +8 | LIVE URL 识别（plain/h5/query）、不误吞 SPACE、match_url、类型映射、extractor 识别、supported_media_types |
+| `test_aria2_engine.py` | 18（新增文件） | supports、_build_options（fragments/rate_limit/proxy/ua/resume/omission）、download（success/error/cancel/no_url/addUri_failure）、engine_loader（default/aria2/unknown/pipeline）、辅助函数 |
+
+回归 687 + 8 + 18 = 713 passed / 4 skipped。
+
+---
+
 ## 0.1.0 统计（保留历史快照）
 - 源码 62 个 .py 文件，约 12,100 行
 - 测试 19 个文件，385 个用例收集：**381 passed / 4 skipped**

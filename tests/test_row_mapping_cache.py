@@ -30,6 +30,9 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 
+pytestmark = pytest.mark.gui
+
+
 def _require_gui() -> None:
     try:
         import PySide6  # noqa: F401

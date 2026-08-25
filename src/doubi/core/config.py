@@ -48,6 +48,16 @@ DEFAULTS: dict[str, Any] = {
     # GUI 行为偏好：下载前是否弹出选项对话框让用户覆盖画质/容器等。
     # 默认 False 是有意为之——绝大多数下载用户就是「点一下就走」。
     "prompt_before_download": False,
+    # 重复下载策略：skip（跳过）/ redownload（重新下载）/ ask（询问）
+    "duplicate_policy": "skip",
+    # UI 语言。空串/未知值回退到 zh_CN。GUI 切换后需重启生效。
+    "language": "zh_CN",
+    # 下载引擎：yt-dlp（默认）/ aria2。aria2 需要 aria2 守护进程运行。
+    "engine": "yt-dlp",
+    # aria2 RPC 地址。aria2 守护进程的 JSON-RPC 端点。
+    "aria2_rpc_url": "http://127.0.0.1:6800/jsonrpc",
+    # aria2 RPC secret token（可选）。
+    "aria2_secret": None,
 }
 
 
@@ -74,6 +84,11 @@ class AppConfig:
     manifest_path: Path = Path(DEFAULTS["manifest_path"])
     theme: str = DEFAULTS["theme"]
     prompt_before_download: bool = DEFAULTS["prompt_before_download"]
+    duplicate_policy: str = DEFAULTS["duplicate_policy"]
+    language: str = DEFAULTS["language"]
+    engine: str = DEFAULTS["engine"]
+    aria2_rpc_url: str = DEFAULTS["aria2_rpc_url"]
+    aria2_secret: Optional[str] = DEFAULTS["aria2_secret"]
     extra: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -169,5 +184,10 @@ def load_config(path: Optional[Path] = None, *, env_prefix: str = "DOUBI_") -> A
             data.get("prompt_before_download", DEFAULTS["prompt_before_download"]),
             DEFAULTS["prompt_before_download"],
         ),
+        duplicate_policy=str(data.get("duplicate_policy", DEFAULTS["duplicate_policy"])),
+        language=str(data.get("language", DEFAULTS["language"])),
+        engine=str(data.get("engine", DEFAULTS["engine"])),
+        aria2_rpc_url=str(data.get("aria2_rpc_url", DEFAULTS["aria2_rpc_url"])),
+        aria2_secret=data.get("aria2_secret", DEFAULTS["aria2_secret"]),
     )
     return cfg

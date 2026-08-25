@@ -105,8 +105,32 @@ class BilibiliAdapter(PlatformAdapter):
         re.compile(r"https?://(?:www\.)?bilibili\.com/space\.bilibili\.com/"),
         re.compile(r"https?://space\.bilibili\.com/"),
         re.compile(r"https?://(?:www\.)?bilibili\.com/(?:favlist|watchlater|history|v/popular|list)/"),
+        re.compile(r"https?://live\.bilibili\.com/"),
         re.compile(r"https?://b23\.tv/"),
     ]
+
+    # 裸编号也要被 ``PlatformRegistry.detect()`` 认出来，否则用户在
+    # GUI 里粘贴 ``BV1GJ411x7h7`` 会被路由到 UNKNOWN / 抖音。下面这个
+    # pattern 列表与 ``url.py::_BARE_ID_PATTERNS`` 是同一组编号前缀，
+    # 但这里以 ``match_url`` 的形式存在，与基类的 URL pattern 列表是
+    # 互补关系。
+    _bare_id_pattern = re.compile(
+        r"^(?:"
+        r"BV1[1-9A-HJ-NP-Za-km-z]{9}"   # BV
+        r"|av\d+"                        # av
+        r"|ep\d+"                        # ep
+        r"|ss\d+"                        # ss
+        r"|ml\d+"                        # ml
+        r")$"
+    )
+
+    def match_url(self, url: str) -> bool:
+        if not url:
+            return False
+        if any(p.search(url) for p in self.url_patterns):
+            return True
+        # 裸编号：strip 后整体匹配，不与 URL 片段冲突。
+        return bool(self._bare_id_pattern.match(url.strip()))
 
     def __init__(self):
         cookies_file = load_cookie_file()
@@ -141,6 +165,7 @@ class BilibiliAdapter(PlatformAdapter):
         return [t.value for t in (
             MediaType.VIDEO, MediaType.BANGUMI, MediaType.COURSE,
             MediaType.FAVLIST, MediaType.MIX, MediaType.AUDIO,
+            MediaType.LIVE,
         )]
 
     def available_strategies(self) -> list[ContainerStrategy]:
@@ -179,6 +204,14 @@ class BilibiliAdapter(PlatformAdapter):
 
     async def parse(self, url: str) -> Optional[MediaItem]:
         classified = classify_bilibili_url(url)
+
+        # 裸编号（BV/av/ep/ss/ml）归一化：classify 已经把它识别出来，
+        # 这里用 normalized_url 替换原始输入，下游 fetch / build_engine_url
+        # 拿到的都是完整 URL。raw 仍保留在 classified.raw 供溯源。
+        if classified.type is not BilibiliURLType.UNKNOWN \
+                and classified.type is not BilibiliURLType.SHORT \
+                and classified.normalized_url:
+            url = classified.normalized_url
 
         # Short link → resolve → re-classify
         if classified.type is BilibiliURLType.SHORT:
@@ -942,6 +975,8 @@ def _classify_single_type(url_type: BilibiliURLType) -> Optional[MediaType]:
         return MediaType.BANGUMI
     if url_type is BilibiliURLType.COURSE:
         return MediaType.COURSE
+    if url_type is BilibiliURLType.LIVE:
+        return MediaType.LIVE
     return None
 
 

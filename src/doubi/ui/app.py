@@ -98,11 +98,20 @@ def main(argv: list[str] | None = None) -> int:
     # 显示启动闪屏——主窗口构建 + qasync loop 启动期间是几十毫秒
     # 的黑屏期，挂一张品牌图让用户先认得「打开的是豆比」。
     splash = None if args.no_splash else show_splash(app)
+    # 让闪屏先实际渲染出来：``build_main_window`` 内部的延迟 import
+    # （PySide6 / qfluentwidgets / pages）有几十毫秒开销，不 pump 事件
+    # 闪屏会卡在「还没画出来」的状态，等于白 show。
+    if splash is not None:
+        app.processEvents()
 
     # 必须在建窗口之前定主题：各页面构造时会按当前 token 取色。
     # load_config 内部已处理 DOUBI_THEME 环境变量与配置文件。
     theme_name = args.theme or load_config(None).theme
     set_theme(theme_name)
+    # 语言同主题：建窗前定下来，导航标签等首次渲染就走正确词表。
+    # i18n 模块不 import Qt，可和 theme 一样安全早导。
+    from .i18n import set_language
+    set_language(load_config(None).language)
 
     if not args.no_event_loop:
         loop = QEventLoop(app)

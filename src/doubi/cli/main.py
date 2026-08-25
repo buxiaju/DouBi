@@ -1,4 +1,4 @@
-﻿"""DouBi CLI — entry point.
+"""DouBi CLI — entry point.
 
 Subcommands:
     doubi platforms          list registered platform adapters
@@ -254,6 +254,7 @@ def _build_options(args: argparse.Namespace, cfg: AppConfig | None = None) -> Do
         write_danmaku=_pick(args.danmaku, cfg.write_danmaku),
         write_subtitles=_pick(args.subtitles, cfg.write_subtitles),
         resume=_pick(args.resume, cfg.resume),
+        duplicate_policy=cfg.duplicate_policy,
         rate_limit=_pick(args.rate_limit, cfg.rate_limit),
         proxy=_pick(args.proxy, cfg.proxy),
         database=database,

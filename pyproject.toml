@@ -62,7 +62,9 @@ mcp = [
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
+    "pytest-xdist>=3.0",
     "ruff>=0.4.0",
+    "mypy>=1.8",
     "httpx>=0.25",           # for testing the FastAPI server
 ]
 all = [
@@ -91,14 +93,62 @@ testpaths = ["tests"]
 filterwarnings = [
     "ignore::DeprecationWarning",
 ]
+# 分层 marker：日常增量跑只跑逻辑层，GUI/慢测试按需触发。
+#   pytest -m "not slow"           # 快速回归（~5 min）
+#   pytest -m "not gui"            # 跳过需要 Qt offscreen 的用例
+#   pytest -m "gui"                # 只跑 GUI
+#   pytest -m "slow"               # 只跑慢测试
+markers = [
+    "gui: tests that need a Qt offscreen platform (PySide6 / qfluentwidgets)",
+    "slow: tests that take >5s (real Qt rendering, full DB migrations, etc.)",
+]
+# xdist: GUI 测试必须串行——PySide6 / qfluentwidgets 有全局状态
+# (QApplication、主题调色板)，多 worker 同时初始化会互相覆盖。
+# ``--dist worksteal`` 比 ``loadfile`` 更均衡：快文件会被偷走执行。
+addopts = "-p no:cacheprovider"
 
 [tool.ruff]
 target-version = "py310"
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "W"]
+# E/F/W: 基础 pycodestyle + pyflakes
+# I:   import 排序（isort 替代），防止 adapter/api/url 之间的导入顺序漂移
+# UP:  pyupgrade，把过时写法（``Optional[X]`` → ``X | None`` 等）保持一致
+select = ["E", "F", "W", "I", "UP"]
 # E402: 仓库所有 tests/ 文件都用 ``sys.path.insert(0, SRC)`` 在 import
 # 前改 path（不 install 也能跑），这必然违反「import 在最上」。这条 ignore
 # 属于测试环境的固有限制，不是规则漏洞。
-ignore = ["E501", "E402"]
+# UP006/UP007: ``Optional[X]`` / ``Union[X, Y]`` 在 ``from __future__ import annotations``
+# 下是惰性的，pyupgrade 会改成 ``X | None`` —— 但 dataclass 的字段类型在
+# 运行期被 ``dataclasses.fields()`` 读取，``X | None`` 在 3.10 下不是合法
+# 运行期类型（PEP 604 需 3.10+，但 ``isinstance`` 和某些第三方库的运行期
+# 内省路径在 3.10 上仍有边界 case）。保持 ``Optional[X]`` 写法更安全。
+ignore = ["E501", "E402", "UP006", "UP007"]
+
+[tool.ruff.lint.per-file-ignores]
+# tests/ 的 ``sys.path`` hack 与 import 排序互斥，单独忽略 I001。
+"tests/**" = ["I001"]
+
+[tool.mypy]
+python_version = "3.10"
+# 项目用 ``from __future__ import annotations``，mypy 能理解 PEP 563。
+# 但下游库（PySide6 / qfluentwidgets / yt-dlp）没有 stubs，全量严格会
+# 产生大量第三方 noise。以下配置走「宽松 + 重点关注项目自身类型错误」
+# 路线：不开 ``strict``，但开最关键的几个检查。
+warn_return_any = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+check_untyped_defs = true
+# 第三方库存放在 ignored modules 里，避免 noise 淹没真正的项目类型错误。
+ignore_missing_imports = true
+# 只检查 src/ —— tests/ 里有大量 monkeypatch / MagicMock 的动态行为，
+# mypy 检查测试代码的 ROI 太低。
+files = ["src/doubi"]
+
+# 对项目里最关键的类型契约（DownloadOptions / MediaItem / ThemePack 的
+# dataclass 字段完整性）开严格模式：任何字段类型漂移都会被抓住。
+[[tool.mypy.overrides]]
+module = ["doubi.core.models", "doubi.core.config"]
+strict = true

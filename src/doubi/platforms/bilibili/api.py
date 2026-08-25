@@ -71,13 +71,16 @@ def _parse_timestamp(value: Any) -> Optional[datetime]:
 
 
 def _classify_media_type(info: dict) -> MediaType:
-    """B 站 mapping: bangumi/cheese are special; everything else is video."""
+    """B 站 mapping: bangumi/cheese/live are special; everything else is video."""
     ie_key = (info.get("ie_key") or "").lower()
     extractor = (info.get("extractor") or "").lower()
     if "bangumi" in ie_key or "bangumi" in extractor:
         return MediaType.BANGUMI
     if "cheese" in ie_key or "cheese" in extractor:
         return MediaType.COURSE
+    # yt-dlp 的直播 extractor ie_key 是 "BiliBiliLive"
+    if "live" in ie_key or "live" in extractor:
+        return MediaType.LIVE
     return MediaType.VIDEO
 
 

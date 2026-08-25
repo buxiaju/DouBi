@@ -1,6 +1,6 @@
 # DouBi 架构说明
 
-> 版本：M6.12 快照（2026-08-24） · 对应 `INTEGRATION_PLAN.md` 的 M0–M6 与 `CHANGELOG.md` 的 M6.1–M6.12
+> 版本：M6.15 快照（2026-08-25） · 对应 `INTEGRATION_PLAN.md` 的 M0–M6 与 `CHANGELOG.md` 的 M6.1–M6.15
 
 ## 1. 分层
 
@@ -10,27 +10,32 @@
 │   cli/        doubi <download|auth|live|serve|mcp>          │
 │   ui/         doubi-gui（PySide6 Fluent，7 套主题包）        │
 │                theme.py = token 表 + set_theme 全局广播      │
+│                i18n.py  = JSON 词表 + tr() 模块级翻译（M6.14）│
+│                locales/ = zh_CN.json / en.json 词表          │
 │   server/     doubi-serve（FastAPI REST）                    │
 │   mcp/        doubi-mcp（stdio JSON-RPC）                    │
 ├─────────────────────────────────────────────────────────────┤
 │ core/（平台无关内核）                                         │
 │   models.py        MediaItem / Stream / DownloadJob / ...   │
+│                    needs_expansion() 统一容器判定（M6.14）   │
 │   registry.py      PlatformRegistry（自注册）                 │
 │   pipeline.py      解析 → 容器展开 → 下载 → 记录             │
 │   naming.py        文件名模板渲染 + 净化                     │
-│   engine_loader.py build_default_pipeline()                 │
+│   engine_loader.py build_default_pipeline(cfg) 按配置选引擎  │
 │   storage/         database.py / file_layout.py /           │
 │                    manifest.py / migrate.py                 │
 │   auth/            browser_login.py（Playwright）            │
 ├─────────────────────────────────────────────────────────────┤
-│ engines/（传输层）                                            │
-│   yt_dlp.py        YtDlpEngine（to_thread 包装）             │
+│ engines/（传输层，可按配置切换）                               │
+│   yt_dlp.py        YtDlpEngine（默认，解析+下载一体）          │
+│   aria2.py         Aria2Engine（M6.15，多线程分片下载后端）   │
 ├─────────────────────────────────────────────────────────────┤
 │ platforms/（平台适配器，自注册）                               │
 │   douyin/    adapter / api / auth / strategies / url / live /
 │              webapi（签名 Web API）/ sign（a_bogus / x_bogus）
 │   bilibili/  adapter / api / auth / strategies / url /              │
-│              qr_login / wbi                                 │
+│              qr_login / wbi                                  │
+│              （M6.15 起 url.py 识别 live.bilibili.com 直播）  │
 │   youtube/  adapter / url（URL 分类 + yt-dlp extract_info）   │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -41,13 +46,18 @@
 URL → PlatformRegistry.detect() → adapter.parse(url)
    → MediaItem（单条）或容器（USER/FAVLIST/MIX，children=[]）
    → pipeline.process_url():
-        容器?（is_container() 或 media_type ∈ {USER, MIX}）
+        容器?（item.needs_expansion() —— M6.14 起统一判定）
              → adapter.expand(strategy) → process_batch(children)
         单条? → naming.set_item_output_template(item)
-              → engine.download(item, options)   # yt-dlp
+              → engine.download(item, options)   # yt-dlp 或 aria2
               → Database.record_download()        # media_item 表
               → ManifestWriter.record()           # JSONL 追加
 ```
+
+**引擎选择**（M6.15）：`build_default_engine(cfg)` 按 `cfg.engine` 选择。
+默认 `yt-dlp`（解析+下载一体）；选 `aria2` 时 `Aria2Engine` 只对有
+`item.extra["direct_url"]` 的 item 生效（纯下载器，不解析网页），其余回退 yt-dlp。
+详见 §7 与 `DEVELOPMENT.md §7.3`。
 
 **B 站「带分类的合集」是三层嵌套**（view API 的 `data.ugc_season`），GUI 解析页按需逐层展开：
 
@@ -65,8 +75,11 @@ season（合集）
 `iesdouyin.com/share/mix/detail/{mix_id}/` 分享链 → `MediaType.MIX` 壳（children 解析时不填）。
 yt-dlp **没有**抖音合集/用户页抽取器，展开完全走签名 Web API
 （`platforms/douyin/webapi.py`，a_bogus 签名 + 反爬重试，详见 `DEVELOPMENT.md` §14.6）。
-因为 `is_container()` 只看 children 非空，pipeline 的容器判定必须写成
-`is_container() or media_type in (USER, MIX)`——这也是 B 站 LIST 合集的同一形态。
+因为 `is_container()` 只看 children 非空，pipeline 的容器判定统一收敛为
+`item.needs_expansion()`（M6.14）——它同时覆盖「children 非空」和
+「`media_type ∈ CONTAINER_MEDIA_TYPES`（USER/MIX/FAVLIST 等）」两种情况，
+替代了过去散落在 pipeline 里的 `is_container() or media_type in (USER, MIX)` 写法。
+这也是 B 站 LIST 合集的同一形态。
 
 关键约定：
 
@@ -344,3 +357,127 @@ windowIconChanged 信号 → 标题栏 / 任务栏 / Alt+Tab 同步换色
 
 详细技术细节（QtSvg 滤镜 bug / 7 套主题预览图 / 任务栏图标资源嵌入）见
 [docs/ICONS.md](./ICONS.md)。
+
+## 10. i18n 基础设施（M6.14）
+
+`ui/i18n.py` 是**模块级翻译函数**，不绑 Qt 的 `QObject.tr()`——因为 CLI / REST /
+日志也需要翻译，而它们不在 `QObject` 继承树里。
+
+### 为什么不用 Qt `.ts` / `.qm` 工具链
+
+| 维度 | Qt `.ts/.qm` | 本项目 JSON 词表 |
+| --- | --- | --- |
+| 构建 | `lupdate` 扫源码 → `lrelease` 编译，两步依赖工具链 | 无构建步骤，JSON 直接读 |
+| 调用点 | 必须 `QObject` 子类内 `self.tr()` | 任何代码 `from ..i18n import tr; tr("key")` |
+| 覆盖面 | GUI 专用，CLI / REST 用不了 | GUI / CLI / REST / 日志通用 |
+| 词表格式 | XML（`.ts`）/ 二进制（`.qm`） | JSON，人能直接读改 |
+| 切语言 | `QTranslator` 加载，需重 emit `LanguageChange` | `set_language(lang)`，全局立即生效 |
+
+### 核心机制
+
+```
+translate(key, **kwargs)
+    ↓ 查当前语言词表 _tables[current]
+    ↓ 没找到 → 回退 _tables[zh_CN]（源语言）
+    ↓ 还没找到 → 返回 key 本身（漏译不崩，最坏显示 key）
+    ↓ str.format(**kwargs)（占位符支持）
+```
+
+* **词表位置**：`ui/locales/{zh_CN,en}.json`，首次访问时加载并缓存。
+* **回退顺序**：当前语言 → `zh_CN`（源语言/兜底）→ key 原样返回。
+* **GUI 切语言需重启**：已渲染的 Qt 控件不会自动重译（Qt `.qm` 方案也做不到，
+  除非逐个 `retranslateUi`）。所以 `language` 和 `database_path` / `theme`
+  一样属于「重启生效」档，设置页会提示。
+* **新增字符串**：往 `locales/zh_CN.json` 和对应语言文件加同一把 key，不需改 `i18n.py`。
+* **测试守卫**：`test_i18n.py` 要求非源语言覆盖源语言全部 key，漏译会红测。
+
+### 已迁移的字符串
+
+本次只迁移了导航标签 / 窗口标题 / tooltip 等核心可见字符串。其余 UI 字符串
+（状态文案、对话框文本等）后续按词表 key 逐步迁移即可，基础设施已就绪。
+
+## 11. B 站直播录制（M6.15）
+
+### 三层架构
+
+直播录制走和点播同一套 pipeline，区别只在三层适配：
+
+| 层 | 改动 | 文件 |
+| --- | --- | --- |
+| **URL 识别** | 新增 `BilibiliURLType.LIVE`，匹配 `live.bilibili.com/{room_id}`（含 `h5/`、`blanc/` 前缀和查询参数） | `platforms/bilibili/url.py` |
+| **类型映射** | `LIVE → MediaType.LIVE`；适配器 `url_patterns` 和 `supported_media_types` 收录 LIVE；`_classify_media_type` 识别 yt-dlp 的 `BiliBiliLive` extractor | `platforms/bilibili/adapter.py`、`api.py` |
+| **引擎适配** | 直播流不设 `merge_output_format`（HLS 无片尾，中途 remux 会失败）；`live_from_start=True`（从开播时间点时移录制）；`fragment_retries=10`（断流重连） | `engines/yt_dlp.py::_build_opts` |
+
+### 直播与点播的本质区别
+
+| 维度 | 点播 | 直播 |
+| --- | --- | --- |
+| 流形态 | 完整文件 | HLS 分片，无片尾 |
+| `merge_output_format` | 设 `mp4` / `mkv`，结束时 remux | **不设**——直播中途 remux 会失败 |
+| 时移 | 不适用 | `live_from_start` 从开播点开始录 |
+| 断流 | `fragment_retries=3` | `fragment_retries=10`（直播断流常见） |
+| 取消 | 协作式 `cancel_check` | 同（复用 `YtDlpEngine` 机制） |
+
+### 测试边界
+
+本次落地的是「识别 + 路由 + 引擎参数」三层，每一层都纯函数可单测
+（`test_bilibili_adapter.py` +8 例）。真实直播循环（断流重连、时移边界、
+房间状态查询）需要真实直播流才能端到端验证，留给集成测试。
+
+## 12. aria2 多线程引擎（M6.15）
+
+### 角色定位
+
+aria2 是**纯下载器**（不解析网页），与 yt-dlp 互补：
+
+| 引擎 | 解析网页 | 多线程分片 | 适用 |
+| --- | --- | --- | --- |
+| `YtDlpEngine`（默认） | ✅ yt-dlp extract_info | 单连接 | 默认，平台覆盖最广 |
+| `Aria2Engine` | ❌ 只接 `direct_url` | ✅ 多连接 | 大文件 / 慢源加速 |
+
+### 工作流
+
+```
+item.extra["direct_url"] 存在?
+    ├── 是 → Aria2Engine.supports() = True
+    │        → addUri([direct_url], aria2_opts)
+    │        → 轮询 tellStatus(gid) 上报进度
+    │        → cancel_check 触发时 remove(gid)
+    └── 否 → supports() = False → pipeline 回退 YtDlpEngine
+```
+
+### RPC 协议
+
+aria2 守护进程通过 JSON-RPC 2.0 over HTTP 控制：
+
+| 方法 | 用途 |
+| --- | --- |
+| `aria2.addUri(uris, options)` | 加任务，返回 GID |
+| `aria2.tellStatus(gid)` | 查进度（`completedLength` / `totalLength` / `status`） |
+| `aria2.remove(gid)` | 取消任务 |
+
+生产用 `_HttpxAria2Client`（基于 httpx，直接发 JSON-RPC）；
+测试用注入式 Mock 客户端（`Aria2RpcClient` Protocol），不依赖 aria2 二进制。
+
+### 配置
+
+| 字段 | 默认值 | 说明 |
+| --- | --- | --- |
+| `engine` | `yt-dlp` | 引擎选择：`yt-dlp` / `aria2` |
+| `aria2_rpc_url` | `http://127.0.0.1:6800/jsonrpc` | aria2 RPC 端点 |
+| `aria2_secret` | `None` | RPC token（可选） |
+
+未知引擎名回退 yt-dlp，避免配置写错让应用起不来。
+
+### 参数映射
+
+`Aria2Engine._build_options()` 把 `DownloadOptions` 映射成 aria2 参数：
+
+| DownloadOptions | aria2 参数 |
+| --- | --- |
+| `concurrent_fragments` | `split` + `max-connection-per-server` |
+| `rate_limit` | `max-download-limit`（透传 `5M` 格式） |
+| `proxy` | `all-proxy` |
+| `user_agent` | `user-agent` |
+| `resume` | `continue` |
+
