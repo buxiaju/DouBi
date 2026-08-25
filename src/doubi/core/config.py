@@ -58,6 +58,17 @@ DEFAULTS: dict[str, Any] = {
     "aria2_rpc_url": "http://127.0.0.1:6800/jsonrpc",
     # aria2 RPC secret token（可选）。
     "aria2_secret": None,
+    # ---- 通用嗅探（generic adapter） ----
+    # 详见 docs/superpowers/specs/2026-08-25-generic-sniffer-design.md
+    "sniff_duration_sec": 15,            # 嗅探时长 5–60 秒
+    "sniff_headless": True,             # 后台跑无头浏览器
+    "sniff_user_agent": "",             # 空串用 Playwright 默认 UA
+    "sniff_auto_play": True,            # 自动调 video.play() 触发 m3u8 加载
+    "sniff_capture_types": (            # network response 拦截的 MIME 白名单
+        "video/mp4", "video/webm", "video/mp2t",
+        "application/vnd.apple.mpegurl",
+        "application/dash+xml",
+    ),
 }
 
 
@@ -89,6 +100,12 @@ class AppConfig:
     engine: str = DEFAULTS["engine"]
     aria2_rpc_url: str = DEFAULTS["aria2_rpc_url"]
     aria2_secret: Optional[str] = DEFAULTS["aria2_secret"]
+    # ---- 通用嗅探（generic adapter） ----
+    sniff_duration_sec: int = DEFAULTS["sniff_duration_sec"]
+    sniff_headless: bool = DEFAULTS["sniff_headless"]
+    sniff_user_agent: str = DEFAULTS["sniff_user_agent"]
+    sniff_auto_play: bool = DEFAULTS["sniff_auto_play"]
+    sniff_capture_types: tuple[str, ...] = DEFAULTS["sniff_capture_types"]
     extra: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -189,5 +206,19 @@ def load_config(path: Optional[Path] = None, *, env_prefix: str = "DOUBI_") -> A
         engine=str(data.get("engine", DEFAULTS["engine"])),
         aria2_rpc_url=str(data.get("aria2_rpc_url", DEFAULTS["aria2_rpc_url"])),
         aria2_secret=data.get("aria2_secret", DEFAULTS["aria2_secret"]),
+        sniff_duration_sec=_coerce(
+            data.get("sniff_duration_sec", DEFAULTS["sniff_duration_sec"]),
+            DEFAULTS["sniff_duration_sec"],
+        ),
+        sniff_headless=_coerce(
+            data.get("sniff_headless", DEFAULTS["sniff_headless"]),
+            DEFAULTS["sniff_headless"],
+        ),
+        sniff_user_agent=str(data.get("sniff_user_agent", DEFAULTS["sniff_user_agent"])),
+        sniff_auto_play=_coerce(
+            data.get("sniff_auto_play", DEFAULTS["sniff_auto_play"]),
+            DEFAULTS["sniff_auto_play"],
+        ),
+        sniff_capture_types=tuple(data.get("sniff_capture_types", DEFAULTS["sniff_capture_types"])),
     )
     return cfg

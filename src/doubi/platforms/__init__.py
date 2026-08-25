@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from . import bilibili  # noqa: F401  (side-effect: register adapter)
 from . import douyin    # noqa: F401  (side-effect: register adapter)
+from . import generic   # noqa: F401  (side-effect: register adapter; priority=-1 兜底)
 from . import youtube   # noqa: F401  (side-effect: register adapter)
 from .base import PlatformAdapter
 

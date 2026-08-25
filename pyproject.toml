@@ -119,12 +119,13 @@ select = ["E", "F", "W", "I", "UP"]
 # E402: 仓库所有 tests/ 文件都用 ``sys.path.insert(0, SRC)`` 在 import
 # 前改 path（不 install 也能跑），这必然违反「import 在最上」。这条 ignore
 # 属于测试环境的固有限制，不是规则漏洞。
-# UP006/UP007: ``Optional[X]`` / ``Union[X, Y]`` 在 ``from __future__ import annotations``
+# UP006/UP007/UP045: ``Optional[X]`` / ``Union[X, Y]`` 在 ``from __future__ import annotations``
 # 下是惰性的，pyupgrade 会改成 ``X | None`` —— 但 dataclass 的字段类型在
 # 运行期被 ``dataclasses.fields()`` 读取，``X | None`` 在 3.10 下不是合法
 # 运行期类型（PEP 604 需 3.10+，但 ``isinstance`` 和某些第三方库的运行期
 # 内省路径在 3.10 上仍有边界 case）。保持 ``Optional[X]`` 写法更安全。
-ignore = ["E501", "E402", "UP006", "UP007"]
+# UP045 是 ``Optional[X]`` → ``X | None`` 的转换规则，与 UP006/UP007 同源。
+ignore = ["E501", "E402", "UP006", "UP007", "UP045"]
 
 [tool.ruff.lint.per-file-ignores]
 # tests/ 的 ``sys.path`` hack 与 import 排序互斥，单独忽略 I001。

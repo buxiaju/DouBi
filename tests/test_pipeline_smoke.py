@@ -106,8 +106,11 @@ def test_registry_detect_bilibili():
     assert adapter.platform is Platform.BILIBILI
 
 
-def test_registry_detect_unknown_returns_none():
-    assert PlatformRegistry.detect("https://example.com/something") is None
+def test_registry_detect_unknown_falls_back_to_generic():
+    """不认识的 URL 走 generic adapter 兜底（M6.16）。"""
+    adapter = PlatformRegistry.detect("https://example.com/something")
+    assert adapter is not None
+    assert adapter.name == "generic"
 
 
 # ---------------------------------------------------------------------------
@@ -197,13 +200,19 @@ def test_pipeline_parse_bilibili_bangumi():
     assert item.item_id == "ss12345"
 
 
-def test_pipeline_process_url_unknown_returns_none():
+def test_pipeline_process_url_unknown_returns_sniff_error_item():
+    """不认识的 URL 现在走 generic adapter——测试环境无 Playwright 时
+    返回带「[嗅探失败]」标题的错误 MediaItem，而不是 None（M6.16）。"""
     pipeline = DownloadPipeline(engine=_FakeEngine())
     item = asyncio.run(pipeline.process_url(
         "https://example.com/something",
         DownloadOptions(output_root=Path("./_test_out")),
     ))
-    assert item is None
+    assert item is not None
+    assert item.platform is Platform.GENERIC
+    assert "嗅探失败" in item.title or "嗅探" in item.title
+    # 错误原因在 extra 里
+    assert "sniff_error" in item.extra or "sniffed_from" in item.extra
 
 
 def test_pipeline_process_url_uses_fake_engine():

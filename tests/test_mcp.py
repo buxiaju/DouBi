@@ -110,7 +110,14 @@ def test_call_parse_url_missing_argument_returns_error_in_content():
     assert "url" in payload["error"]
 
 
-def test_call_parse_url_unknown_returns_error_in_content():
+def test_call_parse_url_unknown_returns_generic_sniff_error():
+    """不认识的 URL 走 generic adapter，测试环境无 Playwright 时返回
+    带「嗅探失败」标题的 MediaItem payload（M6.16 新增）。
+
+    之前是返回 ``{"error": "no platform matches ..."}``——M6.16 加了
+    GenericAdapter 兜底后，unknown URL 不再无匹配，而是被 generic 接住
+    尝试嗅探。测试环境无 Playwright → 返回错误 item。
+    """
     async def _run():
         return await mcp_server._dispatch({
             "jsonrpc": "2.0", "id": 12, "method": "tools/call",
@@ -118,8 +125,9 @@ def test_call_parse_url_unknown_returns_error_in_content():
         })
     resp = asyncio.run(_run())
     payload = json.loads(resp["result"]["content"][0]["text"])
-    assert "error" in payload
-    assert "no platform matches" in payload["error"]
+    # 不再返回 error 字段——而是返回错误 MediaItem 的 payload
+    assert payload["platform"] == "generic"
+    assert "嗅探" in payload["title"] or "Playwright" in payload["title"]
 
 
 def test_call_parse_url_bilibili_succeeds():

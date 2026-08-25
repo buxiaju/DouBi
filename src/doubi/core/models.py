@@ -30,6 +30,9 @@ class Platform(str, Enum):
     TIKTOK = "tiktok"
     XIAOHONGSHU = "xiaohongshu"
     WEIBO = "weibo"
+    #: 任意 URL 的兜底适配器：headless Chromium 嗅探页面里的视频直链。
+    #: 见 docs/superpowers/specs/2026-08-25-generic-sniffer-design.md。
+    GENERIC = "generic"
     UNKNOWN = "unknown"
 
     @classmethod

@@ -25,6 +25,7 @@ from .models import (
 )
 from .registry import PlatformRegistry
 
+
 # Lazy imports to keep `doubi.core` importable without optional deps
 def _import_naming():
     """Lazy import: avoid circular import + let platforms opt out."""
@@ -138,6 +139,7 @@ class DownloadPipeline:
         *,
         max_retries: int = 0,
         retry_backoff: float = DEFAULT_RETRY_BACKOFF,
+        extra_engines: Optional[list[Any]] = None,
     ):
         """
         ``max_retries`` counts *extra* engine attempts, so 0 (the default)
@@ -145,11 +147,45 @@ class DownloadPipeline:
         in through :func:`core.engine_loader.build_default_pipeline`; keeping
         the primitive at 0 is what lets tests with deterministically failing
         stub engines stay fast and keep their call-count assertions exact.
+
+        ``extra_engines`` are tried first (before the default engine) when
+        routing a download: the first engine whose ``supports(item)``
+        returns True gets the download. This lets generic-sniffed m3u8
+        URLs go to :class:`M3u8Engine` while webpage URLs still go to
+        yt-dlp.
         """
         self.engine = engine
+        self._extra_engines = extra_engines or []
         self._sem = asyncio.Semaphore(max_concurrent)
         self._max_retries = max(0, int(max_retries))
         self._retry_backoff = max(0.0, float(retry_backoff))
+
+    def _select_engine(self, item: MediaItem) -> Any:
+        """Pick the right engine for *item*.
+
+        Priority:
+        1. Extra engines (m3u8, direct_http, …) — first ``supports()`` hit wins
+        2. Default engine (yt-dlp / aria2) — always the safety net
+        """
+        for eng in self._extra_engines:
+            try:
+                if eng.supports(item):
+                    available = getattr(eng, "is_available", True)
+                    if not available:
+                        logger.info("engine %s supports %s but is not available, skipping",
+                                    eng.name, item.source_url or item.item_id)
+                        continue
+                    logger.info("routing %s to %s engine (is_hls=%s, is_direct_video=%s, extra_keys=%s)",
+                                item.source_url or item.item_id, eng.name,
+                                item.extra.get("is_hls"), item.extra.get("is_direct_video"),
+                                list(item.extra.keys())[:10])
+                    return eng
+            except Exception:
+                logger.warning("extra engine %s supports() raised, skipping", eng.name, exc_info=True)
+        logger.info("routing %s to default engine (is_hls=%s, is_direct_video=%s)",
+                    item.source_url or item.item_id,
+                    item.extra.get("is_hls"), item.extra.get("is_direct_video"))
+        return self.engine
 
     # ---- public API ---------------------------------------------------
 
@@ -471,15 +507,11 @@ class DownloadPipeline:
             last_engine_error["msg"] = ""   # reset per attempt
 
             def _wrap_engine_progress(ev):
-                # Engine-side signal of a hard failure. engines.yt_dlp emits
-                # either ``"yt-dlp error: <exc>"`` (exception branch) or
-                # ``"yt-dlp reported error"`` (progress-hook status=error).
-                # Both precede ``return False`` and carry actionable info
-                # that the generic fallback doesn't.
-                if ev.message and (
-                    ev.message.startswith("yt-dlp error:")
-                    or ev.message.startswith("yt-dlp reported")
-                ):
+                # Engine-side signal of a hard failure. All engines emit
+                # error messages through the progress hook before
+                # returning False. Capture them so the final status
+                # shows the real reason instead of the generic fallback.
+                if ev.message and self._is_engine_error(ev.message):
                     last_engine_error["msg"] = ev.message
                 # Always re-emit outward: the UI needs every progress tick.
                 if on_progress:
@@ -491,7 +523,8 @@ class DownloadPipeline:
 
             async with self._sem:
                 try:
-                    ok = await self.engine.download(
+                    active_engine = self._select_engine(item)
+                    ok = await active_engine.download(
                         item, engine_options,
                         on_progress=_wrap_engine_progress,
                     )
@@ -689,6 +722,30 @@ class DownloadPipeline:
                 logger.warning("manifest write failed: %s", exc)
 
     # ---- helpers ------------------------------------------------------
+
+    #: 错误消息前缀列表——引擎通过 progress hook 报告失败时使用。
+    #: 每个引擎注册自己的前缀，pipeline 在渲染最终状态时捕获。
+    _ENGINE_ERROR_PREFIXES = (
+        "yt-dlp error:",
+        "yt-dlp reported",
+        "m3u8 download failed:",
+        "m3u8 download error:",
+        "direct_http error:",
+        "neither ffmpeg nor aiohttp",
+        "aiohttp is required",
+        "nm3u8dl",
+    )
+
+    @classmethod
+    def _is_engine_error(cls, message: str) -> bool:
+        """Return True if *message* is a known engine error prefix.
+
+        Centralizing the list here means new engines only need to
+        register their prefix in ``_ENGINE_ERROR_PREFIXES`` — the
+        pipeline's progress-wrapping code stays unchanged.
+        """
+        lower = message.lower()
+        return any(lower.startswith(p) for p in cls._ENGINE_ERROR_PREFIXES)
 
     @staticmethod
     def _emit(callback, event: ProgressEvent) -> None:

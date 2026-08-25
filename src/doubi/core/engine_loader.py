@@ -10,14 +10,15 @@ from __future__ import annotations
 
 import logging
 
-from .models import DownloadOptions
+from .. import platforms  # noqa: F401  -- ensure all platform adapters are registered on startup
+from ..engines.direct_http import DirectHttpEngine
+from ..engines.m3u8 import M3u8Engine
+from ..engines.yt_dlp import YtDlpEngine
 from .pipeline import (
     DEFAULT_MAX_RETRIES,
     DEFAULT_RETRY_BACKOFF,
     DownloadPipeline,
 )
-from ..engines.yt_dlp import YtDlpEngine
-from .. import platforms  # noqa: F401  -- ensure all platform adapters are registered on startup
 
 logger = logging.getLogger("doubi.core.engine_loader")
 
@@ -44,6 +45,39 @@ def build_default_engine(cfg=None):
     return YtDlpEngine()
 
 
+def build_extra_engines() -> list:
+    """构建引擎路由的额外引擎列表。
+
+    顺序决定优先级——越靠前越先匹配：
+    1. Nm3u8dlEngine — 首选，基于 N_m3u8DL-CLI 原生二进制（支持 AES-128 / ChaCha20 / master playlist）
+    2. M3u8Engine — 备选，基于 ffmpeg（ffmpeg 优先，aiohttp 兜底）
+    3. DirectHttpEngine — 处理直链视频文件（.mp4 / .webm 等）
+
+    这些引擎在 pipeline._select_engine 中被依次尝试，
+    都不命中时回退到默认引擎（yt-dlp / aria2）。
+    """
+    engines = []
+    try:
+        from ..engines.nm3u8dl import Nm3u8dlEngine
+        nm = Nm3u8dlEngine()
+        if nm.is_available:
+            engines.append(nm)
+            logger.info("Nm3u8dlEngine 就绪")
+        else:
+            logger.info("Nm3u8dlEngine 未找到二进制，跳过")
+    except Exception as exc:  # pragma: no cover
+        logger.warning("Nm3u8dlEngine 初始化失败: %s", exc)
+    try:
+        engines.append(M3u8Engine())
+    except Exception as exc:  # pragma: no cover
+        logger.warning("M3u8Engine 初始化失败: %s", exc)
+    try:
+        engines.append(DirectHttpEngine())
+    except Exception as exc:  # pragma: no cover
+        logger.warning("DirectHttpEngine 初始化失败: %s", exc)
+    return engines
+
+
 def build_default_pipeline(
     max_concurrent: int = 3,
     *,
@@ -65,10 +99,13 @@ def build_default_pipeline(
     factory, which every surface goes through.
 
     ``cfg`` 传入时按 ``cfg.engine`` 选择引擎（yt-dlp / aria2）。
+    同时组装额外引擎列表（M3u8Engine / DirectHttpEngine）用于
+    generic sniff 场景的引擎路由。
     """
     return DownloadPipeline(
         engine=build_default_engine(cfg),
         max_concurrent=max_concurrent,
         max_retries=max_retries,
         retry_backoff=retry_backoff,
+        extra_engines=build_extra_engines(),
     )

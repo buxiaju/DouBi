@@ -67,9 +67,16 @@ class PlatformRegistry:
 
     @classmethod
     def detect(cls, url: str) -> Optional["PlatformAdapter"]:  # type: ignore[name-defined]
-        """Return the first adapter whose URL patterns match ``url``."""
+        """Return the first adapter whose URL patterns match ``url``.
+
+        Adapters are tried in descending :attr:`priority` order — generic
+        兜底适配器（priority=-1, match_url 永真）排最后，确保 douyin /
+        bilibili / youtube 等具体平台先匹配。
+        """
         with cls._lock:
             adapters: Iterable = list(cls._by_platform.values())
+        # 高 priority 先匹配；同 priority 保持注册顺序（stable sort）。
+        adapters = sorted(adapters, key=lambda a: -a.priority)
         for adapter in adapters:
             try:
                 if adapter.match_url(url):

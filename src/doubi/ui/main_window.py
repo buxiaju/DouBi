@@ -66,6 +66,8 @@ def build_main_window():
             )
             self.resize(1100, 760)
             self.setMinimumSize(820, 580)
+            # 居中到主屏幕（多屏时取屏幕 0 可用矩形的中心）。
+            self._center_on_screen()
 
             # 应用图标：主窗口的窗口图标、任务栏图标都跟 app.setWindowIcon 走
             self._refresh_app_icon()
@@ -301,6 +303,29 @@ def build_main_window():
             title_bar.setIcon = set_icon
             self.windowIconChanged.connect(set_icon)
             set_icon(self.windowIcon())
+
+        def _center_on_screen(self) -> None:
+            """把窗口放到主屏幕（或默认屏幕）可用矩形的正中。
+
+            先读 ``frameGeometry``（包含自绘标题栏），再用
+            ``availableGeometry`` 减去任务栏偏移，避免一半被任务栏盖住。
+            多屏环境：优先用 ``QApplication.primaryScreen()``，没有再退到
+            ``screen()``。
+            """
+            from PySide6.QtGui import QGuiApplication
+
+            app = QGuiApplication.instance()
+            screen = None
+            if app is not None:
+                screen = app.primaryScreen()
+            if screen is None:
+                screen = self.screen()
+            if screen is None:
+                return
+            available = screen.availableGeometry()
+            fg = self.frameGeometry()
+            fg.moveCenter(available.center())
+            self.move(fg.topLeft())
 
         def _refresh_app_icon(self) -> None:
             """按当前主题重新渲染并挂上应用图标。

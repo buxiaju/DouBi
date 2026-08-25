@@ -30,8 +30,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field, replace
+import os
+from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QObject, Signal, Slot
@@ -403,7 +405,8 @@ class TaskManager(QObject):
                    if info.status in ("failed", "cancelled"))
 
     def retry(self, task_id: str) -> bool:
-        """Re-run a failed / cancelled task, keeping its original task_id.
+        """Re-run a failed / cancelled task, or a completed task whose
+        local output file was deleted.
 
         The :class:`TaskInfo` is moved back from ``_completed`` into
         ``_active`` with its runtime state reset, then a fresh download
@@ -413,7 +416,13 @@ class TaskManager(QObject):
         Returns ``True`` when a retry was actually started.
         """
         info = self._completed.get(task_id)
-        if info is None or info.status not in ("failed", "cancelled"):
+        if info is None:
+            return False
+        if info.status not in ("failed", "cancelled", "completed"):
+            return False
+
+        # Completed tasks are only retryable if the local file is gone.
+        if info.status == "completed" and not self._save_path_missing(info):
             return False
 
         # Avoid producing a duplicate of something already running.
@@ -430,6 +439,7 @@ class TaskManager(QObject):
         info.message = ""
         info.error = None
         info.finished_at = None
+        info.save_path = None
         info.created_at = datetime.now()
         self._active[task_id] = info
         self.task_added.emit(task_id)
@@ -448,6 +458,47 @@ class TaskManager(QObject):
             if self.retry(task_id):
                 started += 1
         return started
+
+    @staticmethod
+    def _save_path_missing(info: TaskInfo) -> bool:
+        """Return True when the task has a save_path but it no longer
+        exists locally, or when all plausible output files under the
+        item's output directory are missing.
+
+        Used by the GUI to determine if a "已完成" task should become
+        "可重新下载" because the user deleted the files.
+        """
+        if info.save_path:
+            if not Path(info.save_path).exists():
+                return True
+            # Even if save_path points to a dir or meta file, check if
+            # the directory actually contains any media-sized file.
+            # Most engines save_path is a media file itself, so the
+            # check above covers 99% of cases. We return False here
+            # (i.e., file exists → nothing to do).
+            return False
+        # No save_path recorded at all: try to rebuild via default
+        # templates from the MediaItem and see if anything is there.
+        try:
+            from ..core.storage.file_layout import resolve_item_dir
+            out_dir = resolve_item_dir(info.item, info.options)
+            if out_dir.exists():
+                # Look for files matching item's title/ basename
+                media_exts = (".mp4", ".mkv", ".flv", ".webm", ".mov", ".avi",
+                              ".m4v", ".ts", ".m4a")
+                base = (info.item.output_template
+                        or info.item.title or info.item.item_id or "").strip()
+                any_file = False
+                for p in out_dir.iterdir():
+                    if not p.is_file():
+                        continue
+                    if p.suffix.lower() in media_exts and p.stat().st_size > 1024:
+                        any_file = True
+                        break
+                return not any_file
+        except Exception:
+            return False
+        return True
 
     # ---- cross-process restore ----------------------------------------
 

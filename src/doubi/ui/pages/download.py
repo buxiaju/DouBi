@@ -228,13 +228,20 @@ def build_download_widgets():
         # ---- text helpers -------------------------------------------
 
         def _status_text(self) -> str:
+            """胶囊标签：用「缺失」代替「完成」当本地文件已被删除。"""
+            status = self.info.status
+            if status == "completed":
+                sp = self.info.save_path
+                if sp and not Path(sp).exists():
+                    return "缺失"
+                return "完成"
             return {
                 "running": "下载中",
                 "paused": "已暂停",
                 "completed": "完成",
                 "failed": "失败",
                 "cancelled": "已取消",
-            }.get(self.info.status, self.info.status)
+            }.get(status, status)
 
         def _percent_text(self, fraction: float) -> str:
             try:
@@ -251,7 +258,11 @@ def build_download_widgets():
             """A short, human-readable phase label (never a raw URL)."""
             info = self.info
             if info.status == "completed":
-                return "已保存" if info.save_path else "下载完成"
+                if not info.save_path:
+                    return "下载完成"
+                if Path(info.save_path).exists():
+                    return "已保存"
+                return "文件已删除"
             if info.status == "failed":
                 return "下载失败"
             if info.status == "cancelled":
@@ -383,9 +394,21 @@ def build_download_widgets():
             self._apply_progress_color()
             self._refresh_texts()
 
-            # Retryable states get an extra button; running/completed
-            # rows keep the column empty so widths stay aligned.
-            self.retry_btn.setVisible(info.status in ("failed", "cancelled"))
+            # Retry button is visible in three cases:
+            # 1. Failed / cancelled tasks — always retryable.
+            # 2. Completed tasks whose local output file was deleted by the
+            #    user (save_path points to a non-existent location).
+            show_retry = False
+            if info.status in ("failed", "cancelled"):
+                show_retry = True
+            elif info.status == "completed" and info.save_path:
+                show_retry = not Path(info.save_path).exists()
+            self.retry_btn.setVisible(show_retry)
+            if show_retry and info.status == "completed":
+                # Make the button label more descriptive for this case
+                self.retry_btn.setText("重新下载")
+            else:
+                self.retry_btn.setText("重试")
             self._sync_pause_btn()
 
             tip = [self._title_full, "", info.item.source_url]
@@ -602,6 +625,13 @@ def build_download_widgets():
             else:
                 self.active_card.hide()
                 self.completed_card.show()
+                # 切到「已完成」tab 时立刻刷新所有行：用户可能刚刚在
+                # 资源管理器里删除了一些文件，行的状态 / 按钮需要即时
+                # 反映，而不是等到下次 update_from。
+                for row in self._rows.values():
+                    info = self._manager.get(row.info.task_id) if self._manager else None
+                    if info is not None:
+                        row.update_from(info)
 
         # ---- manager wiring -----------------------------------------
 

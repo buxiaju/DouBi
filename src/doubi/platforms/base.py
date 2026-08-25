@@ -35,6 +35,10 @@ class PlatformAdapter(ABC):
     display_name: str = "Base"
     #: URL patterns that this adapter recognizes.
     url_patterns: list[Pattern[str]] = []
+    #: Detection priority — higher wins. ``GenericAdapter`` 用 ``-1``
+    #: 让自己排到最后做兜底（``match_url`` 永真），其他适配器默认 0
+    #: 不受影响。见 :meth:`PlatformRegistry.detect`。
+    priority: int = 0
 
     def match_url(self, url: str) -> bool:
         if not url:

@@ -140,6 +140,8 @@ cython_debug/
 # Other packs
 /Bili23-Downloader-main/
 /douyin-downloader-main/
+/cat-catch-master/
+/N_m3u8DL-CLI-master/
 /Downloaded/
 # 本地调试草稿（截图脚本、渲染探针等，不进版本库）
 /.scratch/

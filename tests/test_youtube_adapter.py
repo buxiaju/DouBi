@@ -271,10 +271,18 @@ def test_registry_detect_routes_to_youtube(url):
     )
 
 
-def test_registry_detect_returns_none_for_non_platform_url():
-    """非平台 URL 必须返回 None——别误报。"""
-    assert PlatformRegistry.detect("https://example.com/") is None
+def test_registry_detect_unknown_falls_back_to_generic():
+    """非平台 URL 现在走 generic adapter 兜底（M6.16 新增）。
+
+    之前是返回 None——M6.16 加了 GenericAdapter (priority=-1) 后，
+    任意 http(s):// URL 都会被它接住。空串 / 非 http 仍然返回 None。
+    """
+    adapter = PlatformRegistry.detect("https://example.com/")
+    assert adapter is not None
+    assert adapter.name == "generic"
+    # 空串 / 非 http(s) URL 不匹配 generic
     assert PlatformRegistry.detect("") is None
+    assert PlatformRegistry.detect("javascript:void(0)") is None
 
 
 # ===========================================================================
