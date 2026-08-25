@@ -128,7 +128,7 @@ DouBi/
 │       ├── theme.py               #   主题包 / token 表 / set_theme（见 §13.4）
 │       ├── pages/                 #   parse / download / history / settings
 │       └── dialogs/               #   login_dialog.py
-└── tests/                         # 20 个测试文件（见 §15）
+└── tests/                         # 25 个测试文件（见 §15）
 ```
 
 **统计**（截至 0.1.0 / M6.8）：`src/` 70 个 .py 文件，约 15,200 行；
@@ -375,7 +375,9 @@ class Engine(ABC):
 
 ```python
 class DownloadPipeline:
-    def __init__(self, engine, max_concurrent: int = 3): ...
+    def __init__(self, engine, max_concurrent: int = 3, *,
+                 max_retries: int = 0,                  # 0 = 单次尝试，不重试
+                 retry_backoff: float = 2.0): ...
 
     async def parse(self, url) -> MediaItem | None          # 解析单条
     async def parse_and_expand(self, url, *, strategy=None, max_count=0)
@@ -390,8 +392,46 @@ class DownloadPipeline:
 
 - `parse_and_expand`：strategy=None 时由适配器按 URL 类型自选默认策略（GUI 不需要用户选策略）。
 - `download_item`：GUI"下载选中"用——**不重新 parse**，避免把容器 URL 再当父项。
-- 内部 `_download_with_progress`：渲染文件名 → DB 去重检查（`is_downloaded`）→ `engine.download` → 成功后 `_record_success`（DB + manifest）。
+- 内部 `_download_with_progress`：渲染文件名 → DB 去重检查（`is_downloaded`）→ **重试循环**（`engine.download`，失败则退避后重试）→ 成功后 `_record_success`（DB + manifest）。
 - `ProgressEvent`：`job_id / item / phase / fraction / message / timestamp / extra`。phase 有 `parsing|expanding|downloading|merging|postprocess|done|failed`。
+
+#### 8.1.1 自动重试与退避（M6.9 新增，改这块先读完本节）
+
+四条硬约束，任意一条改错都会造成难查的行为退化：
+
+1. **重试触发条件是 `ok is False`，不只是抛异常。** `YtDlpEngine.download` 把**所有**真实失败
+   （含网络错误）都转成 `return False`，只判 `except` 等于永不重试。
+2. **`DownloadPipeline` 自身默认 `max_retries=0`**（单次尝试），保持它是一个可预测的原语；
+   自动重试这个**产品行为**只在 `core/engine_loader.build_default_pipeline()` 里打开
+   （`DEFAULT_MAX_RETRIES = 2` / `DEFAULT_RETRY_BACKOFF = 2.0`）。
+   这不是审美偏好而是成本决策：把类默认值改成 2，测试里那些「必然失败」的桩会全部乘上
+   重试预算——实测让重试套件从 0.76s 涨到 12.79s，并弄坏 2 个测试。
+   重试预算是**乘法**的：yt-dlp 内部已有 `retries: 3 / fragment_retries: 3`，
+   外层每多一次尝试就把内层预算再乘一遍，所以外层默认值必须小。
+3. **退避的 `await asyncio.sleep(delay)` 必须在 `async with self._sem` 之外。**
+   否则一个正在退避的任务会占着并发额度睡觉，`max_concurrent=1` 时直接把队列堵死。
+   由 `test_backoff_releases_the_semaphore` 用真实 sleep 的任务交错来钉死。
+4. **用户取消也表现为 `ok is False`**，所以重试前必须先探测 `options.cancel_check`
+   （`core/models.py`），否则「暂停」会被当成失败继续重试。探针本身抛异常时视为未取消
+   （不能让一个坏探针杀掉下载）。
+
+退避是指数的：`delay = retry_backoff * 2 ** (attempt - 1)`。最后一次尝试后不再 sleep。
+每次重试会额外发一个通知事件，形状固定（GUI/CLI/REST 都按 `extra["retry"]` 识别）：
+
+```python
+ProgressEvent(phase="downloading", fraction=0.0,
+              message="retrying (1/2) in 2s: engine returned False",
+              extra={"retry": 1, "max_retries": 2,
+                     "delay": 2.0, "reason": "engine returned False"})
+```
+
+注意 `phase` 是 `downloading` 而非新 phase——新增 phase 会让所有形态的 `_on_progress`
+分支落到 else 里。CLI 因此必须把 `elif ev.extra.get("retry")` 分支放在 `--verbose`
+分支**之前**，否则 `fraction=0.0` 的通知会被当成普通进度丢掉。
+
+回归测试：`tests/test_pipeline_retry.py`（16 条，覆盖上述 4 条约束 + 工厂默认值 + clamp，
+8/8 变异杀死）。`test_pipeline_smoke.py` 的桩永远成功，**结构上无法**发现重试循环的问题，
+别指望它。
 
 ### 8.2 容器判定
 
@@ -569,6 +609,26 @@ increment_checkpoint  (platform, user_id, mode) 主键 · last_item_id/last_chec
 - 信号：`task_added / task_progress / task_finished / task_failed / task_removed`。
 - `TaskInfo`：task_id/item/options/status/fraction/title/error/created_at/finished_at。
 - `DownloadPage` 是纯观察者：监听信号渲染 TaskRow（状态+标题+进度条+消息+移除按钮），任务完成时**复用同一行 widget** 从"下载中"布局挪到"已完成"（M5.4 修复，避免闪烁）。
+
+#### 13.2.1 跨进程恢复（M6.10）
+
+重启后接续上次没下完的任务。三层，各自的边界很清楚：
+
+| 层 | 位置 | 职责 |
+|---|---|---|
+| 持久层 | `core/storage/database.py` | `pending_task` 表 + `PendingTaskRow` + options 快照的编解码；任务入列时写行，终态时删行 |
+| 状态层 | `ui/task_manager.py` | `list_restorable()` 读、`restore()` 复位成任务、`discard_restorable()` 忘掉、`_reseed_counter()` 防 id 相撞 |
+| 交互层 | `ui/main_window.py` | `_offer_restore()`（构造函数尾部 `singleShot(0, ...)` 触发）+ `_restore_flow()` 弹窗询问 |
+
+几个刻意的决定，改之前先读理由：
+
+- **恢复出来的任务一律是 `paused`，绝不自动开跑**。刚重启是用户意图最不确定的时刻（可能只是想看看历史、可能换了网络），自动续传等于替他做决定。`.part` 文件在两种选择下都留着，所以「先问后续」不损失任何东西。
+- **「不恢复」必须落库**（`discard_restorable`）。只在内存里跳过的话，下次启动会拿同一批任务再问一遍，用户要一直答「不」到手动清库为止。这是唯一一条「漏了不报错、但用户天天骂」的分支。
+- **`restore()` 必须 `_reseed_counter()`**。`_counter` 是进程内自增的，重启后从 0 起，而恢复回来的任务带着上次的 `T0001`；不把计数器顶到恢复过的最大值，下一个新任务就会撞上一个已存在的 id（去重表和行映射会一起错乱）。撞上时 `restore()` 还会重新 key 一次（`task_manager.py:513-519`），那是第二层保险，不是替代品。
+- **`_offer_restore` 用 `asyncio.get_running_loop()` 而不是 `get_event_loop()`**，没有运行中的循环就静默跳过。这样测试里直接 `MainWindow()` 不会凭空起一个恢复流程；测试要验流程时直接 `await window._restore_flow()`。
+- **`self._restore_task = task` 那句不能删**：asyncio 只持弱引用，不留名字任务可能在跑到一半时被回收。
+
+测试见 `tests/test_ui_restore.py`（12 个用例，5 轮破坏验证：删 `discard_restorable` / 断开 `task_added` / 删 `_reseed_counter` / 改成自动续传 / 删标题截断，各自只让对应的用例变红）。
 
 ### 13.3 关键交互流程
 
@@ -1053,14 +1113,68 @@ Qt 只实现 SVG Tiny 1.2，**任何**新贡献的 SVG 都可能踩 filter 坑�
 - **主题测试刻意依赖库的私有接口**（`_normalBackgroundColor` / `_isMicaEnabled` / `lightCustomQss`）。这不是偷懒：断言 `THEMES` 里的色值毫无意义（token 表一直是对的，界面照样发白），只有断言「控件实际生效的颜色」才守得住 §13.4.2 那五层。上游哪天把这些改名，测试必须**当场红掉**，而不是界面悄悄变回白色。
 - **会改全局状态的 GUI 测试要自己收尾**。`test_theme_apply_gui.py` 用 autouse fixture 在每个用例后 `set_theme("default_light")`，否则同进程的其他 GUI 测试会被残留主题污染。
 - **循环里做断言必须加「至少查到一个」的守卫**：`assert checked, "主窗口里一个 fluent 控件都没找到，测试失去意义"`。少了这一行，一旦控件找不到，整个用例会因为循环体没执行而假绿。
-- **GUI 集成测试不要反复 `build_main_window()`**：M6.5 那阵曾
-  想加 4 个 titlebar 测试，每个新建一个 MainWindow 后 deleteLater。
+- **GUI 集成测试反复 `build_main_window()` 前，先确认窗口真的拆掉了**：M6.5
+  那阵曾想加 4 个 titlebar 测试，每个新建一个 MainWindow 后 deleteLater。
   实测：pytest 的 `qapp` 是 module-scope 复用，`deleteLater` 排队但
-  不会被事件循环执行（除非手动 `qapp.processEvents()`），下一个测试
+  不会被事件循环执行（除非手动送事件），下一个测试
   set_theme 时广播到 4~5 个死回调，`Mica 样式 + QSS 全树重算` 累加
-  起来从「慢」劣化到「hang」。**用 `test_theme_apply_gui.py` 里 module-scope
-  的 window fixture 共享一个 MainWindow**，或者**让产品代码被真机截图
-  验证**（`screenshots/verify_*.png`），别在测试里反复构造主窗口。
+  起来从「慢」劣化到「hang」。两条出路：**共享一个 module-scope 的 window
+  fixture**（`test_theme_apply_gui.py`），或者**在拆卸时补
+  `QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)`**
+  把析构真的兑现（`test_ui_restore.py`，实测回调数每轮归零）。根因与
+  实测数字见坑位 31 —— 贵的不是「构造」，是**没死透的旧窗口**。
+
+### 13.9 YouTube 适配器（M6.12，`platforms/youtube/`）
+
+- **URL 分类**：watch / shorts / embed / live / youtu.be 五种视频形态 +
+  /@handle / /channel/UC... 频道 + /playlist 三类容器。11 字符 video ID
+  必须用 `(?:[&#]|$)` 或 `(?:[?#]|$)` 锚定——否则 ``watch?v=IDextra``
+  这类 12 字符 URL 会被错认为合法。**坑位 34**
+- **元数据获取**：`adapter.parse` 内调
+  ``asyncio.to_thread(yt_dlp.YoutubeDL.extract_info(download=False))``，
+  仿浏览器 UA。任何异常（SSL / 限流 / 解析失败）都降级为占位 item——
+  ``title="YouTube <id>"``、``author.name=""``、``duration=None``，
+  并在 ``extra["meta_extract_failed"]=True`` 标记。**不让 ``parse``
+  抛异常穿过到 pipeline**，否则用户看到的是「解析失败」弹窗，可 URL
+  是合法的、网络只是临时不通——参见 YouTubeAdapter 自身的 try/except
+- **故意不实现**：channel / playlist 容器展开（yt-dlp 自己处理）、
+  danmaku / 字幕 / NFO post-processing（YouTube 字幕由 ``writesubtitles``
+  选项拉）、cookie 注入（YouTube 不需要）。``post_download`` 保留为
+  空实现但**显式存在**——让读 adapter 的人知道「这里**特意**没做事」
+  而不是「忘了写」
+- **架构验真**：YouTube adapter 总共不到 200 行，对比 B 站 / 抖音各自
+  1000+ 行（容器策略 / 签名 / cookie）。证明架构允许「按平台复杂度
+  调整 adapter 厚度」——同一套 base / registry / pipeline 不变
+- **测试** ``tests/test_youtube_adapter.py`` 31 例：URL 分类 11 类用
+  parametrize、`to_watch_url` 归一化、parse 单元路径 + 降级路径、
+  registry 路由、ad-hoc 破坏验证。**全部不联网**——`_extract_meta`
+  用 monkeypatch 替换
+
+### 13.10 注册收敛（M6.12）
+
+- 原 3 处 ``from ..platforms import douyin, bilibili`` 的副作用 import
+  （``server/app.py`` / ``mcp/server.py`` / ``core/engine_loader.py``）
+  合并为单点 ``from .. import platforms``。**新增 platform 时只需改
+  ``platforms/__init__.py`` 一处即可**，3 个上层模块不需要任何改动
+
+### 13.8 下载前选项对话框（M6.11，`ui/pages/parse.py::_PromptOptionsDialog`）
+
+- 触发：设置页「主题与外观」里 `prompt_before_download` SwitchButton，
+  默认 **False**。启动时主窗口读初值下发，用户切换后通过
+  `promptBeforeDownloadChanged` 信号实时下发，不必重启
+- 入口：解析页「快速下载」「下载选中」两处都先调 `_ask_prompt_overrides()`，
+  用户取消 → 整批不入队；用户确认 → 用 `collect_prompt_overrides(dlg)`
+  拿到 4 字段 dict，调 `_options_for_overrides(overrides)`
+- 右键菜单「作为单视频下载」**不**接弹窗——右键本身已是明确操作
+- **单一边界保证**：overrides 永远叠在已搬运好的 `DownloadOptions` 上，
+  按 `dataclasses.fields(DownloadOptions)` 白名单过滤；任何「绕过
+  `_build_options` 直接拼 options」的尝试都会撞守卫测试
+  `test_build_options_covers_every_shared_config_field`
+- 选项集合复用设置页 `["mp4","mkv"]` / `["best","8k","4k","1080p","720p","480p"]`——
+  两处选项列表不一致就是 bug
+- 测试 `tests/test_prompt_options.py` 11 例（弹窗 `exec()` 会进模态
+  循环，offscreen 下卡死，所以只覆盖非模态面：构造 / 字段收集 /
+  ParsePage 集成 / YAML 往返）
 
 ---
 
@@ -1143,27 +1257,37 @@ collection URL 均落到 generic fallback），只能走签名 Web API。
 
 ## 15. 测试体系
 
-21 个测试文件，454 个测试收集，**450 passed / 4 skipped**（`python -m pytest`，全量约 27 分钟）。pytest-asyncio `mode=auto`。skip 全是「无 PySide6 则跳过」的 GUI 用例。
+27 个测试文件，676 个测试收集，M6.12 实测 **672 passed / 4 skipped**（`python -m pytest -q`，`QT_QPA_PLATFORM=offscreen`，耗时 ~25 分钟）。pytest-asyncio `mode=auto`。skip 全是「无 PySide6 则跳过」的 GUI 用例。
+
+> 全量跑一次接近半小时，主要成本在真实 `asyncio.sleep` 的退避与超时用例上。日常改动请按 §15 表格挑相关文件跑；**只有在动了 `pipeline.py` / `engine_loader.py` / `models.py` 这类被四个界面共享的文件后，才有必要付全量的代价**。
 
 | 文件 | 用例数 | 覆盖 |
 |---|---|---|
+| `test_server_security.py` | 81 | **REST 鉴权与绑定**：token 恒定时间比较 / 缺失与错误 token / 公网绑定告警 / `--allow-insecure` 逃生阀（参数化占大头） |
 | `test_bilibili_adapter.py` | 56 | B 站 URL 分类 / 策略（mock httpx）/ adapter |
+| `test_storage.py` | 55 | database / file_layout / manifest / migrate / **`pending_task` 表与 options 快照编解码** / **取消时的连接泄漏与毒化回归（坑位 27·28）** |
 | `test_ui_polish.py` | 45 | UI 品牌化 / 组件工厂 / **EmptyState 间距回归（防静默回退）** / 图标管线 |
 | `test_douyin_adapter.py` | 43 | 抖音 URL 分类（modal_id / vid / 分享链）/ parse / expand / `parse_and_expand` / 登录态 cookie 降级判定 |
 | `test_bilibili_auth.py` | 41 | cookie 解析 / 校验 |
-| `test_storage.py` | 37 | database / file_layout / manifest / migrate |
+| `test_task_manager.py` | 31 | TaskManager 状态机 / 暂停恢复的双机制与 stale 守卫 / fraction 倒退守卫（坑位 26）/ **跨进程恢复的状态层：`list_restorable` · `restore` · `discard_restorable` · `_reseed_counter`** |
 | `test_theme_apply_gui.py` | 28 | **主题真落到像素上：窗口底色 / 现存控件 / 卡片自绘 / 切换后新建控件**（需 PySide6，offscreen；跑一次 ~3 分钟，全量慢主要慢在这里） |
 | `test_pipeline_smoke.py` | 28 | registry / URL 分类 / pipeline 解析 / **引擎 cookie 注入** / CLI 冒烟 |
 | `test_browser_login.py` | 28 | Playwright 登录流程（含 networkidle 陷阱回归） |
 | `test_config_theme.py` | 26 | **配置地基（`to_dict` / env 覆盖 / YAML 往返）+ 主题注册表 / `resolve_theme` 兼容旧值 / token 键一致 / 无 Qt 也能 `set_theme`**（见 §13.4） |
 | `test_server.py` | 19 | FastAPI 端点 |
 | `test_sidecars.py` | 17 | 附属文件：NFO 生成/开关 + B 站弹幕（bvid/cid 定位、deflate 解码、失败不抛） |
-| `test_task_manager.py` | 15 | TaskManager 状态机 |
+| `test_cli_config_layering.py` | 17 | **CLI 配置分层**：命令行 > 环境变量 > 配置文件 > 默认值，`--x/--no-x` 三态开关不再把「未指定」当 False |
+| `test_pipeline_retry.py` | 16 | **重试与退避**（见 §8.1.1）：`ok is False` 也重试 / 指数退避 / 退避不占并发额度 / 取消不重试 / 工厂默认值与 clamp。**8/8 变异杀死** |
 | `test_mcp.py` | 15 | JSON-RPC 协议 |
+| `test_ui_context_menu.py` | 12 | 解析页右键菜单（含 `UnboundLocalError` 回归；`QMenu.exec` 需子类化替身，见 §14） |
+| `test_ui_restore.py` | 12 | **跨进程恢复的交互层（见 §13.2.1）**：空库/缺文件不问 / 恢复即暂停且不自动下载 / 「不恢复」落库只问一次 / 恢复后新任务 id 不撞 / 标题截断与兜底（需 PySide6，offscreen） |
+| `test_ui_empty_parse.py` | 12 | ParsePage 空解析提示（需 PySide6，offscreen） |
 | `test_ytdlp_engine.py` | 11 | engine 目录预创建 / 字幕与断点续传选项 / 取消不算错误 / `.part` 保留策略 |
-| `test_ui_empty_parse.py` | 11 | ParsePage 空解析提示（需 PySide6，offscreen） |
+| `test_youtube_adapter.py` | 31 | **YouTube 适配器（M6.12）**：watch / shorts / embed / live / youtu.be / @handle / channel / playlist 分类 / 11 字符 ID 定长校验 / 占位降级路径 / `detect` 路由（不联网，monkeypatch） |
 | `test_ui_workers.py` | 11 | GUI 可用性 / DownloadWorker |
+| `test_prompt_options.py` | 11 | **下载前选项对话框（M6.11）**：弹窗 seed / `collect_prompt_overrides` 字段收敛 / `_options_for_overrides` 不污染其他字段 / 关闭后等于 `_build_options` / YAML 往返（需 PySide6，offscreen） |
 | `test_auth_actions.py` | 8 | GUI 登录包装 |
+| `test_version_single_source.py` | 7 | **版本号单一真源**：`pyproject.toml` 为唯一源，`APP_VERSION` 派生且不漂移 |
 | `test_row_mapping_cache.py` | 6 | **行映射缓存 / 交错布局 / 行身份判据**（见 §13.3） |
 | `test_download_page.py` | 5 | DownloadPage 渲染 / 全部删除 |
 | `test_parse_and_expand_gui.py` | 4 | ParsePage 解析→表格（单视频/容器） |
@@ -1208,9 +1332,9 @@ python -m pytest --collect-only -q 2>&1 | Select-Object -Last 3
 2. **PowerShell 写中文乱码**：`Set-Content` 用 ANSI。写文件用 write/edit 工具或 Python。
 3. **yt-dlp 不识别 `{title}` 花括号模板**：pipeline 先用 `naming.set_item_output_template()` 渲染成 `item.output_template`（纯字符串），engine 才追加 `%(ext)s`。
 4. **`http_headers.Cookie` 覆盖 cookiefile**：见 §14.4。
-5. **GUI 平台注册为空**：所有形态必须走 `build_default_pipeline()`（内部 import `platforms` 触发自注册）。不要裸 `DownloadPipeline(engine=YtDlpEngine())`。
+5. **GUI 平台注册为空**：所有形态必须走 `build_default_pipeline()`（内部 import `platforms` 触发自注册）。不要裸 `DownloadPipeline(engine=YtDlpEngine())`。**M6.9 起这个工厂还负责打开自动重试**（见 §8.1.1），裸构造的 pipeline 除了平台注册为空，还会静默丢掉重试能力——`cli/main.py` 曾经就是这样，已修。
 6. **分P视频 playlist info.json 写目录失败**：engine 下载前预创建目录（§7.2）。
-7. **aiosqlite Event loop closed**：`try/finally: await db.close()`。
+7. **aiosqlite Event loop closed**：用 `async with Database(path) as db:`（`Database` 实现了异步上下文管理器协议，`initialize()` 幂等、`close()` 自带空守卫）。手写 `try/finally: await db.close()` 也对（`ui/pages/history.py` 就是，语义完全等价），但四行里漏一行就复现这个错误，没有理由不用 `async with`。反过来，**不要让一个 DB 连接跨越整个下载**：aiosqlite 每个打开的连接背后是一个活线程，而一次下载可能跑几小时——`pipeline.py` 里去重探测与 `_record_success` 故意是两个短周期。**注意 `async with` 只保证「一定会调用 `close()`」，不保证「`close()` 一定跑完」**——取消可以打断它，见坑位 27 / 28。
 8. **qtimer/qasync 删除**：测试结束时可能 "Signal source has been deleted"——无头测试里及时 `app.processEvents()` + drain tasks。
 9. **Windows 路径长度**：目录组件上限 120 字符（`file_layout.py`），文件名 200（`naming.py`）。B 站长标题很容易撞上限。
 10. **ruff line-length=100**：`[tool.ruff.lint] ignore=["E501"]` 放宽了行宽。
@@ -1229,6 +1353,15 @@ python -m pytest --collect-only -q 2>&1 | Select-Object -Last 3
 23. **登录成功后的落地页永远到不了 networkidle**：feed 流 / WebSocket 长连接 / 心跳是常态。Playwright 里不要用 `wait_for_load_state("networkidle")` 当「登录完成」信号，用固定短 settle 或直接轮询 `context.cookies()`。
 24. **判定平台登录态要用「登录后才会出现的 cookie」**：sessionid / sessionid_ss / sid_guard（抖音）；不要用设备标识（ttwid / odin_tt——游客也有）或 JS 风控 token（msToken——自动化下经常不写入）。名单错向两个方向都翻过车：真登录抓不到 + 游客误判成功。
 25. **引擎阶段的 cookie 与解析阶段是两条通道**：解析在 adapter（自己读 cookie 文件），下载在 engine（只认 `DownloadOptions.cookies_file`）。四个入口都不传 cookies_file 时引擎裸跑。M6.7 起在 pipeline 层懒加载注入（显式指定优先），修一处救四端。
+26. **`ProgressEvent.fraction` 不一定是「测量值」，也可能只是「消息的占位」**：重试通知带 `fraction=0.0`，因为那一刻确实没有传输在进行。GUI 原先无条件 `info.fraction = ev.fraction`，于是每次瞬时失败都把停在 80% 的进度条打回 0，看起来像「从头重下」——而 `resume=True` 时它并没有。**新增任何"通知型"事件都必须检查四端的 fraction 消费者**（当前全库只有 3 处读 `ev.fraction`：`ui/task_manager.py`、`cli/main.py`、`pipeline.py` 的引擎事件转发）。守卫要写成「按 `extra["retry"]` 判定」，**不能**写成「fraction 变小就忽略」——续传的下一次尝试本就会报更小的值，单调钳制会把进度条冻在过期高点。`"retry"` 这个键是重试通知独占的（引擎侧 extra 只用 `speed`/`eta`/`filename`/`cancelled`），可以安全当判据。由 `test_task_manager.py` 的 4 个用例钉死（含一个「正常事件仍允许倒退」的反向用例）。
+27. **`asyncio.shield` 挡不住 runner 级别的取消，而「打开连接」被取消会泄漏一个裸 sqlite3 句柄**：`shield` 只切断**从 awaiter 传来**的取消，对「把 loop 上每个 task 全部 cancel 一遍」的清扫（`asyncio.Runner` 关闭、pytest-asyncio teardown）完全无效——被 shield 的内层 task 自己也在那张名单上。于是 `Database.initialize()` 里那次 connect 会**直接**在工作线程起步阶段被取消，而 aiosqlite 的补救路径 `Connection.stop()` 里 `close_and_stop` 带 `if self._connection is not None` 守卫，此刻 `_connection` 还是 `None`——**它什么都没关**；随后 connector 照样跑完，造出一个**真实句柄**，工作线程带着它死在 `core.py` 的 `66 → 72 → 75` 双投递级联上（第 66 行往已关闭的 loop 投递失败，被 72 行的 `except BaseException` 接住，75 行又往**同一个死 loop** 投一次），`__del__` 在第 99 行静默 early-return，最后只剩 CPython 一句 `ResourceWarning: unclosed database`。**能可靠关掉那只句柄的唯一时机，是它在工作线程上诞生的那一瞬**——从别的线程关会撞 sqlite3 的同线程守卫，事后往队列里塞一个 close 又永远追不上工作线程自己的死亡。所以守卫必须放进 `connector` **内部**（`_guarded_open`），并且这次打开要**手工驱动**（`wrapper._tx.put_nowait((None, _guarded_open))`），因为结果投递也得由我们自己做、自己用 `except RuntimeError` 兜住。「放弃」必须是一个**显式声明**的状态（`abandoned` 标志 + 锁），而且要在 `sqlite3.connect` 前后**各查一次**——它在飞行途中就可能被声明。由 `test_a_handle_born_after_the_cancellation_is_still_closed` 钉死：用 `threading.Event` 在工作线程里卡住 `sqlite3.connect`，并且**必须先等 `entered` 再取消**，否则测的是「connector 还在队列里」那条容易得多的分支。
+28. **`close()` 可以被取消，但不可以被中止；`self._conn = None` 写在 `await` 之后会把对象永久毒化**：`aiosqlite.Connection.close()` 把真正的 `sqlite3.close` 排进工作线程、并在自己的 `finally` 里清掉 `_connection`，所以一次穿过我们 `await` 的取消**回调不到这些动作**——句柄照样关掉、工作线程照样退休（实测，两种时序都验过：取消发生在关闭已抵达工作线程之后，和取消发生在它还没走远之前）。**这里没有句柄泄漏。**真正被取消毁掉的是原先写在 `await` 之后的 `self._conn = None`：跳过它，`Database` 就抱着一具尸体，而且是**永久**抱着——`initialize()` 开头 `if self._conn is not None: return`，重新打开成了静默空操作，此后每一次查询都抛 `ValueError: no active connection`，一辈子好不了。修法只有一个字：**顺序**，先摘引用再 await，这样被取消的关闭只是「早退」，不是「致命」。`initialize()` 失败清理路径本来就是对的（`self._conn = None` 在 `await asyncio.shield(conn.close())` 之前），无需改。目前生产侧四处构造全是「用完即弃」的短周期（`task_manager.py` / `pipeline.py` 的 `async with`、`history.py` 的 try/finally），毒化只是潜伏、还没咬人——但**挂死或永久报错严格地比崩溃更糟**。这条的测试断言只能落在**复用**上（取消后 `initialize()` + `count()` 必须成功）：查句柄、查工作线程、查 warning 在修复前后都一样通过，等于没测。
+29. **多场景探针里的 monkeypatch 必须逐场景撤销**：查坑位 28 时给 `sqlite3.Connection` 做了计数子类（`close` 是只读属性，实例上 patch 不了，只能靠 `factory=` 在 connect 时注入），结果读数是「关闭 0 次」，看着像发现了新泄漏。实际是探针自己污染：第一个场景结束时没把 `sqlite3.connect` 还原，第二个场景捕获到的「原始」connect 其实是前者的 gated 版本，它会把 `kwargs["factory"]` 覆写回自己的子类，计数器根本没挂上。还原后读数变成 1，泄漏是假的。**一切「疑似新 bug」先怀疑工装**——尤其当工装动过全局状态。同理，`ResourceWarning` / `gc.collect()` 本身会改变症状是否出现，验证必须固定三个严格开关：`-W error::pytest.PytestUnhandledThreadExceptionWarning -W error::ResourceWarning -W error::pytest.PytestUnraisableExceptionWarning`。
+30. **切页动画会让 `currentWidget()` 在 300ms 内继续返回旧页**：qfluentwidgets 的 `window/stacked_widget.py::StackedWidget.setCurrentWidget(widget, popOut=True)` —— `popOut` **默认就是 True** —— 转发到 `PopUpAniStackedWidget.setCurrentIndex(..., needPopOut=True, ...)`，而那条分支**不调** `super().setCurrentIndex()`，只记下 `self._nextIndex` 并把当前页动画出去，真正的 `QStackedWidget.setCurrentIndex` 推到 `__onAniFinished` 里执行。于是「断言跳转到了某页」在调用后立刻查会失败。修在测试侧：fixture 里 `win.stackedWidget.setAnimationEnabled(False)`，走 `if not self.isAnimationEnabled: return super().setCurrentIndex(index)` 那条同步快路。**不要改成 sleep 等动画**（慢，且是按时间赌），也不要把断言弱化成「调用过 setCurrentWidget」——那就不再验证用户到底看见了什么。注意启动时切到首页不受影响：`index == currentIndex()` 会提前 return，根本没有动画，所以这个坑只在「运行中切页」的测试里现身。
+31. **`deleteLater()` 在不转 Qt 事件循环的测试里等于没拆**：它只是 post 一个 `DeferredDelete` 事件，没人消费队列就永远不析构，`destroyed` 信号不发，于是 `subscribe_theme()` 挂的主题回调**一个都不会解绑**。实测：连建 3 个 MainWindow 后 `theme._callbacks` 是 57，`deleteLater()` 之后仍是 57；补一句 `QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)` 才降到 0（单个窗口贡献 19 个回调）。这正是 §13.7 那条「不要反复 `build_main_window()`」的成因——问题不在「反复构造」，而在**残留的死回调**，后续任何 `set_theme()` 都要广播到一堆指向已弃控件的闭包上，从「慢」劣化到「hang」。所以按函数建主窗口是**可行**的，前提是拆卸时把这一种事件真的送出去（`tests/test_ui_restore.py` 的 `window` fixture 就是这么做的）。选 `sendPostedEvents` 而不是 `processEvents`，是因为后者会连带跑其他排队事件，扩大测试间的耦合面。
+32. **qfluentwidgets 的 `MessageBoxBase` 没有 `view` widget，只有 `viewLayout`**：项目里这个版本（1.x）的 `MessageBoxBase.__init__` 直接 `self.viewLayout = QVBoxLayout()` 然后 `self.vBoxLayout.addLayout(self.viewLayout, 1)`——没有 `self.view`。GitHub 上 README 的示例（包括 `addWidget(self.view)`、`viewLayout.addLayout(...)` 的混用）是不同版本的混合印象，**看本地源码为准**。同理，按钮文案默认是 `OK / Cancel`（`PrimaryPushButton(self.tr('OK'))`），不是 `yesButton / cancelButton` 之外另有标签入口——直接在子类的 `__init__` 末尾 `self.yesButton.setText("下载")` 改掉。**别去 `setWindowTitle`**——它会被父类的 `MaskDialogBase.__initWidget` 重新设一次，运行时看不见，但写测试时容易掉进去。
+33. **qfluentwidgets 的 `SwitchButton` 暴露的是 `checkedChanged(bool)`，不是 `toggled(bool)`**：`SwitchButton` 不是 `QCheckBox`，它**重命名了** Qt 标准的 `toggled` 信号；`hasattr(switch, 'toggled')` 是 False，`self.prompt_before_download.toggled.connect(...)` 会抛 `AttributeError`。同理 `QAbstractButton` 的 `stateChanged(int)` 在它身上也没有。只能 `checkedChanged` / 自定义 `clicked` 那一套。看到现有设置页用 `self.database.isChecked()` 读值、用 `self.database.setChecked(cfg.database)` 写值，但**没接信号**——说明旧代码要么不需要在切换时做事，要么把状态变化归到「点保存按钮」一次性读取而不是每个控件的信号回调。新增「切换即生效」的偏好时，记得连的是 `checkedChanged`。
+34. **YouTube video ID 必须定长 + 锚定**：ID 是 11 字符 `[A-Za-z0-9_-]`，但单写 `{11}` 不够——``watch?v=dQw4w9WgXcQextra`` 会把前 11 个字符匹配上，剩 ``extra`` 被当成「后续参数」，于是你**以为**拿到合法 video ID 实际是合法 ID + 尾巴。正确做法：watch 模式后面接 ``(?:[&#]|$)``（参数分隔符或字符串结尾），短链 youtu.be 模式后面接 ``(?:[?#]|$)``。这是 YouTube adapter 第一个回归测试期望（``test_sabotage_wrong_id_length_misses_url``）就专门盯着的——任何「我去掉那个锚」都会让 12 字符 ID 测试变红。
 
 ---
 
@@ -1249,13 +1382,15 @@ python -m pytest --collect-only -q 2>&1 | Select-Object -Last 3
 8. **改解析页结果表（树形结构）**：三条铁律——① 任何增删行之后必须在 `blockSignals(False)` 之后调 `_refresh_row_mapping()`；② 不要用行号做字典 key，也不要用 `base + index` 反算行号；③ 判「这是不是 section 行」用 `row == _top_to_row.get(top_idx)`，不要看 resolve 出的 item 类型。改完跑 `tests/test_row_mapping_cache.py`。
 9. **加一套主题**：与第 5 条相反，**只动 `theme.py` 的 `THEMES`**，下拉框 / `--theme` 的 `choices` / 导航栏循环 / GUI 测试参数化全部自动跟上（见 §13.4.5）。
 10. **改主题落地逻辑**：`set_theme()` 的六步顺序是硬约束（两个 monkey patch 必须早于刷新），`app.py` 里两次 `set_theme()` 都不能删——理由见 §13.4.3 / §13.4.4。新增带色控件时，**颜色不要烘进控件自身的 stylesheet**；非要烘就得 `subscribe_theme()` 注册重刷，否则切主题后残留旧色。
+11. **写任何「持有外部资源的 async 清理」**：动 `await` 与「置空 / 释放」两句的先后顺序前，先问一句「这里被取消会怎样」。判据是**先摘引用，再 await**——反过来写，一次取消就跳过置空，对象带着一具尸体活下去（坑位 28）。同理，不要指望 `asyncio.shield` 能保住清理：它只挡 awaiter 传来的取消，runner 级别的全量清扫照样打断（坑位 27）。这类 bug 的共同点是**症状不在崩溃现场**——要么只剩一句 `ResourceWarning`，要么完全无声、下次复用才炸。
 
 ### 改动后
-11. 写/更新测试（新逻辑必须配测试；GUI 用 offscreen 模式）。
-12. `python -m pytest` 全绿，且**用例总数只增不减**（减少 = 有测试被意外跳过或删掉）。
-13. 更新 `docs/CHANGELOG.md`（按 M 里程碑分节）。
-14. 若修的是「踩坑类」bug，把根因与判据写进 `docs/DEVELOPMENT.md` 对应小节 —— 光修代码不写文档，下一个人（或下一轮 AI）会原地重犯。
-15. 用 `python -m doubi.ui` 手动冒烟 GUI（如果有改动 UI）。
+12. 写/更新测试（新逻辑必须配测试；GUI 用 offscreen 模式）。
+13. `python -m pytest` 全绿，且**用例总数只增不减**（减少 = 有测试被意外跳过或删掉）。
+14. 更新 `docs/CHANGELOG.md`（按 M 里程碑分节）。
+15. 若修的是「踩坑类」bug，把根因与判据写进 `docs/DEVELOPMENT.md` 对应小节 —— 光修代码不写文档，下一个人（或下一轮 AI）会原地重犯。
+16. **修完 bug 先破坏一次修复，确认测试真的变红**。这一步不是形式：坑位 19 那个结构性测试的第一版、以及取消泄漏那三种断言设计（查 `db._conn`、查 `was_closed`、`gc.collect()` 后查 `ResourceWarning`），在修复前后**都一样通过**，等于什么都没测。有多重防御时要**同时**破坏全部，只拆一层会被另一层兜住。
+17. 用 `python -m doubi.ui` 手动冒烟 GUI（如果有改动 UI）。
 
 ### 提交前清理
 - 删除临时调试脚本（`_diag*.py`、`_probe*.py`、`_repro*.py`、`_win_check.log` 等）。PowerShell 删不掉时用 Python：`python -c "import os; os.remove('...')"`。
@@ -1269,22 +1404,27 @@ python -m pytest --collect-only -q 2>&1 | Select-Object -Last 3
 
 1. **B 站匿名风控**：UP 主页 / 合集枚举在无登录时受限（412 / -799），登录后稳定。已用官方 API + WBI 签名缓解，但 IP 级限流仍需等待窗口（几分钟）。
 2. **抖音 user/info/self 404**：该端点被风控（无签名调用必 404），`validate_cookies` 已降级为「session cookie 存在性」判定（sessionid / sessionid_ss / sid_guard 任一存在即已登录）——只能判"有登录痕迹"，无法确认 cookie 是否仍有效（下载本身走 yt-dlp 不受影响）。同类问题：抖音合集标题是 best-effort（`/mix/detail/` 被风控 403，合集名从列举第一页的 `mix_info.mix_name` 探测，失败时退化为 `抖音合集 {mix_id}`）。
-3. **GUI 尚未实现**：断点续传的**跨进程恢复**（重启后自动接续未完成任务——引擎层已支持 `continuedl`，缺的是把未完成任务持久化下来）、已完成列表排序、章节下载。
-   （M6.2 已补上：全部/单任务暂停恢复、弹幕、字幕、NFO）
+3. **GUI 尚未实现**：已完成列表排序、章节下载。
+   （M6.2 已补上：全部/单任务暂停恢复、弹幕、字幕、NFO；**M6.10 已补上跨进程恢复**，见 §13.2.1）
 4. **REST/MCP 的容器支持**：容器统计已修正（读 pipeline 写的 `child_count` / `downloaded_count` / `failed_count`），但仍是「整个容器一个 job」，无法单独重试其中某一子项。
 5. **没有 i18n**：全中文硬编码。
 6. **配置只读一次**：GUI 保存后需重启才生效的部分（代理等）没有提示重启。
+7. **CI 自动化但本地打包仍需手动**：「手动 dispatch 跑 build.yml」可发现
+   「现在的 main 分支能不能成功打包」，但日常 dev 迭代还是要本地跑
+   ``scripts/build_installer.py``——CI 不是 dev loop 的替代品，只是不
+   再依赖人记得跑。
 
 ### 对齐 Bili23 的路线图（已识别未做）
 
 按 ROI 排序：
-1. **下载选项弹窗**（每次下载前可调画质/音质/编码/附加内容，临时覆盖全局设置）——M5.4 之后最高优先。
-2. **解析历史**（记录近期解析过的链接，一键重解析）。
-3. **剪贴板监听**（复制链接自动弹"是否解析"）。
-4. **头像/账号入口**（左下角显示登录态，一键登出）。
-5. **附加内容下载**（弹幕 XML/ASS、字幕、封面、章节、NFO 刮削给 Jellyfin/Plex）。
-6. **收藏页**（收藏夹/追番/稍后再看/历史记录，点击跳解析）。
-7. **纯编号解析**（直接输入 av/BV/ep/ss/md 号）。
+1. ~~**下载选项弹窗**~~ **M6.11 已做**（见 §13.8）：开关默认关，开关后下载前弹 4 字段（画质/容器/缩略图/JSON）；右键菜单与「直接 add()」路径不接弹窗。
+2. ~~**YouTube 适配器**~~ **M6.12 已做**（见 §13.9）：最低成本扩张样板，不到 200 行 adapter + 31 例测试，URL 全形态覆盖。
+3. **解析历史**（记录近期解析过的链接，一键重解析）。
+4. **剪贴板监听**（复制链接自动弹"是否解析"）。
+5. **头像/账号入口**（左下角显示登录态，一键登出）。
+6. **附加内容下载**（弹幕 XML/ASS、字幕、封面、章节、NFO 刮削给 Jellyfin/Plex）。
+7. **收藏页**（收藏夹/追番/稍后再看/历史记录，点击跳解析）。
+8. **纯编号解析**（直接输入 av/BV/ep/ss/md 号）。
 8. **重复下载 / 文件重名策略**、**画质音质编码优先级**、**CDN 切换**、**更新检查**。
 
 ### 建议的新功能（核心之外）

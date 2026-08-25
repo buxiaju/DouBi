@@ -19,6 +19,10 @@ doubi download -u "https://www.bilibili.com/video/BV1xx411c7mD" -o ./Downloaded
 # 抖音单条
 doubi download -u "https://www.douyin.com/video/7123456789012345678" -o ./Downloaded
 
+# YouTube（watch / shorts / youtu.be 短链均可，无需登录）
+doubi download -u "https://www.youtube.com/watch?v=dQw4w9WgXcQ" -o ./Downloaded
+doubi download -u "https://youtu.be/dQw4w9WgXcQ" -o ./Downloaded
+
 # 批量（文件每行一个 URL）
 doubi download --batch urls.txt -o ./Downloaded
 
@@ -183,14 +187,25 @@ bilibili/{作者}/video/{合集名}/{分类名}/{分集名}/{分集名}_{BV号}_
 ## REST API
 
 ```bash
+# 默认绑 127.0.0.1——只本机能访问。对外暴露时必须设 token。
 doubi serve --host 127.0.0.1 --port 8000
+
+# 带 token 对外开放（token 用 secrets.compare_digest 比较，防计时侧信道）
+doubi serve --host 0.0.0.0 --port 8000 --token s3cret
 
 curl http://127.0.0.1:8000/api/v1/health
 curl -X POST http://127.0.0.1:8000/api/v1/download \
      -H 'Content-Type: application/json' -d '{"url": "https://..."}'
 curl http://127.0.0.1:8000/api/v1/jobs/{job_id}
 curl http://127.0.0.1:8000/api/v1/platforms
+
+# 对外暴露时所有请求都要带 Authorization 头
+curl -H "Authorization: Bearer s3cret" http://0.0.0.0:8000/api/v1/health
 ```
+
+> 默认 `--host 127.0.0.1`，只本机能访问。如果 `--host` 指向了非回环地址
+> 且**没有设 `--token`**，启动时会**拒绝启动**——避免无意中把一个能往磁盘
+> 写文件的接口挂到局域网上。要强制跳过这个守卫用 `--allow-insecure`。
 
 > `/api/v1/download` 会读取 `~/.doubi/config.yml` 配置文件。M6.2 起，**GUI 设置页里的每一个选项**（目录模板、字幕 / NFO / 弹幕、限速、代理、断点续传）在 REST 端都会同样生效——过去这两端曾静默忽略一部分配置，现在已有结构性测试保证以后新增字段不会再掉。
 

@@ -725,6 +725,300 @@ GUI，比单元测试贵两个量级，留给发版前的手动 check 清单。
 
 ---
 
+## M6.9 (2026-08-24) — 安全敞口收口 + 版本号单一真源 + 健壮性加固
+
+> 这一轮没有新功能，全在补「不做可能出事」的洞。三件事的共同点是
+> **失败时不报错**：绑到公网不会报错、版本号漂移不会报错、
+> 取消下载留下的脏连接也不会报错——都要靠专门的守卫把沉默变成响声。
+
+### REST 鉴权 + 默认绑回环
+
+- `server/security.py`（新增）：`resolve_token` / `token_matches` /
+  `audit_binding`
+- **token 比较用 `secrets.compare_digest` 而不是 `==`**：后者发现首个
+  不同字节就返回，比较耗时随「猜对的前缀长度」变化，逐字节爆破可从
+  256^n 降到 256×n 次。这类计时侧信道在本地网络里尤其好利用
+- **默认 `--host 127.0.0.1`**。绑到本机之外可达的地址且**没有 token 时
+  拒绝启动**，除非显式给 `--allow-insecure` 逃生阀。原先的默认值等于
+  「把一个能往磁盘写文件的接口挂到局域网上」，且没有任何提示
+- 报错文案给三条出路（去掉 `--host` / 设 token / 明知故犯），
+  而不是只说「拒绝启动」
+- 测试 `test_server_security.py` 81 例（参数化占大头）
+
+### 版本号单一真源
+
+- M6.8 只是把两处漂移的数值**对齐**，真源仍是两个——迟早再漂
+- 改为 `pyproject.toml` 是唯一真源，`doubi.__version__` 经
+  `importlib.metadata` 派生，`APP_VERSION = __version__` 不再手抄
+- `test_version_single_source.py` 7 例：断言标题栏 / `doubi -V` /
+  REST `/health` / 安装包文件名四处**恒等**，而不是各自「等于 0.1.0」
+  ——后者改版本号时会四处同时变红，等于没测
+
+### 健壮性
+
+- **pipeline 重试退避尊重 `cancel_check`**：退避期间不占并发额度，
+  取消不重试（`test_pipeline_retry.py` 16 例，**8/8 变异杀死**）
+- **收敛 `Database` 双生命周期**（既能当上下文管理器又能长驻）
+- **取消下载引发的连接泄漏与连接毒化（BUG #1–#4）**：取消发生在
+  `await` 点上，`finally` 里那句归还连接的代码在某些路径上根本没执行到，
+  连接带着未回滚的事务回到池子里，**下一个使用者才炸**——现场与根因
+  隔着好几个测试。见 DEVELOPMENT.md 坑位 27 / 28 / 29
+- **重试通知让 GUI 进度条倒退回 0**：重试是新一轮 `download_item`，
+  fraction 从 0 重新开始。顺带审计四端 fraction 消费者，加单调守卫
+  （坑位 26）
+- `server/app.py` `_execute_download` 里一个只 append 不读的 `events`
+  列表——长任务下是纯内存增长
+
+---
+
+## M6.10 (2026-08-24) — 跨进程断点续传恢复
+
+> 引擎层的 `continuedl` 一直是开的，`.part` 文件也一直在磁盘上：
+> **重启后能接着下的能力早就有了，缺的只是「重启后还记得有哪些任务」**。
+> 所以这一轮的工作量全在持久化与交互，不在下载。
+
+### 三层
+
+| 层 | 位置 | 职责 |
+|---|---|---|
+| 持久层 | `core/storage/database.py` | `pending_task` 表 + `PendingTaskRow` + options 快照编解码 |
+| 状态层 | `ui/task_manager.py` | `list_restorable` / `restore` / `discard_restorable` / `_reseed_counter` |
+| 交互层 | `ui/main_window.py` | 启动时 `singleShot(0, _offer_restore)` → 询问 → `_restore_flow` |
+
+### 几个刻意的决定（改之前先读理由，详见 DEVELOPMENT.md §13.2.1）
+
+- **恢复出来的任务一律是 `paused`，不自动开下**。重启这个时刻恰恰是
+  用户意图最不确定的时候（可能就是因为下得太猛才关的），而
+  `.part` 文件无论如何都在，晚点下不丢东西；自动开下则可能在用户
+  没注意时占满带宽
+- **「不恢复」必须落库**，否则同一批任务每次启动都问一遍，
+  用户第二次看见就会开始忽略所有弹窗
+- **`restore()` 必须 `_reseed_counter()`**：id 计数器从 0 开始，
+  恢复了 5 个任务后新建任务会撞 id。`task_manager.py:513-519` 那处
+  改键是第二道防线，**不是**替代品
+- 用 `get_running_loop()` 而不是 `get_event_loop()`——后者在无循环时
+  会造一个新的，恢复流程会静默地跑在错误的循环上
+- `self._restore_task = task` 那句不能删：asyncio 只持弱引用，
+  不留强引用任务可能被 GC 掉，表现为「有时恢复有时不恢复」
+
+### 踩过的坑
+
+- **切页动画让 `currentWidget()` 延迟 300ms 才更新**：
+  qfluentwidgets 的 `setCurrentWidget` 默认 `popOut=True`，那条分支
+  只记下 `_nextIndex` 并起动画，**不调 `super().setCurrentIndex()`**。
+  测试里 `setAnimationEnabled(False)` 解决——不要改成 sleep 等动画，
+  也不要把断言弱化成「调用过 setCurrentWidget」（坑位 30）
+- **`deleteLater()` 在不转 Qt 事件循环的测试里等于没拆**：它只往队列里
+  排一个 `DeferredDelete`，纯 asyncio 的测试文件没人消费这个队列，
+  析构不发生 → `destroyed` 不发 → `subscribe_theme` 的解绑不执行。
+  实测建 3 个窗口后主题回调数 57，`deleteLater()` 之后还是 57。
+  用 `QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)`
+  才真正归零（坑位 31）。这条同时更正了 §13.7 原先的说法：贵的不是
+  「构造窗口」，是**没死透的旧窗口**
+- 测试 `test_ui_restore.py` 12 例，**5 轮破坏验证**：删
+  `discard_restorable` / 断开 `task_added` / 删 `_reseed_counter` /
+  改成自动续传 / 删标题截断，各自只让对应用例变红
+
+---
+
+## M6.11 (2026-08-24) — 下载前选项对话框
+
+> 文档自评里这一项 ROI 最高。范围刻意只取 4 个「单次下载产物」字段——
+> 把弹窗做成「这一批我想要什么」的小开关，不侵入设置页的「持久偏好」
+> 概念，避免出现「我在弹窗里关掉的字幕，会不会被记成全局关闭」的歧义。
+
+### 形状（保住唯一的 `AppConfig → DownloadOptions` 搬运边界）
+
+- 解析页所有「准备入队一条下载」的入口（quick download / 勾选下载）都
+  改走 `_options_for_overrides(overrides=None)`，不再直接 `_build_options()`。
+  右键菜单「作为单视频下载」保留 `_options_for_overrides()` 但不接弹窗——
+  右键菜单本身已经是一个明确操作
+- **弹窗不绕进 `_build_options`**：overrides 用 `dataclasses.replace` 叠
+  加在已搬运好的 `DownloadOptions` 上，并按 `DownloadOptions` 字段名作白
+  名单过滤（防止 `database_path` / `proxy` 这类 AppConfig 字段被误传）
+- `_build_options_covers_every_shared_config_field` 守卫测试继续生效——
+  `prompt_before_download` 是 AppConfig-only（DownloadOptions 没有同名
+  字段），所以守卫用的 `cfg_names & opt_names` 交集算法天然不踩它
+
+### 触发方式（你定的）
+
+- 设置页「主题与外观」卡片里加一个 `prompt_before_download` SwitchButton，
+  默认 **False**——「点一下就走」是绝大多数用户的心智模型
+- 启动时主窗口从设置页的 `_cfg` 读初值并下发到 `parse_interface`；用户
+  在设置页里切换时通过 `promptBeforeDownloadChanged` 信号实时下发，不
+  必重启
+
+### 弹窗本身（`PromptOptionsDialog`）
+
+- `qfluentwidgets.MessageBoxBase` 子类。两个按钮（**下载** / **取消**）。
+  本仓库这个版本的 qfluentwidgets 没有 `view` widget，只有 `viewLayout`
+  （QVBoxLayout），这是与文档示例不一致的地方，必须看本地源码
+- 字段：`max_quality` / `container` / `write_thumbnail` / `write_metadata_json`
+- 选项集合复用设置页已定的 `["mp4","mkv"]` / `["best","8k","4k","1080p","720p","480p"]`
+  ——不在弹窗里另起炉灶，否则两处能选的值不一样就是 bug
+- 测试用 `tests/test_prompt_options.py` 11 例（`exec()` 会进模态循环，
+  offscreen 测试环境下会卡死，所以测试覆盖三个非模态面：构造 / 字段
+  收集 / ParsePage 集成）
+
+### 配置层
+
+- `AppConfig.prompt_before_download: bool = False`，加进 `DEFAULTS`、
+  `load_config` 的显式字段；`to_dict()` 自动包含（`asdict`），所以
+  settings.py 的 `_on_save` 一行 `data["prompt_before_download"] = ...`
+  就够了
+- YAML 存盘键 `prompt_before_download`，人类可读；切换瞬时生效
+
+---
+
+## M6.12 (2026-08-24) — YouTube 适配器 + 注册收敛 + CI 打包 workflow
+
+> 这一轮是「最低成本扩张」的样板：YouTube adapter 总共不到 200 行
+> 代码+测试，证明架构允许「按平台复杂度调整 adapter 厚度」。
+
+### YouTube 适配器（`platforms/youtube/`）
+
+- **URL 分类**：watch / shorts / embed / live / youtu.be 五种视频形态 +
+  /@handle / /channel/UC... 频道 + /playlist 三类容器，全部正则驱动。
+  11 字符 video ID 用 `(?:[&#]|$)` 锚定定长，拒绝 `watch?v=IDextra` 这类
+  12 字符的伪 ID
+- **元数据获取**：`asyncio.to_thread` 包 `yt_dlp.YoutubeDL.extract_info(
+  download=False)`，仿浏览器 UA；失败 → 返回占位 item（title="YouTube
+  ID"），让 GUI 仍能入队，把元数据拉取完全交给下载阶段兜底
+- **故意不做**：channel / playlist 容器展开（由 yt-dlp 自己处理）、
+  danmaku / 字幕 / NFO post-processing（yt-dlp 原生支持 YouTube）、
+  cookie 注入（YouTube 不需要）
+- **架构验真**：这是「adapter 极简化」样本——B 站 / 抖音各自 1000+ 行
+  adapter（容器策略 / 签名 / cookie），YouTube 不到 200 行。说明架构
+  允许「按平台复杂度调整 adapter 厚度」
+
+### 注册收敛
+
+- 原来 3 处 `from ..platforms import douyin, bilibili` 的副作用 import
+  （server/app.py / mcp/server.py / core/engine_loader.py）合并为单点
+  `from .. import platforms`。新增 platform 只需改 `platforms/__init__.py`
+  一处即可
+
+### CI 打包 workflow（`.github/workflows/build.yml`）
+
+- 触发：tag `v*` push（自动跑 + 创建 GitHub Release draft）+ 手动
+  `workflow_dispatch`（仅验证打包，不发版）
+- 流程：测试 → `build_installer.py` → 计算 SHA256 → 上传 artifact
+  （90 天）→ （仅 tag）创建 draft release
+- 显式不交叉验证：用 PyInstaller 命令行重写一遍「会复制一份维护成本」，
+  直接调项目里既有的 `scripts/build_installer.py`
+- 故意不加密签名：项目规模不需要 GPG，SHA256 已是最低成本的「未篡改」
+  证据
+- ruff 已经在 CI 装了；mypy **没**装——仓库本就没有 mypy 配置，强行加
+  要写大量第三方库（PySide6/qfluentwidgets）的 type stubs，性价比低
+
+---
+
+## M6.13 (2026-08-25) — YouTube 下载双故障修复 + 错误可见性
+
+> 用户报「YouTube 能解析但下载失败」，跟进后发现是**两个独立的非对称故障
+> 叠加**，并且失败后 GUI 只显示「engine returned False」，无法定位。
+> 一次改动同时把**故障根因**和**故障可见性**都修掉。
+
+### 修复 1：解析与下载用不同 User-Agent → YouTube 403（`engines/yt_dlp.py`）
+
+**症状**：解析能拿到标题和作者，但点下载就失败，GUI 显示 403。
+
+**根因**：`YouTubeAdapter._extract_meta(do_meta=True)` 为元数据抓取硬编码了
+一个 Chrome UA（`Mozilla/5.0 ... Chrome/124.0 Safari/537.36`），但引擎层
+之前只在 `DownloadOptions.user_agent` **显式传了值**时才写进 yt-dlp，
+否则沿用 yt-dlp 内置的 `yt-dlp/<版本号>`。YouTube 近年对裸
+`yt-dlp/*` UA 渐进式 HTTP 403，于是出现**解析阶段过了、下载阶段被拒**
+的不对称失败。
+
+**修法**：
+- `engines/yt_dlp.py` 新增模块级常量 `DEFAULT_USER_AGENT`（与适配器用
+  同一串 Chrome UA），`_build_opts()` 改为
+  `opts["user_agent"] = options.user_agent or DEFAULT_USER_AGENT`。
+- 保证**解析与下载永远用同一个身份**。对 B 站 / 抖音也是无害的更保守
+  默认（本来两者的 UA 宽容度就更高）。
+
+### 修复 2：独立视频布局把标题写两遍 → Windows MAX_PATH（`file_layout` + `naming`）
+
+**症状**（用户截图原文）：
+```
+yt-dlp error: ERROR: unable to open for writing: [Errno 2] No such file or directory:
+'Downloaded\youtube\The Middle-Sized Garden\video\
+  Garden design in is the detail - ... oasis\
+  Garden design in is the detail - ... oasis_If_JeStOC1o.f401.mp4.part'
+```
+标题 "Garden design in is the detail - how to transform a boring backyard to a
+lush green oasis" 约 95 字，同时出现在**子目录名**和**文件名前缀**里，
+路径总长度直接突破 Windows 经典 MAX_PATH=260。yt-dlp 打开 `.part` 时，
+Windows API 因父目录路径超限返回「找不到文件」，与真实的文件不存在共享
+错误码，表象非常有欺骗性。
+
+**修法（三层防线，任何单一一层都不够）**：
+
+| 层 | 改动 | 效果 |
+| --- | --- | --- |
+| `file_layout.item_leaf_parts()` | **独立视频不再套 `{title}/` 子目录**，返回 `[]` | 消除标题翻倍，立省 80–100 字路径长度 |
+| `file_layout.MAX_COMPONENT` | 120 → 80 | 防止 collection/section/episode 三层各顶到 120 字 |
+| `naming.MAX_BASENAME` | 200 → 120 | 文件名含 `{title}_{id}` 本身也被上限兜底 |
+
+独立视频布局因此从：
+```
+Downloaded/youtube/author/video/{title_dir}/{title}_{id}.mp4
+```
+变为（与 yt-dlp 默认输出、合集内 episode 的布局一致）：
+```
+Downloaded/youtube/author/video/{title}_{id}.mp4
+```
+
+Sidecar 文件（缩略图 / NFO / JSON / 字幕 / 弹幕）共享同一个 basename 前
+缀，在文件系统里天然排序到一起，**不需要独立子目录也能自证归属**。
+
+**合集/分类合集布局保持不变**：合集名与分集名本来就不重复，套合集子目录
+才有意义（"所有 episode 共享一个文件夹"这个用户期望必须保留）。
+
+`item_leaf_name()` 同步加空列表兜底，不影响未来调用方。
+
+### 修复 3：pipeline 重试循环吞掉引擎真实错误（`core/pipeline.py`）
+
+**症状**：无论引擎是 403、超时、磁盘满还是 `[Errno 2]`，GUI 失败提示永
+远是「下载失败」或至多「engine returned False」，无法区分故障。
+
+**根因**：`pipeline._download_with_progress` 的重试循环在引擎返回
+`False` 后直接：
+```python
+last_error = "" if ok else "engine returned False"
+```
+把引擎之前已经通过 progress hook 传上来的具体错误（如
+`"yt-dlp error: HTTP Error 403: Forbidden"`、
+`"yt-dlp error: [Errno 2] No such file or directory"`）**覆盖成通用
+字符串**。
+
+**修法**：为引擎侧的 progress 回调加一层 wrapper
+（`_wrap_engine_progress`），闭包把 `yt-dlp error:` / `yt-dlp reported`
+开头的消息写进共享 dict `last_engine_error`。最终赋值优先级：
+
+```
+last_error = 捕获到的引擎具体错误 or "engine returned False"
+```
+
+pipeline 自己抛出的异常分支同样优先用捕获内容，只有真的没任何线索时才
+退回 `f"Exception: {exc}"`。GUI 因此能把真正的 HTTP 错误 / Errno / 超时
+显示出来，不用靠猜。
+
+### 测试修正
+
+两条 `test_storage.py` 用例原先断言旧布局（独立视频有 title 子目录）：
+
+- `test_resolve_item_dir_creates_leaf` → 重写为
+  `test_resolve_item_dir_standalone_no_leaf_subdir`：断言独立视频的
+  `item_dir` 等于 `save_dir`（共享目录，无额外 leaf）
+- `test_resolve_item_dir_sanitizes_illegal_chars_in_leaf` → 重写为
+  `test_resolve_item_dir_sanitizes_illegal_chars_in_collection_leaf`：
+  把「非法字符过滤」验证移到合集场景——合集名仍然真有子目录，语义匹配。
+
+309 条核心测试（storage / pipeline / engines / adapters / sidecars / task_manager）全部通过。
+
+---
+
 ## 0.1.0 统计（保留历史快照）
 - 源码 62 个 .py 文件，约 12,100 行
 - 测试 19 个文件，385 个用例收集：**381 passed / 4 skipped**

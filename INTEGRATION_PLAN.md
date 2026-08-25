@@ -223,7 +223,7 @@ class PlatformAdapter(Protocol):
     def postprocess_pipeline(self) -> list[PostprocessStep]: ...  # 由内核循环调用
 ```
 
-平台 adapter 的好处：将来加 YouTube / TikTok 国际版 / 小红书 / 微博只需要写一个新 `platforms/<name>/` 目录 + 在 `registry` 注册一行。
+平台 adapter 的好处：**YouTube 已用这套接口落地**（M6.9，见 `src/doubi/platforms/youtube/`），后续加 TikTok 国际版 / 小红书 / 微博只需要再写一个新 `platforms/<name>/` 目录 + 在 `registry` 注册一行。
 
 ### 3.3 异步模型决策
 
@@ -369,7 +369,7 @@ class PlatformAdapter(Protocol):
 
 ### M7 · 后续扩展（不断迭代）
 
-- [ ] YouTube adapter（douyin 项目里已有 `Douzy` 工作台，复用 yt-dlp）
+- [x] **YouTube adapter**（M6.9 已集成，见 `src/doubi/platforms/youtube/`：URL 分类 watch / shorts / embed / live / youtu.be 短链，元数据走 yt-dlp `extract_info`，下载走 yt-dlp）
 - [ ] TikTok 国际版（与抖音共享底层）
 - [ ] 小红书 / 微博 / 快手
 - [ ] WebUI（用 REST + 静态前端，给 NAS 用户用）

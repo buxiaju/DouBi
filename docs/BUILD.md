@@ -507,13 +507,41 @@ CPU 在涨、临时文件在涨，就是在压缩。
 
 ## 8. CI / 自动发布
 
-当前没有 CI 自动打包——`scripts/build_exe.py` 适合在本地手动跑。
+CI 已就位——见 `.github/workflows/build.yml`（`build-installer`）。
+工作流在 `windows-latest` runner 上跑，分两段：
 
-未来要自动化时建议：
-- 在 GitHub Actions 的 `windows-latest` runner 上跑 `python scripts/build_installer.py`
-- 上传 `dist/DouBi-Setup-<version>.exe` 到 GitHub Release
-- SHA256 校验和写进 Release notes
-- `--onedir` 裸目录打 zip 做 dev / nightly 渠道，跳过 10 分钟的 LZMA 压缩
+**测试段**——`pip install .` + `pytest --maxfail=5`，`QT_QPA_PLATFORM=offscreen`
+让无头环境也能跑 GUI 类测试（PySide6 缺失时自动 skip）。超 5 个失败
+直接终止，避免花 25 分钟跑完一整轮注定红的测试。
+
+**打包段**——`python scripts/build_installer.py`，链路就是 §6.1 的
+`build_installer.py → build_exe.py --onedir → makensis`，与本地完全一致。
+产物定位用 `Get-ChildItem` 而不是硬编码文件名（版本号单一真源在
+`pyproject.toml`，workflow 里不抄版本号）。
+
+**SHA256**——`Get-FileHash -Algorithm SHA256` 生成
+`DouBi-Setup-<version>.exe.sha256`，与安装包一起作为 artifact 上传
+（保留 90 天）。下载者用 `certutil -hashfile ... SHA256` 或
+`Get-FileHash` 自行核验。
+
+**触发**：
+
+| 触发方式 | 行为 |
+| --- | --- |
+| 推送 `v*` 形式的 tag（如 `v0.1.0`） | 测试 + 打包 + 上传 artifact + **创建 GitHub Release**（draft，发版动作由人触发） |
+| `workflow_dispatch` 手动 dispatch | 测试 + 打包 + 上传 artifact，**不**创建 release——用来验证「现在的 main 分支能不能成功打包」 |
+
+**Release notes**用 `generate_release_notes: true`，让 GitHub 根据
+commit 历史自动生成；仓库里有手写的 `docs/CHANGELOG.md`，PR description
+也够用，不再硬编码进 workflow。
+
+**为什么不换 linux runner**：NSIS 用 `tools/nsis/makensis.exe`（Windows
+二进制），PySide6 wheel 也是 Windows 风格。换 runner 会让打包工具链
+不通用，触发非 Windows 特有的 flakiness，得不偿失。
+
+**dev / nightly 渠道**（`--onedir` 裸目录打 zip）尚未接入 workflow——
+本地可手动 `python scripts/build_exe.py --onedir` 跑一份，跳过 10 分钟
+的 LZMA 压缩。
 
 ## 9. 跨平台
 

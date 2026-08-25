@@ -20,7 +20,8 @@
 
 - ✅ **抖音**（单条 / 合集批量 / 用户作品 / 弹窗链接；合集列举走签名 Web API，下载走 yt-dlp）
 - ✅ **B 站**（`Bili23-Downloader` 接入；下载走 yt-dlp）
-- 🚧 计划：YouTube / TikTok 国际版 / 小红书 / 微博 / 快手
+- ✅ **YouTube**（watch / shorts / embed / live / youtu.be 短链；元数据走 yt-dlp `extract_info`，下载走 yt-dlp）
+- 🚧 计划：TikTok 国际版 / 小红书 / 微博 / 快手
 
 ## 获取
 
@@ -39,6 +40,9 @@ python scripts/build_installer.py
 - 卸载零残留；`~/.doubi` 里的配置与下载记录默认**保留**，需要清除时在卸载界面勾选
 
 首次打包耗时约 10 分钟（LZMA 压缩 825 MB 是单线程的），细节见 [docs/BUILD.md](docs/BUILD.md)。
+
+> 推 tag `v*` 后 GitHub Actions 会自动跑测试 + 打包 + 上传安装包并附 SHA256 校验到
+> GitHub Release（draft），见 [`.github/workflows/build.yml`](.github/workflows/build.yml)。
 
 ### 开发者：从源码装
 
@@ -67,6 +71,10 @@ doubi download -u "https://www.bilibili.com/video/BV1xx411c7mD" -o ./Downloaded
 
 # 下载抖音
 doubi download -u "https://www.douyin.com/video/7123456789012345678" -o ./Downloaded
+
+# 下载 YouTube（watch / shorts / youtu.be 短链均可）
+doubi download -u "https://www.youtube.com/watch?v=dQw4w9WgXcQ" -o ./Downloaded
+doubi download -u "https://youtu.be/dQw4w9WgXcQ" -o ./Downloaded
 
 # 批量下载抖音合集（APP 分享的 iesdouyin 链接同样支持）
 doubi download -u "https://www.douyin.com/collection/7647083357288957995" -o ./Downloaded
@@ -150,7 +158,8 @@ DouBi/
 │   ├── platforms/                 # 平台适配器
 │   │   ├── base.py                # PlatformAdapter ABC
 │   │   ├── douyin/                # 抖音
-│   │   └── bilibili/              # B 站
+│   │   ├── bilibili/              # B 站
+│   │   └── youtube/               # YouTube
 │   ├── cli/                       # 命令行
 │   │   └── main.py
 │   ├── server/                    # REST（FastAPI）
@@ -178,7 +187,7 @@ DouBi/
 ├── tools/nsis/                    # 内置便携版 NSIS，clone 下来即可打包
 ├── screenshots/                   # 文档用截图
 ├── docs/                          # 见下方「文档」表
-└── tests/                         # 20 个测试文件，454 条用例
+└── tests/                         # 27 个测试文件，676 条用例
 ```
 
 > 仓库里不含 `Bili23-Downloader-main/` 与 `douyin-downloader-main/` 这两个被整合的

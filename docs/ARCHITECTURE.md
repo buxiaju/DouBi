@@ -1,6 +1,6 @@
 # DouBi 架构说明
 
-> 版本：M6.7 快照（2026-08-23） · 对应 `INTEGRATION_PLAN.md` 的 M0–M6 与 `CHANGELOG.md` 的 M6.1–M6.7
+> 版本：M6.12 快照（2026-08-24） · 对应 `INTEGRATION_PLAN.md` 的 M0–M6 与 `CHANGELOG.md` 的 M6.1–M6.12
 
 ## 1. 分层
 
@@ -29,8 +29,9 @@
 │ platforms/（平台适配器，自注册）                               │
 │   douyin/    adapter / api / auth / strategies / url / live /
 │              webapi（签名 Web API）/ sign（a_bogus / x_bogus）
-│   bilibili/  adapter / api / auth / strategies / url /      │
+│   bilibili/  adapter / api / auth / strategies / url /              │
 │              qr_login / wbi                                 │
+│   youtube/  adapter / url（URL 分类 + yt-dlp extract_info）   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -79,6 +80,10 @@ yt-dlp **没有**抖音合集/用户页抽取器，展开完全走签名 Web API
   搬运点，漏一个字段等于这个开关在那一端是死的。两端都有
   `test_build_options_covers_every_shared_config_field` 守着，新字段漏转会立刻
   红测。
+  **overrides 叠加层**（M6.11）：GUI 的「下载前选项弹窗」用
+  `dataclasses.replace(_build_options(), **overrides)` 叠加用户临时修改的 4 个字段
+  （画质 / 容器 / 缩略图 / JSON），不绕进 `_build_options` 内部。详见
+  `DEVELOPMENT.md §13.8`。
 
 ## 3. 多形态统一
 
@@ -86,7 +91,7 @@ yt-dlp **没有**抖音合集/用户页抽取器，展开完全走签名 Web API
 |---|---|---|---|
 | CLI | `doubi` | 无额外 | `download / auth / live / migrate / platforms` |
 | GUI | `doubi-gui` | PySide6 + qfluentwidgets + qasync | qasync 把 asyncio loop 跑在 Qt 主线程 |
-| REST | `doubi-serve` | fastapi + uvicorn | JobManager 内存任务队列，TTL + cap 剪枝 |
+| REST | `doubi-serve` | fastapi + uvicorn | JobManager 内存任务队列，TTL + cap 剪枝；M6.9 起默认绑 `127.0.0.1` + 可选 token 鉴权 |
 | MCP | `doubi-mcp` | 无（stdlib） | 行分隔 JSON-RPC 2.0，stdout 只写协议 |
 
 ## 4. 登录体系
@@ -106,7 +111,14 @@ media_item      (platform, item_id) PK · title/author_id/author_name/
 task            task_id PK · platform/status/total/succeeded/failed/
                 started_at/finished_at/config_snapshot
 increment_checkpoint  (platform, user_id, mode) PK · last_item_id/last_check_time
+pending_task    task_id PK · platform/item_id/title/source_url/
+                media_type/options_snapshot/created_at    ← M6.10 跨进程恢复
 ```
+
+**`pending_task`** 表（M6.10）记录「已入队但未完成」的任务，供 GUI 重启后
+恢复。任务完成或取消时删除对应行；``options_snapshot`` 是
+``DownloadOptions`` 的 JSON 编码快照，保证恢复后与原任务用同一份下载选项。
+详见 `DEVELOPMENT.md §13.2.1`。
 
 旧库迁移：`doubi migrate --from douyin --path dy_downloader.db --into doubi.db`
 （B 站：`--from bilibili`，best-effort）。
@@ -150,6 +162,9 @@ increment_checkpoint  (platform, user_id, mode) PK · last_item_id/last_check_ti
   后写出，与平台无关。
 * **断点续传**：`resume=True` 时 yt-dlp 开 `continuedl`，且 `.part` / `.ytdl` 中间
   文件只在完成后清理；取消（协作式）也不清它们，保证后续 resume 可以接上。
+  **跨进程恢复**（M6.10）：GUI 重启后会读 `pending_task` 表，询问用户是否恢复
+  未完成任务——恢复出来的任务一律是 `paused` 状态（不自动开下），`.part` 文件
+  仍在磁盘上，用户确认后断点续传。详见 `DEVELOPMENT.md §13.2.1`。
 
 **合集会额外铺开目录层级**，由 `core/storage/file_layout.py` 依据 `item_leaf_parts()`
 生成，与 `naming.py` 的职责严格分离：
