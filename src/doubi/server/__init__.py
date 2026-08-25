@@ -24,6 +24,20 @@ Run via ``doubi serve --host 127.0.0.1 --port 8000`` (or
 
 from __future__ import annotations
 
-from .app import build_app, main, run_server
-
+# Lazy import: ``app`` -> ``schemas`` -> ``pydantic`` / ``fastapi`` is the
+# heavy optional chain. Eagerly importing it here forced every consumer of
+# ``doubi.server`` (including ``doubi.server.security`` which only uses
+# stdlib) to require pydantic, breaking collection in environments where
+# the server extras aren't installed (CI, the CLI-only path, tests of the
+# security primitives). Use PEP 562 module-level ``__getattr__`` to defer
+# the import until the names are actually referenced.
 __all__ = ["build_app", "main", "run_server"]
+
+
+def __getattr__(name: str):  # noqa: D401
+    if name in {"build_app", "main", "run_server"}:
+        from . import app as _app
+        for _n in ("build_app", "main", "run_server"):
+            globals()[_n] = getattr(_app, _n)
+        return globals()[name]
+    raise AttributeError(f"module 'doubi.server' has no attribute {name!r}")

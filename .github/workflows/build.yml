@@ -57,6 +57,10 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
           PYTHONPATH: src
+        # 显式 ``shell: bash``：脚本里 ``${PIPESTATUS[0]}`` 和
+        # ``if [ ... ]; then ... fi`` 是 bash 语法，Windows runner
+        # 默认 pwsh 会把它当语法错——这一步白跑 50 秒还没报清楚。
+        shell: bash
         # 跳过 GUI 类测试（无 PySide6 → 全部 skip），但**不**加
         # ``--ignore=tests/test_*_gui.py``——它们的 skip 行为本身
         # 是一条信息（环境里有没有 PySide6）。让 PySide6 缺失直接
@@ -67,9 +71,18 @@ jobs:
         run: |
           python -m pytest -q --maxfail=5 2>&1 | tee pytest.log
           if [ ${PIPESTATUS[0]} -ne 0 ]; then
-            echo "::error::Tests failed (see pytest.log)"
+            echo "::error::Tests failed (see pytest.log artifact)"
             exit 1
           fi
+
+      - name: Upload pytest.log on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-log
+          path: pytest.log
+          retention-days: 14
+          if-no-files-found: ignore
 
       - name: Build Windows installer
         # ``build_installer.py`` 默认会先跑 ``build_exe.py``（PyInstaller

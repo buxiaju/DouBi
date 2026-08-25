@@ -14,6 +14,8 @@ import re
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src" / "doubi"
 VERSION_FILE = SRC / "__init__.py"
@@ -87,6 +89,7 @@ def test_setuptools_resolves_the_same_version():
     这条守的是 ``attr:`` 路径写错（比如 packages.find 的 where 变了）
     时的静默降级——setuptools 会报错或给出别的值，而不是恰好相同。
     """
+    pytest.importorskip("setuptools")
     from setuptools.config.pyprojecttoml import read_configuration
 
     import doubi
