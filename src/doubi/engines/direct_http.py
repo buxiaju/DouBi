@@ -11,6 +11,7 @@ items need.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from pathlib import Path
@@ -18,7 +19,14 @@ from typing import Optional
 
 from ..core.models import DownloadOptions, MediaItem
 from ..core.storage.file_layout import resolve_item_dir
-from .base import Engine, EngineProgress, EngineProgressCallback
+from .base import (
+    Engine,
+    EngineProgress,
+    EngineProgressCallback,
+    cancel_flag_polling,
+    output_path_under,
+    safe_basename_for_item,
+)
 
 logger = logging.getLogger("doubi.engines.direct_http")
 
@@ -67,11 +75,21 @@ class DirectHttpEngine(Engine):
             return False
 
         out_dir = resolve_item_dir(item, options)
-        out_dir.mkdir(parents=True, exist_ok=True)
+        # Directory itself could be deep and exceed MAX_PATH; wrap mkdir
+        # in try/except and fail with a clear message instead of a raw
+        # OSError from the depths.
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            err_msg = f"无法创建输出目录 {out_dir}: {exc}"
+            logger.error("[direct_http] %s", err_msg)
+            if on_progress:
+                on_progress(EngineProgress(fraction=0.0, message=err_msg))
+            return False
 
-        basename = self._safe_basename(item)
+        basename = safe_basename_for_item(item)
         ext = item.extra.get("sniff_ext") or self._guess_ext(item.source_url) or "mp4"
-        output_path = out_dir / f"{basename}.{ext}"
+        output_path = output_path_under(out_dir, basename, ext)
         part_path = output_path.with_suffix(output_path.suffix + ".part")
 
         url = item.source_url
@@ -81,6 +99,8 @@ class DirectHttpEngine(Engine):
             await self._download_file(
                 aiohttp, url, part_path, output_path, options, on_progress
             )
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             logger.error("[direct_http] download failed: %s", exc)
             if on_progress:
@@ -91,7 +111,7 @@ class DirectHttpEngine(Engine):
             return False
 
         if on_progress:
-            on_progress(EngineProgress(fraction=1.0, message="download complete"))
+            on_progress(EngineProgress(fraction=1.0, message="下载完成"))
         logger.info("[direct_http] download complete: %s", output_path)
         return True
 
@@ -104,27 +124,25 @@ class DirectHttpEngine(Engine):
         options: DownloadOptions,
         on_progress: Optional[EngineProgressCallback],
     ) -> None:
+        cancel_flag = getattr(options, "cancel_check", None)
+
         existing = 0
         headers = {}
-
         if options.resume and part_path.exists():
             existing = part_path.stat().st_size
             if existing > 0:
                 headers["Range"] = f"bytes={existing}-"
                 logger.debug("[direct_http] resume from byte %d", existing)
 
-        async with aiohttp.ClientSession() as session:
+        timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=60)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(url, proxy=options.proxy, headers=headers) as resp:
                 if resp.status == 416:
-                    # Range Not Satisfiable — file already complete
                     part_path.rename(output_path)
                     return
-
                 if existing > 0 and resp.status == 200:
-                    # Server doesn't support Range — start over
                     existing = 0
                     part_path.unlink(missing_ok=True)
-
                 resp.raise_for_status()
 
                 total = int(resp.headers.get("Content-Length", 0)) or 0
@@ -132,13 +150,34 @@ class DirectHttpEngine(Engine):
                     total += existing
 
                 downloaded = existing
-                chunk_size = 64 * 1024  # 64 KB
+                chunk_size = 64 * 1024
                 last_pct = -1
+                stale_seconds = 0.0
 
                 mode = "ab" if (options.resume and existing > 0 and resp.status == 206) else "wb"
                 with open(part_path, mode) as f:
+                    loop = asyncio.get_event_loop()
+                    last_activity_at = loop.time()
                     while True:
-                        chunk = await resp.content.read(chunk_size)
+                        # Cancel check first, so a paused/removed task stops
+                        # downloading even in the middle of content read.
+                        if cancel_flag_polling(cancel_flag):
+                            raise asyncio.CancelledError("direct_http cancelled via flag")
+                        try:
+                            chunk = await asyncio.wait_for(
+                                resp.content.read(chunk_size),
+                                timeout=30.0,
+                            )
+                        except asyncio.TimeoutError:
+                            now = loop.time()
+                            stale_seconds += now - last_activity_at
+                            if stale_seconds > 180:
+                                raise RuntimeError(
+                                    f"direct_http stalled: no data for {int(stale_seconds)}s"
+                                )
+                            continue
+                        last_activity_at = loop.time()
+                        stale_seconds = 0.0
                         if not chunk:
                             break
                         f.write(chunk)
@@ -155,14 +194,6 @@ class DirectHttpEngine(Engine):
 
         if part_path.exists():
             part_path.rename(output_path)
-
-    @staticmethod
-    def _safe_basename(item: MediaItem) -> str:
-        """Return a subprocess-safe basename (no spaces / special chars)."""
-        raw = item.output_template or (item.title or item.item_id)
-        s = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', raw)
-        s = re.sub(r'\s+', '_', s).strip('_')
-        return s or "video"
 
     @staticmethod
     def _guess_ext(url: str) -> str:

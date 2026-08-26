@@ -37,6 +37,7 @@ ROOT = Path(__file__).resolve().parent.parent
 ENTRY = ROOT / "src" / "doubi" / "ui" / "app.py"
 ICON = ROOT / "src" / "doubi" / "ui" / "resources" / "icon.ico"
 SVG_TEMPLATE = ROOT / "src" / "doubi" / "ui" / "resources" / "icon_template.svg"
+LOCALES_DIR = ROOT / "src" / "doubi" / "ui" / "locales"
 
 
 def _find_playwright_browsers_dir() -> Path | None:
@@ -139,6 +140,8 @@ def main() -> int:
         "--specpath", str(ROOT),
         "--icon", str(ICON),
         "--add-data", f"{SVG_TEMPLATE}{sep}doubi/ui/resources",
+        # i18n JSON 词表（和上面 icon_template 一样，走读 JSON 文件不是 QRC）
+        "--add-data", f"{LOCALES_DIR}{sep}doubi/ui/locales",
         # 第三方 Qt 库的隐藏资源 / 插件
         "--collect-all", "qframelesswindow",
         "--collect-all", "qfluentwidgets",

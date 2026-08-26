@@ -27,8 +27,10 @@
 
 from __future__ import annotations
 
+import importlib.resources as ilr
 import json
 import logging
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -47,8 +49,54 @@ __all__ = [
 #: 源语言，也是所有 key 的兜底语言。新字符串先在这里出现，再翻译出去。
 DEFAULT_LANGUAGE = "zh_CN"
 
+
+def _resolve_locales_dir() -> Path:
+    """返回词表 ``locales`` 目录的**真实可读**绝对路径。
+
+    三种运行形态，优先级从高到低：
+
+    1. **PyInstaller frozen bundle** — 脚本启动时 PyInstaller 把
+       ``--add-data`` 收集的所有文件解压到 ``sys._MEIPASS``。
+       ``doubi/ui/i18n.py`` 被编译为字节码塞进 PYZ CArchive，模块级
+       ``Path(__file__)`` 指向 PYZ 里的**假路径**，拼出的 ``locales``
+       自然不存在；必须用 ``_MEIPASS`` 重拼真实解压位置。
+    2. **源码 / pip -e（可编辑）安装** — ``Path(__file__).parent / locales``
+       就是真实目录，直接用。
+    3. **普通 pip wheel 安装** — 模块源文件仍在 site-packages/doubi/ui/，
+       回退到 (2) 已经覆盖，这里显式地再 ``importlib.resources`` 兜底，
+       避免打包成 ``.zipapp`` 或 ``pex`` 等极端形态时失败。
+    """
+    # 1) Frozen: _MEIPASS / doubi / ui / locales
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        candidate = Path(sys._MEIPASS) / "doubi" / "ui" / "locales"
+        if candidate.is_dir():
+            return candidate
+        logger.warning("PyInstaller frozen: _MEIPASS/locales 未找到，词表将 fallback 到 key 本身")
+
+    # 2) Normal: alongside this module
+    src_side = Path(__file__).resolve().parent / "locales"
+    if src_side.is_dir():
+        return src_side
+
+    # 3) importlib.resources fallback: find package "doubi.ui" and locate locales/
+    try:
+        pkg_locales = ilr.files("doubi.ui").joinpath("locales")  # type: ignore[attr-defined]
+        with ilr.as_file(pkg_locales) as p:  # type: ignore[attr-defined]
+            resolved = Path(p)
+        if resolved.is_dir():
+            logger.debug("locales/ 目录通过 importlib.resources 定位到 %s", resolved)
+            return resolved
+    except Exception:
+        # importlib.resources 失败（例如没装成 package）—— 回退返回 src_side，
+        # 调用方 load 会发现路径不存在，打 debug 日志并返回空表。这已经是
+        # 所有兜底都失效后的「最后一条路」：把 源文件侧目录当线索继续返回，
+        # 避免抛出异常导致 import 本模块直接挂。
+        pass
+    return src_side
+
+
 #: 词表目录。和本模块同层的 ``locales/``。
-_LOCALES_DIR = Path(__file__).resolve().parent / "locales"
+_LOCALES_DIR = _resolve_locales_dir()
 
 # 语言 key → 显示名。显示名用各自语言书写，方便用户在母语里认出自己的语言。
 # 顺序即界面展示顺序（源语言排第一）。

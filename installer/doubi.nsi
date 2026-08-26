@@ -71,6 +71,12 @@ InstallDir "$LOCALAPPDATA\${PRODUCT_NAME_EN}"
 ; 重装时沿用上次的安装位置（HKCU，与 per-user 安装一致）
 InstallDirRegKey HKCU "Software\${PRODUCT_NAME_EN}" "InstallDir"
 RequestExecutionLevel user
+; DatablockOptimize 会合并相同块并改写文件内容布局，但 makensis 3.11 对
+; > 1 GB 的大安装包偶发"launcher 自校验 CRC 头"与实际文件不一致的 bug，
+; 结果就是 NSIS launcher 弹出"Installer integrity check has failed"。
+; 代价是体积增加约 3–4%（这里增加十几 MB），但绝对避免用户侧 integrity
+; 校验失败（静默安装还会被企业安全软件误判为"篡改包"拦截）。
+SetDatablockOptimize off
 SetCompressor /SOLID lzma
 BrandingText "${PRODUCT_NAME_EN} ${PRODUCT_VERSION}"
 

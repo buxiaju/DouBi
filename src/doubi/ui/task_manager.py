@@ -30,13 +30,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QObject, Signal, Slot
+from PySide6.QtCore import QObject, Signal
 
 from ..core.models import DownloadOptions, MediaItem, Platform
 from ..core.pipeline import DownloadPipeline, ProgressEvent
@@ -486,8 +485,6 @@ class TaskManager(QObject):
                 # Look for files matching item's title/ basename
                 media_exts = (".mp4", ".mkv", ".flv", ".webm", ".mov", ".avi",
                               ".m4v", ".ts", ".m4a")
-                base = (info.item.output_template
-                        or info.item.title or info.item.item_id or "").strip()
                 any_file = False
                 for p in out_dir.iterdir():
                     if not p.is_file():
@@ -702,10 +699,20 @@ class TaskManager(QObject):
             # would leave a trap for the next consumer that does trust the
             # argument. Every other emit site in this file already passes
             # ``info.fraction``.
-            if not (ev.extra or {}).get("retry"):
-                info.fraction = ev.fraction
-            info.message = ev.message
-            self.task_progress.emit(task_id, info.fraction, ev.message)
+            try:
+                if not (ev.extra or {}).get("retry"):
+                    info.fraction = ev.fraction
+                info.message = ev.message or ""
+                # Guard: emit is a cross-thread / cross-loop boundary. Any
+                # Qt exception raised by a slot will propagate back *through*
+                # the engine's call site and kill the download if we don't
+                # catch it here. Engine must not die because of a UI bug.
+                try:
+                    self.task_progress.emit(task_id, info.fraction, info.message)
+                except Exception:
+                    logger.exception("TaskManager[%s] task_progress slot raised", task_id)
+            except Exception:
+                logger.exception("TaskManager[%s] _on_progress raised", task_id)
 
         try:
             ok = await self._pipeline.download_item(

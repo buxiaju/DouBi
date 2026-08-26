@@ -34,23 +34,39 @@ def build_download_widgets():
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QFontMetrics
     from PySide6.QtWidgets import (
-        QWidget, QVBoxLayout, QHBoxLayout, QLabel, QHeaderView, QMenu,
-        QAbstractItemView, QSizePolicy, QScrollArea,
+        QHBoxLayout,
+        QLabel,
+        QScrollArea,
+        QSizePolicy,
+        QVBoxLayout,
+        QWidget,
     )
     from qfluentwidgets import (
-        PushButton, ProgressBar, CardWidget, SegmentedWidget,
-        StrongBodyLabel, InfoBar, InfoBarPosition, TableWidget,
+        CardWidget,
+        InfoBar,
+        InfoBarPosition,
+        ProgressBar,
+        PushButton,
+        SegmentedWidget,
     )
 
-    from ...core.models import MediaItem
     from ..task_manager import TaskInfo, TaskManager
     from ..theme import (
-        FONT_FAMILY, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS,
-        TYPE_BODY, TYPE_CAPTION, TYPE_H2, RADIUS_CARD,
-        heading_qss, muted_qss as _muted_qss, subscribe_theme, token,
+        SPACE_LG,
+        SPACE_MD,
+        SPACE_SM,
+        SPACE_XL,
+        heading_qss,
+        subscribe_theme,
+        token,
+    )
+    from ..theme import (
+        muted_qss as _muted_qss,
     )
     from ..widgets import (
-        build_empty_state, build_page_header, build_stat_chip,
+        build_empty_state,
+        build_page_header,
+        build_stat_chip,
     )
 
     # ------------------------------------------------------------------

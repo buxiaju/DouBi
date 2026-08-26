@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import shutil
 from pathlib import Path
@@ -25,7 +26,14 @@ from typing import Optional
 
 from ..core.models import DownloadOptions, MediaItem
 from ..core.storage.file_layout import resolve_item_dir
-from .base import Engine, EngineProgress, EngineProgressCallback
+from ._subproc import SubprocessTimeout, run_supervised_subprocess
+from .base import (
+    Engine,
+    EngineProgress,
+    EngineProgressCallback,
+    output_path_under,
+    safe_basename_for_item,
+)
 
 logger = logging.getLogger("doubi.engines.nm3u8dl")
 
@@ -151,18 +159,26 @@ class Nm3u8dlEngine(Engine):
             return False
 
         out_dir = resolve_item_dir(item, options)
-        out_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            err_msg = f"无法创建输出目录 {out_dir}: {exc}"
+            logger.error("[nm3u8dl] %s", err_msg)
+            if on_progress:
+                on_progress(EngineProgress(fraction=0.0, message=err_msg))
+            return False
 
-        basename = self._safe_basename(item)
+        basename = safe_basename_for_item(item)
         raw_ext = item.extra.get("sniff_ext") or self._guess_ext(item.source_url) or "mp4"
         ext = self._sanitize_output_ext(raw_ext)
-        save_name = str(out_dir / basename)
+        final_output = output_path_under(out_dir, basename, ext)
+        save_name = final_output.with_suffix("")  # N_m3u8DL-CLI appends the extension itself
 
         cmd = [
             self._cli,
             item.source_url,
             "--workDir", str(out_dir),
-            "--saveName", save_name,
+            "--saveName", str(save_name),
             "--enableMuxFastStart",
             "--enableBinaryMerge",
             "--enableDelAfterDone",
@@ -174,7 +190,7 @@ class Nm3u8dlEngine(Engine):
             cmd += ["--proxyAddress", options.proxy]
 
         ffmpeg_dir = str(Path(self._ffmpeg).parent) if self._ffmpeg else None
-        env = dict(**__import__("os").environ)
+        env = dict(os.environ)
         if ffmpeg_dir:
             env["PATH"] = ffmpeg_dir + ";" + env.get("PATH", "")
 
@@ -184,87 +200,83 @@ class Nm3u8dlEngine(Engine):
         if on_progress:
             on_progress(EngineProgress(fraction=0.0, message="m3u8 解析中..."))
 
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            env=env,
-            limit=1024 * 1024,  # 1 MiB buffer — N_m3u8DL-CLI uses \r (no \n)
-        )
-
         last_frac = -1.0
         fatal_error = ""
+        parse_buf = bytearray()
 
-        async def _read_output():
+        def _parse_and_emit(decoded: str) -> None:
             nonlocal last_frac, fatal_error
-            assert proc.stdout is not None
-            # N_m3u8DL-CLI prints progress lines terminated by \r (carriage
-            # return), not \n.  The default StreamReader line-parser uses
-            # \n as separator and raises LimitOverrunError when a chunk
-            # exceeds the default 64 KiB limit without a newline.  We
-            # therefore read raw bytes and split on both \r and \n.
-            buf = b""
+            if not decoded:
+                return
+            if _ERROR_RE.search(decoded):
+                fatal_error = decoded
+                logger.error("[nm3u8dl] error: %s", decoded)
+            if _COMPLETE_RE.search(decoded) and on_progress:
+                on_progress(EngineProgress(fraction=1.0, message="m3u8 下载完成"))
+            if "总分片" in decoded and on_progress:
+                on_progress(EngineProgress(
+                    fraction=0.0, message="m3u8 解析完成，准备下载..."
+                ))
+            if "开始下载" in decoded and on_progress:
+                on_progress(EngineProgress(
+                    fraction=0.0, message="m3u8 下载中 0%"
+                ))
+            m = _PROGRESS_RE.search(decoded)
+            if m and on_progress:
+                current = int(m.group(1))
+                total = int(m.group(2))
+                if total > 0:
+                    frac = current / total
+                    pct = int(frac * 100)
+                    if pct != int(last_frac * 100):
+                        last_frac = frac
+                        on_progress(EngineProgress(
+                            fraction=frac,
+                            message=f"m3u8 下载中 {pct}%",
+                        ))
+
+        def _on_chunk(chunk: bytes) -> None:
+            """Chunk callback splits on \r and \n regardless of platform."""
+            parse_buf.extend(chunk)
             while True:
-                chunk = await proc.stdout.read(4096)
-                if not chunk:
+                cr = parse_buf.find(b"\r")
+                lf = parse_buf.find(b"\n")
+                if cr == -1 and lf == -1:
                     break
-                buf += chunk
-                while True:
-                    # Split on \r or \n, whichever comes first.
-                    cr = buf.find(b"\r")
-                    lf = buf.find(b"\n")
-                    if cr == -1 and lf == -1:
-                        break
-                    sep_idx = cr if lf == -1 or (cr != -1 and cr < lf) else lf
-                    line_bytes = buf[:sep_idx]
-                    buf = buf[sep_idx + 1 :]
-                    # Skip the \n that often follows \r (DOS \r\n).
-                    if sep_idx == cr and buf.startswith(b"\n"):
-                        buf = buf[1:]
-                    decoded = line_bytes.decode("utf-8", errors="replace").strip()
-                    if not decoded:
-                        continue
+                sep_idx = cr if lf == -1 or (cr != -1 and cr < lf) else lf
+                line_bytes = bytes(parse_buf[:sep_idx])
+                del parse_buf[:sep_idx + 1]
+                if sep_idx == cr and parse_buf and parse_buf[0:1] == b"\n":
+                    del parse_buf[:1]
+                _parse_and_emit(line_bytes.decode("utf-8", errors="replace").strip())
 
-                    if _ERROR_RE.search(decoded):
-                        fatal_error = decoded
-                        logger.error("[nm3u8dl] error: %s", decoded)
+        cancel_flag = getattr(options, "cancel_check", None)
 
-                    if _COMPLETE_RE.search(decoded) and on_progress:
-                        on_progress(EngineProgress(
-                            fraction=1.0, message="m3u8 下载完成"
-                        ))
+        try:
+            rc, _ = await run_supervised_subprocess(
+                cmd,
+                on_chunk=_on_chunk,
+                cancel_check=cancel_flag,
+                env=env,
+                stdout_limit=1024 * 1024,
+                chunk_size=4096,
+            )
+        except SubprocessTimeout as e:
+            rc = -1
+            fatal_error = str(e)
+        except asyncio.CancelledError:
+            # Propagate up; supervisor already killed the subprocess.
+            raise
 
-                    # Look for total / start hints too so we can update the
-                    # UI before the first #N/M progress row.
-                    if "总分片" in decoded and on_progress:
-                        on_progress(EngineProgress(
-                            fraction=0.0, message="m3u8 解析完成，准备下载..."
-                        ))
-                    if "开始下载" in decoded and on_progress:
-                        on_progress(EngineProgress(
-                            fraction=0.0, message="m3u8 下载中 0%"
-                        ))
+        # Drain whatever remained in the parse buffer (trailing line
+        # with no terminator on EOF — unlikely here but cheap).
+        if parse_buf:
+            _parse_and_emit(bytes(parse_buf).decode("utf-8", errors="replace").strip())
 
-                    m = _PROGRESS_RE.search(decoded)
-                    if m and on_progress:
-                        current = int(m.group(1))
-                        total = int(m.group(2))
-                        if total > 0:
-                            frac = current / total
-                            pct = int(frac * 100)
-                            if pct != int(last_frac * 100):
-                                last_frac = frac
-                                on_progress(EngineProgress(
-                                    fraction=frac,
-                                    message=f"m3u8 下载中 {pct}%",
-                                ))
-
-        await asyncio.gather(proc.wait(), _read_output())
-
-        output_path = Path(save_name + "." + ext)
-        if proc.returncode != 0:
-            err_msg = fatal_error or f"N_m3u8DL-CLI exited with code {proc.returncode}"
-            logger.error("[nm3u8dl] failed (rc=%d): %s", proc.returncode, err_msg)
+        output_path = final_output
+        if rc != 0:
+            err_msg = fatal_error or f"N_m3u8DL-CLI exited with code {rc}"
+            logger.error("[nm3u8dl] failed (rc=%d): %s", rc, err_msg)
             if on_progress:
                 on_progress(EngineProgress(
                     fraction=0.0,
@@ -273,11 +285,23 @@ class Nm3u8dlEngine(Engine):
             return False
 
         if not output_path.exists():
-            alt_paths = list(out_dir.glob(basename + ".*"))
+            # N_m3u8DL-CLI may have remuxed with a different suffix than
+            # we expected. Walk workDir and look for a matching stem.
+            target_stem = final_output.with_suffix("").name
+            alt_paths: list[Path] = []
+            try:
+                for p in out_dir.iterdir():
+                    if not p.is_file():
+                        continue
+                    if p.with_suffix("").name == target_stem:
+                        alt_paths.append(p)
+            except OSError:
+                alt_paths = []
+            alt_paths.sort(key=lambda p: p.stat().st_size, reverse=True)
             if alt_paths:
                 output_path = alt_paths[0]
             else:
-                logger.error("[nm3u8dl] output file not found: %s", output_path)
+                logger.error("[nm3u8dl] output file not found: %s", final_output)
                 if on_progress:
                     on_progress(EngineProgress(
                         fraction=0.0,
@@ -298,14 +322,6 @@ class Nm3u8dlEngine(Engine):
             on_progress(EngineProgress(fraction=1.0, message="m3u8 下载完成"))
         logger.info("[nm3u8dl] download complete: %s (%d bytes)", output_path, output_path.stat().st_size)
         return True
-
-    @staticmethod
-    def _safe_basename(item: MediaItem) -> str:
-        """Return a subprocess-safe basename (no spaces / special chars)."""
-        raw = item.output_template or (item.title or item.item_id)
-        s = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', raw)
-        s = re.sub(r'\s+', '_', s).strip('_')
-        return s or "video"
 
     @staticmethod
     def _sanitize_output_ext(ext: str) -> str:

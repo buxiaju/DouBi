@@ -310,6 +310,177 @@ token 表写对了，界面却基本没变色。逐层排查发现**五个独立
 
 ---
 
+## 0.3.0 (2026-08-26) — 通用 URL 嗅探、GUI 体验加固与健壮性扫尾
+
+> 这一轮的主题是「把 0.2.0 的骨架用到真实场景」：用户开始拿通用视频站（silidm、
+> sv.baidu.com 等）跑，暴露了通用适配器在 Playwright 嗅探、下载引擎、文件名
+> 安全、取消语义、异常兜底五方面的十多个真 bug。0.3.0 把它们连同若干 GUI
+> 体验痛点一起补齐，回归测试从 450 涨到 614，是历次修复周期里密度最高的一次。
+
+### G1 通用 URL（generic adapter）嗅探管线重构
+
+这是 0.3.0 最大的一块：`platforms/generic/` 之前只会把 URL 丢给 yt-dlp，
+对于 SPA 页面（动态 `<video>` 注入 / `m3u8` 在 `fetch/XHR` 里返回）根本抓
+不到，而这些「抓不到」才是真实世界里 80% 的通用视频站。
+
+**嗅探器三层架构**（`core/sniffer.py`，含 `platforms/generic/catch_lite.js`
+Chromium 注入脚本）：
+
+| 层 | 职责 |
+|---|---|
+| L1 Playwright 网络拦截 | 启动 Chromium，catch_lite.js 监听 `<video>` src 属性、`canplay` 事件与所有 `requestfinished`；MIME + URL 白名单双过滤后只把媒体候选人往上层送 |
+| L2 JS 页面扫描 + SPA 重试 | 页面初次 idle 后如果没抓到媒体候选人，再等 2s 第二轮扫描 + 滚动 `scrollIntoView` 触发懒加载；`window.location` 跳转后重挂监听器 |
+| L3 候选整理 | 代理去重（query 里嵌入的真实 `m3u8` 优先）→ MIME filter → **扩展名白名单** → 分片目录去重 |
+
+**扩展名白名单**（用户明确要求「只显示 m3u8 + mp4 等视频后缀，ts/aac 不要
+出现在解析列表里」）：
+
+```python
+_ALLOWED_VIDEO_EXTS = frozenset({
+    "m3u8", "m3u",
+    "mp4", "m4v", "mkv", "flv", "webm", "mov", "avi",
+})
+```
+
+- 白名单而不是黑名单，`.mpd` / `.m4s` / `.aac` 这类边角媒体天然过滤
+- 分片目录去重：同一条 m3u8 下面列出的 ts 分片如果和 m3u8 同目录，直接砍掉
+- `is_direct_video_url` 同步从白名单派生（之前 `.ts` 会被当成直链——典型
+  黑名单策略漏项）
+
+**代理去重**（`platforms/generic/adapter.py::_video_target`）：
+- 最常见的代理形态 `dp.283bt.com/?url=<real-m3u8>`：先从 query 里提取目标
+  URL，如果它是 `m3u8`，直接把目标当真实源；否则回落到 URL 本身
+- 相同 target 合并去重——实测 silidm 从 14 条（12 ts + 2 重复 m3u8）降到
+  干净的 **2 条候选**（1 m3u8 + 1 yt-dlp 回退页）
+
+### G2 GUI 三项用户体验修复
+
+用户反馈的三个点，全部按原文诉求落地：
+
+**① 解析列表过滤后缀白名单** → 见 G1，直接是通用管线里的 L3 一步到位，
+CLI/REST/MCP 四端同步受益（不是只在 GUI 前端过滤，其他入口看不到）。
+
+**② 启动居中**（`ui/main_window.py::_center_on_screen`）：
+- 用 `QGuiApplication.primaryScreen().availableGeometry()` 取**可用区域**
+  （不是整个屏幕，减去任务栏高度），然后用 `frameGeometry().moveCenter(center)`
+  居中——直接 `setGeometry(screen.center())` 会让窗口左上角落在中心，是常
+  见的「写了居中结果只露右下角」坑
+- 在 `MainWindow.__init__` 里 `resize(1100, 760)` 之后立刻调用
+
+**③ 已完成 + 文件本地被删除 → 显示"缺失"并允许"重新下载"**：
+- `ui/task_manager.py::_save_path_missing(info)` 静态方法：先查
+  `Path(info.save_path).exists()`，再 fallback 到 `resolve_item_dir` 目录里
+  搜媒体文件（用户手动改 out_dir 或 DB save_path 是老路径时也能兜底）
+- `TaskManager.retry(task_id)` 从「只接受 failed/cancelled」扩为「也接受
+  completed 且 `_save_path_missing` 为 True」
+- `ui/pages/download.py` 下载页表现：
+  - 状态徽标 `_status_text`：completed + 缺文件 → 显示 **缺失**（红底）
+  - 消息行 `_status_message`：显示「文件已删除」
+  - 重试按钮：文案从「重试」变为 **重新下载**；切到已完成 tab 时逐行重
+    刷状态（文件可能是用户切页期间删的，进度缓存不能信）
+
+### G3 下载引擎健壮性扫尾（查缺补漏）
+
+这是最耗时间的一块——用户报告 silidm 下载**卡在「准备中 0%」半小时不动**，
+追到底是 N_m3u8DL-CLI 的进度回写方式与 Windows 路径上限两个独立 bug 的叠
+加。修复方法是「不要每个引擎各写一套 subprocess/取消/路径，提公共 helper
+再三引擎统一迁移」。
+
+**G3.1 `\r` 进度 + 子进程看门狗**（新文件 `engines/_subproc.py`）：
+
+N_m3u8DL-CLI、ffmpeg 的进度回写是 `\r` 回车（单行覆盖），从来不用 `\n`。
+asyncio 默认 StreamReader 的 `readline()` 是按 `\n` 切，默认 64KB 上限，没
+换行时就抛 `LimitOverrunError`——表现就是 GUI 永远 0%，对用户来说是「下载
+卡住了」。
+
+`run_supervised_subprocess(args, on_chunk, cancel_check, watchdog_seconds=180)`
+是所有子进程的统一入口：
+
+```
+├─ 1MB buffer (不是默认 64KB)
+├─ 自定义字节 splitter (同时识别 \r 与 \n)
+├─ on_chunk 回调：engine 解析进度字符串
+├─ cancel_check：每 chunk 轮询
+├─ watchdog：180s 无任何 stdout 输出 → SubprocessTimeout，
+│            terminate → 1.2s → kill (POSIX)，
+│            Windows 走 TerminateProcess 硬终止
+└─ finally 降落伞：杀一次没杀掉再补一刀
+```
+
+**三引擎都迁移过了**：
+| 引擎 | 迁移点 |
+|---|---|
+| `Nm3u8dlEngine` | 整个 `N_m3u8DL-CLI_v3.0.2.exe` 生命周期走 supervisor |
+| `M3u8Engine` | ffmpeg 合片路径走 supervisor（watchdog=240s，合片慢）；aiohttp 分片下载每分片 `cancel_flag_polling` + ClientTimeout 30s + 180s stall 检测器 |
+| `DirectHttpEngine` | 每 64KB chunk `cancel_flag_polling` + `asyncio.wait_for(chunk_read, 30)` 读超时 + 180s stall 总预算；`CancelledError` 不包装直接重抛 |
+
+**G3.2 Windows MAX_PATH 安全**（`engines/base.py`）：
+
+Windows Explorer / ffmpeg / N_m3u8DL-CLI 仍然在 >260 字符路径上失败（即便
+Python 本身能开长路径前缀，这些外部工具开不了）。两道防线：
+
+1. `safe_basename_for_item(item)`：
+   - 非法字符 → `_`；空白折叠；头尾 `.`/`_` 剥掉
+   - UTF-8 字节预算 **≤ 170**（out_dir + ext 通常占 80-90）
+   - 截断时末尾补 `_<sha1[:8]>`，截断不会撞名
+
+2. `output_path_under(out_dir, basename, ext)`：
+   - 强制 `len(str(path)) ≤ 259`
+   - 超出时按预算截断 basename 再补 `_<sha1[:8]>`
+   - 不幸运的 UTF-16 surrogate 场景还有紧循环逐字符 shave
+   - 最后兜底：只用 8 位 hash stem（极端病理 out_dir）
+
+**G3.3 统一取消语义**：`cancel_flag_polling(flag)` 同时支持 `flag.cancelled` /
+`flag.stopped` / 可调用三种形态——`_StopFlag`（TaskManager 用）和其他调用者
+混用不会再「cancel 发出去但引擎不接」。
+
+### G4 异常兜底：GUI 不再悄无声息闪退
+
+这是桌面软件的经典坑：Qt 槽函数里抛 Python 异常，或 `asyncio.create_task`
+里没人 await 的异常——默认行为要么是应用直接消失（进程退出码非 0），要
+么是异常写进 stderr 用户看不见。修复：
+
+**① `ui/app.py` `_install_exception_hooks()`**：
+- `sys.excepthook` 替换：Qt 主线程任何未捕获异常 → 先 `logger.error` 打完整
+  traceback + flush handler，再链式调用原始 hook（保证 Python 原标准错误行
+  为不变，也不会吞掉致命错误）
+- `asyncio` 事件 loop 自定义 `set_exception_handler`：`create_task` 未 await
+  的异常 → 同样落日志到 `logger.error`，然后 fallback 回默认 handler（默认
+  那个只有 "Task exception was never retrieved"）
+
+**② `ui/task_manager.py` `_on_progress` 双层 try/except**：
+- 内层单独包 `self.task_progress.emit(...)`：Qt 跨线程信号 emit 时，接收
+  槽抛出的异常会反向传回到引擎的调用点——表现为「UI 一个控件崩了，结果
+  正在下载的 4 条任务一起挂」，是极难排查的跨层 bug
+- 外层兜底整个进度处理体，任何处理失败都只记日志不杀下载引擎
+
+### G5 已修复的显性 bug
+
+| Bug | 根因 | 修法 |
+|---|---|---|
+| silidm 下载卡在「准备中 0%」 | N_m3u8DL-CLI 用 `\r` 回写进度，asyncio 默认 64KB readline buffer 抛 `LimitOverrunError` | 走 `run_supervised_subprocess`，1MB buffer + 自定义 `\r/\n` splitter |
+| silidm 解析列表 14 条（12 ts + 2 m3u8 重复） | 没扩展名白名单 + 代理包装 URL 没去重 | 三层候选整理（L3）+ `_video_target` query 优先解析 |
+| m3u8 engine 报错 `Error opening output files: Invalid argument` | 用户选了极长标题 / 中文标题，结果 basename 带非法字符或超 MAX_PATH | `safe_basename_for_item` + `output_path_under` |
+| 通用直链 `.mp4` 被误删 | 最早的 ts 修剪用了「目录前缀 + .mp4 也归入分片集合」 | 分片修剪只在 `{ts,aac,m4s}` 集合内动，不动真视频扩展名 |
+| 取消下载后子进程 N_m3u8DL-CLI 还在跑 | 旧代码只 `task.cancel()`，不 terminate 实际子进程 | supervisor 里 cancel_check 命中立刻 terminate → kill parachute |
+| ffmpeg 合片跑几小时没输出（正常，但会被误判卡死） | 旧版没 watchdog，卡死/正常长合片分不清 | watchdog=240s 只对 ffmpeg，其他默认 180s；有稳定进度输出就不触发 |
+| GUI 槽里异常导致整程序死 | `sys.excepthook` 没装 + progress emit 异常没隔离 | G4 两层兜底 |
+
+### G6 文档
+
+- `CHANGELOG.md`：补本节（0.3.0），所有改动条目带文件级定位与可回溯源码引用
+- `README.md`：补「通用视频站支持」特性行 + GUI 新行为（居中 / 缺失文件重新下载）
+
+### 统计
+- 源码：~18,600 行（相较 0.2.0 净增约 700 行，主要是 supervisor + 嗅探器）
+- 新文件：`engines/_subproc.py`，`engines/base.py` 增加 filename/cancel helpers
+- 测试：31 个文件，**614 passed / 203 deselected**（无 PySide6 环境下跳过 GUI 标记）
+  - sniffer + engine routing：85 passed
+  - 新增健壮性烟雾检查（basename 字节预算、path≤259、cancel_flag 鸭子类型）全部通过
+  - Ruff 全部文件 clean（33 项 ruff --fix + 3 处人工修复）
+
+---
+
 ## 0.2.0 (2026-08-25) — M6.4–M6.15 品牌化、合集、跨进程恢复、直播与多引擎
 
 > 这一轮涵盖 12 个里程碑（M6.4–M6.15），共同主题是「让用户看到的和用到的，

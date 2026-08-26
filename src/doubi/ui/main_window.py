@@ -31,26 +31,36 @@ CLOSE_FLUSH_TIMEOUT_MS = 5000
 
 def build_main_window():
     """Return a factory that constructs the :class:`MainWindow` QWidget."""
-    from PySide6.QtCore import Qt, QSize, QEventLoop as QtEventLoop, QTimer
-    from PySide6.QtGui import QAction, QIcon
+    from PySide6.QtCore import QEventLoop as QtEventLoop
+    from PySide6.QtCore import QTimer
+    from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication
     from qfluentwidgets import (
-        MSFluentWindow, NavigationItemPosition, FluentIcon,
-        NavigationToolButton, InfoBar, InfoBarPosition, MessageBox,
+        FluentIcon,
+        InfoBar,
+        InfoBarPosition,
+        MessageBox,
+        MSFluentWindow,
+        NavigationItemPosition,
+        NavigationToolButton,
     )
 
-    from .pages import (
-        build_download_widgets, build_history_widgets,
-        build_parse_widgets, build_settings_widgets,
-    )
-    from .i18n import tr
-    from .resources import APP_DISPLAY_NAME, APP_NAME, APP_VERSION, load_app_icon
-    from .theme import (
-        FONT_FAMILY, TYPE_BODY, current_theme_name, set_theme, subscribe_theme,
-        theme_names, muted_qss,
-    )
-    from .task_manager import TaskManager
     from ..core.engine_loader import build_default_pipeline
+    from .i18n import tr
+    from .pages import (
+        build_download_widgets,
+        build_history_widgets,
+        build_parse_widgets,
+        build_settings_widgets,
+    )
+    from .resources import APP_DISPLAY_NAME, APP_VERSION, load_app_icon
+    from .task_manager import TaskManager
+    from .theme import (
+        current_theme_name,
+        set_theme,
+        subscribe_theme,
+        theme_names,
+    )
 
     ParsePage, _ = build_parse_widgets()
     DownloadPage, _ = build_download_widgets()

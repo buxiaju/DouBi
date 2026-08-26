@@ -21,7 +21,15 @@ from typing import Optional
 
 from ..core.models import DownloadOptions, MediaItem
 from ..core.storage.file_layout import resolve_item_dir
-from .base import Engine, EngineProgress, EngineProgressCallback
+from ._subproc import SubprocessTimeout, run_supervised_subprocess
+from .base import (
+    Engine,
+    EngineProgress,
+    EngineProgressCallback,
+    cancel_flag_polling,
+    output_path_under,
+    safe_basename_for_item,
+)
 
 logger = logging.getLogger("doubi.engines.m3u8")
 
@@ -105,12 +113,19 @@ class M3u8Engine(Engine):
         on_progress: Optional[EngineProgressCallback] = None,
     ) -> bool:
         out_dir = resolve_item_dir(item, options)
-        out_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            err_msg = f"无法创建输出目录 {out_dir}: {exc}"
+            logger.error("[m3u8] %s", err_msg)
+            if on_progress:
+                on_progress(EngineProgress(fraction=0.0, message=err_msg))
+            return False
 
-        basename = self._safe_basename(item)
+        basename = safe_basename_for_item(item)
         raw_ext = item.extra.get("sniff_ext") or self._guess_ext(item.source_url) or "mp4"
         ext = self._sanitize_output_ext(raw_ext)
-        output_path = out_dir / f"{basename}.{ext}"
+        output_path = output_path_under(out_dir, basename, ext)
 
         if self._ffmpeg:
             return await self._download_via_ffmpeg(
@@ -156,100 +171,86 @@ class M3u8Engine(Engine):
 
         logger.info("[m3u8] ffmpeg download: %s → %s", url, output_path)
 
-        # Fire initial progress tick so the UI leaves "准备中" before the
-        # subprocess is even spawned.
         if on_progress:
             on_progress(EngineProgress(fraction=0.0, message="ffmpeg 启动中..."))
-
-        proc = await asyncio.create_subprocess_exec(
-            *ffmpeg_args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            limit=1024 * 1024,  # 1 MiB buffer — defend against large \r lines
-        )
 
         total_duration: float = 0.0
         last_progress_frac: float = -1.0
         fatal_error: str = ""
+        parse_buf = bytearray()
+        last_line: str = ""
+        cancel_flag = getattr(options, "cancel_check", None)
 
-        async def _read_stream(stream, buf_start=b""):
-            """Stream reader that splits on both \r and \n.
-
-            ffmpeg sometimes writes progress with \r only.  The default
-            line-iterator is \n-bound and raises LimitOverrunError when a
-            single \r-terminated block exceeds the default 64 KiB buffer.
-            """
-            buf = bytes(buf_start)
-            while True:
-                chunk = await stream.read(4096)
-                if not chunk:
+        def _process_line(decoded: str) -> None:
+            nonlocal total_duration, last_progress_frac, fatal_error, last_line
+            if not decoded:
+                return
+            last_line = decoded
+            if "Duration:" in decoded:
+                m = _PROGRESS_TIME_RE.search(decoded)
+                if m:
+                    total_duration = _parse_time_to_seconds(
+                        f"{m.group(1)}:{m.group(2)}:{m.group(3)}"
+                    )
+                    if on_progress and total_duration > 0:
+                        on_progress(EngineProgress(
+                            fraction=0.0,
+                            message=f"ffmpeg 解析完成 时长 {int(total_duration)}s",
+                        ))
+            if "time=" in decoded and on_progress:
+                m = _PROGRESS_TIME_RE.search(decoded)
+                if m and total_duration > 0:
+                    current = _parse_time_to_seconds(
+                        f"{m.group(1)}:{m.group(2)}:{m.group(3)}"
+                    )
+                    frac = min(1.0, current / total_duration)
+                    pct = int(frac * 100)
+                    if pct != int(last_progress_frac * 100):
+                        last_progress_frac = frac
+                        on_progress(EngineProgress(
+                            fraction=frac,
+                            message=f"ffmpeg 下载中 {pct}%",
+                        ))
+            for pattern in _FFMPEG_FATAL:
+                if pattern.lower() in decoded.lower():
+                    fatal_error = decoded
                     break
-                buf += chunk
-                while True:
-                    cr = buf.find(b"\r")
-                    lf = buf.find(b"\n")
-                    if cr == -1 and lf == -1:
-                        break
-                    sep_idx = cr if lf == -1 or (cr != -1 and cr < lf) else lf
-                    line_bytes = buf[:sep_idx]
-                    buf = buf[sep_idx + 1:]
-                    if sep_idx == cr and buf.startswith(b"\n"):
-                        buf = buf[1:]
-                    yield line_bytes.decode("utf-8", errors="replace").strip()
-            if buf:
-                yield buf.decode("utf-8", errors="replace").strip()
 
-        async def _read_stderr():
-            nonlocal total_duration, last_progress_frac, fatal_error
-            assert proc.stderr is not None
-            last_line = ""
-            async for decoded in _read_stream(proc.stderr):
-                if not decoded:
-                    continue
-                last_line = decoded
+        def _on_chunk(chunk: bytes) -> None:
+            parse_buf.extend(chunk)
+            while True:
+                cr = parse_buf.find(b"\r")
+                lf = parse_buf.find(b"\n")
+                if cr == -1 and lf == -1:
+                    break
+                sep_idx = cr if lf == -1 or (cr != -1 and cr < lf) else lf
+                line_bytes = bytes(parse_buf[:sep_idx])
+                del parse_buf[:sep_idx + 1]
+                if sep_idx == cr and parse_buf and parse_buf[0:1] == b"\n":
+                    del parse_buf[:1]
+                _process_line(line_bytes.decode("utf-8", errors="replace").strip())
 
-                if "Duration:" in decoded:
-                    m = _PROGRESS_TIME_RE.search(decoded)
-                    if m:
-                        total_duration = _parse_time_to_seconds(
-                            f"{m.group(1)}:{m.group(2)}:{m.group(3)}"
-                        )
-                        if on_progress and total_duration > 0:
-                            on_progress(EngineProgress(
-                                fraction=0.0,
-                                message=f"ffmpeg 解析完成 时长 {int(total_duration)}s",
-                            ))
+        try:
+            rc, _ = await run_supervised_subprocess(
+                ffmpeg_args,
+                on_chunk=_on_chunk,
+                cancel_check=cancel_flag,
+                stdout_limit=1024 * 1024,
+                chunk_size=4096,
+                watchdog_seconds=240.0,  # ffmpeg merge phase is slow for huge files
+            )
+        except SubprocessTimeout as e:
+            rc = -1
+            fatal_error = str(e)
+        except asyncio.CancelledError:
+            raise
 
-                if "time=" in decoded and on_progress:
-                    m = _PROGRESS_TIME_RE.search(decoded)
-                    if m and total_duration > 0:
-                        current = _parse_time_to_seconds(
-                            f"{m.group(1)}:{m.group(2)}:{m.group(3)}"
-                        )
-                        frac = min(1.0, current / total_duration)
-                        pct = int(frac * 100)
-                        if pct != int(last_progress_frac * 100):
-                            last_progress_frac = frac
-                            on_progress(EngineProgress(
-                                fraction=frac,
-                                message=f"ffmpeg 下载中 {pct}%",
-                            ))
+        if parse_buf:
+            _process_line(bytes(parse_buf).decode("utf-8", errors="replace").strip())
 
-                for pattern in _FFMPEG_FATAL:
-                    if pattern.lower() in decoded.lower():
-                        fatal_error = decoded
-                        break
-
-            return last_line
-
-        _, stderr_text = await asyncio.gather(
-            proc.wait(),
-            _read_stderr(),
-        )
-
-        if proc.returncode != 0:
-            err_msg = fatal_error or stderr_text[-300:] or "ffmpeg exited with non-zero code"
-            logger.error("[m3u8] ffmpeg failed (rc=%d): %s", proc.returncode, err_msg)
+        if rc != 0:
+            err_msg = fatal_error or last_line[-300:] or f"ffmpeg exited with code {rc}"
+            logger.error("[m3u8] ffmpeg failed (rc=%d): %s", rc, err_msg)
             if on_progress:
                 on_progress(EngineProgress(
                     fraction=0.0,
@@ -359,11 +360,15 @@ class M3u8Engine(Engine):
         on_progress: Optional[EngineProgressCallback],
     ) -> None:
         tmp_dir = Path(tempfile.mkdtemp(prefix="doubi_m3u8_"))
+        cancel_flag = getattr(options, "cancel_check", None)
+
         try:
             async with aiohttp.ClientSession() as session:
                 for idx, seg_url in enumerate(segments):
+                    if cancel_flag_polling(cancel_flag):
+                        raise asyncio.CancelledError("aiohttp m3u8 download stopped")
                     seg_path = tmp_dir / f"seg_{idx:05d}.ts"
-                    async with session.get(seg_url, proxy=options.proxy) as resp:
+                    async with session.get(seg_url, proxy=options.proxy, timeout=aiohttp.ClientTimeout(total=30)) as resp:
                         resp.raise_for_status()
                         seg_data = await resp.read()
                     seg_path.write_bytes(seg_data)
@@ -381,14 +386,6 @@ class M3u8Engine(Engine):
                     out_f.write(seg_path.read_bytes())
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
-
-    @staticmethod
-    def _safe_basename(item: MediaItem) -> str:
-        """Return a subprocess-safe basename (no spaces / special chars)."""
-        raw = item.output_template or (item.title or item.item_id)
-        s = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', raw)
-        s = re.sub(r'\s+', '_', s).strip('_')
-        return s or "video"
 
     @staticmethod
     def _sanitize_output_ext(ext: str) -> str:

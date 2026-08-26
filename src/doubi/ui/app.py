@@ -55,6 +55,101 @@ def _apply_app_branding(app) -> None:
         app.setWindowIcon(icon)
 
 
+def _install_exception_hooks(app) -> None:
+    """Install cross-layer "last chance" exception handlers.
+
+    * ``sys.excepthook`` — fires when a sync function raises on the Qt
+      main thread (this is the classic "Qt app just vanishes" path:
+      before PySide6.6, exceptions raised in slots were silently
+      swallowed by default; now they still kill the process if the
+      slot ran on the event loop). We log them and, for the worst
+      crashes, keep the process alive long enough for the user to
+      notice the trace.
+    * A wrapper around ``asyncio.get_event_loop().call_exception_handler``
+      — fires on unhandled exceptions inside ``create_task()`` bodies.
+      Without this, TaskManager tasks that raise after
+      ``_run_download`` has finished would just raise into the void and
+      never surface anywhere.
+
+    Neither hook ever shows a modal dialog: crashing in the crash
+    reporter is a classic desktop-app pitfall. Log only.
+    """
+    import traceback
+
+    def _sync_hook(etype, value, tb):
+        logger.error("Unhandled exception on Qt main thread:\n%s",
+                     "".join(traceback.format_exception(etype, value, tb)))
+        # Continue with the default behavior so fatal errors still exit,
+        # but first flush the handler (logging buffering can otherwise
+        # make the above line disappear when the app crashes).
+        for h in logger.handlers:
+            try:
+                h.flush()
+            except Exception:
+                pass
+        # Keep old hook chain (Python has a default that writes to
+        # stderr and PySide may have installed its own).
+        try:
+            _ORIG_SYSEXCEPTHOOK(etype, value, tb)
+        except Exception:
+            pass
+
+    def _async_handler(loop, context):
+        # context['exception'] is the actual exception object when
+        # available; for future-compat we always print the ``message``
+        # field as well.
+        try:
+            lines = ["Unhandled exception in asyncio task:\n"]
+            if "message" in context:
+                lines.append(f"  message: {context['message']}\n")
+            exc = context.get("exception")
+            if exc is not None:
+                lines.append("".join(
+                    traceback.format_exception(type(exc), exc, exc.__traceback__)
+                ))
+            else:
+                for k, v in context.items():
+                    if k in {"message", "exception"}:
+                        continue
+                    lines.append(f"  {k}: {v!r}\n")
+            logger.error("".join(lines))
+            for h in logger.handlers:
+                try:
+                    h.flush()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # Fall back to the default handler so Python still warns.
+        try:
+            _ORIG_ASYNC_HANDLER(loop, context)
+        except Exception:
+            pass
+
+    global _ORIG_SYSEXCEPTHOOK, _ORIG_ASYNC_HANDLER  # noqa: PLW0603
+    _ORIG_SYSEXCEPTHOOK = sys.excepthook
+    sys.excepthook = _sync_hook
+
+    try:
+        loop = asyncio.get_event_loop()
+        _ORIG_ASYNC_HANDLER = loop.get_exception_handler() or loop.default_exception_handler
+        loop.set_exception_handler(_async_handler)
+    except Exception:
+        # No event loop yet (e.g. --no-event-loop is used). We'll miss
+        # async tasks in that mode, but it is a developer flag only.
+        pass
+
+
+_ORIG_SYSEXCEPTHOOK = sys.excepthook
+
+
+def _default_async_handler(loop, context):  # pragma: no cover - trivial
+    loop.default_exception_handler(context)
+
+
+_ORIG_ASYNC_HANDLER = _default_async_handler
+
+
 def main(argv: list[str] | None = None) -> int:
     # 主题名列表来自 ui/theme.py，它不 import Qt，所以这里可以
     # 在 GUI 可用性检查之前安全导入，让 --help 也能列出主题。
@@ -62,7 +157,7 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(
         prog="doubi-gui",
-        description=f"DouBi desktop GUI.",
+        description="DouBi desktop GUI.",
     )
     # default=None 而不是某个具体主题：只有显式传 --theme 才覆盖
     # 配置文件，与项目「环境变量 > 配置文件 > 默认值」的分层一致。
@@ -94,6 +189,14 @@ def main(argv: list[str] | None = None) -> int:
 
     app = QApplication(sys.argv)
     _apply_app_branding(app)
+
+    # Install hooks after logger + QApplication both exist (we need
+    # ``logging`` configured, and a valid event loop target for the
+    # async handler). The qasync loop is attached a few lines below;
+    # _install_exception_hooks will attach to whatever loop is current
+    # at that point, or use the default one when --no-event-loop is
+    # passed. Hook order doesn't matter for correctness.
+    _install_exception_hooks(app)
 
     # 显示启动闪屏——主窗口构建 + qasync loop 启动期间是几十毫秒
     # 的黑屏期，挂一张品牌图让用户先认得「打开的是豆比」。
