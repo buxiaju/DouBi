@@ -306,8 +306,11 @@ class Sniffer:
 
         第一次调用时读盘并缓存。后续调用直接返回缓存。用
         ``importlib.resources`` 而不是 ``Path(__file__)``，确保 PyInstaller
-        打包后路径仍正确（resource access via importlib 是 PyInstaller
-        友好的方式）。
+        打包后**路径**仍正确。
+
+        注意它只解决路径，不解决打包：文件本身还得靠 build_exe.py 里的
+        ``--add-data`` 进包（``--collect-submodules doubi`` 只收 .py）。
+        0.3.0 就是漏了那行，发布版一嗅探就报「安装包可能损坏」。
         """
         if self._catch_lite_js is None:
             try:

@@ -38,6 +38,9 @@ ENTRY = ROOT / "src" / "doubi" / "ui" / "app.py"
 ICON = ROOT / "src" / "doubi" / "ui" / "resources" / "icon.ico"
 SVG_TEMPLATE = ROOT / "src" / "doubi" / "ui" / "resources" / "icon_template.svg"
 LOCALES_DIR = ROOT / "src" / "doubi" / "ui" / "locales"
+# 通用嗅探注入页面的 JS。它是 .js 而不是 .py，所以 --collect-submodules
+# 收不到它（那个只管 Python 模块），必须单独 --add-data。
+CATCH_LITE_JS = ROOT / "src" / "doubi" / "platforms" / "generic" / "catch_lite.js"
 # N_m3u8DL 自带的 ffmpeg 构建（10.91 MB）——发布版的 ffmpeg 来源，
 # 用来替掉 imageio_ffmpeg 轮子里那个 83.6 MB 的等效二进制。
 FFMPEG_EXE = ROOT / "tools" / "nm3u8dl" / "ffmpeg.exe"
@@ -266,6 +269,11 @@ def main() -> int:
     if not SVG_TEMPLATE.is_file():
         print(f"缺少 {SVG_TEMPLATE}", file=sys.stderr)
         return 1
+    if not CATCH_LITE_JS.is_file():
+        # 同 FFMPEG_EXE 的理由：漏了它构建照样成功，但通用嗅探会在用户
+        # 机上报「catch_lite.js 加载失败；安装包可能损坏」。
+        print(f"缺少 {CATCH_LITE_JS}。它是通用嗅探注入页面的脚本。", file=sys.stderr)
+        return 1
     if not FFMPEG_EXE.is_file():
         # 早失败而不是让 --add-data 静默丢一个不存在的路径：那样构建会
         # 成功，但发布版里没有 ffmpeg，问题要等到用户下载 HLS 才暴露。
@@ -292,6 +300,11 @@ def main() -> int:
         "--add-data", f"{SVG_TEMPLATE}{sep}doubi/ui/resources",
         # i18n JSON 词表（和上面 icon_template 一样，走读 JSON 文件不是 QRC）
         "--add-data", f"{LOCALES_DIR}{sep}doubi/ui/locales",
+        # 通用嗅探的注入脚本。core/sniffer.py 用
+        # ``importlib.resources.files("doubi.platforms.generic")`` 读它——
+        # importlib 让**路径**在冻结后仍正确，但文件本身还是得靠这行进包。
+        # 下面的 --collect-submodules doubi 只收 .py，不收 .js。
+        "--add-data", f"{CATCH_LITE_JS}{sep}doubi/platforms/generic",
         # 第三方 Qt 库的隐藏资源 / 插件
         "--collect-all", "qframelesswindow",
         "--collect-all", "qfluentwidgets",
@@ -301,6 +314,20 @@ def main() -> int:
         # headless_shell，见 _browser_add_data）。启动壳在运行时设
         # ``PLAYWRIGHT_BROWSERS_PATH`` 指向它。
         "--collect-all", "playwright",
+        # ---- aiohttp（HLS 下载的唯一可行路径） ----
+        # 捆绑的 tools/nm3u8dl/ffmpeg.exe 编译时未启用任何 TLS 后端，
+        # 喂它 https 播放列表会直接 "Protocol not found" 退出。现实中
+        # 几乎所有 m3u8 都是 https，所以 aiohttp 分片下载器不是「降级
+        # 备选」而是**主路径**，缺了它 HLS 就完全不可用。
+        #
+        # 必须显式收集的两个原因：
+        # 1. m3u8.py / direct_http.py 里是函数内 ``import aiohttp``
+        #    的延迟导入，PyInstaller 静态分析对这种形式并不可靠；
+        # 2. multidict / yarl / propcache / frozenlist 都带 C 扩展
+        #    (.pyd)，靠模块级依赖推导容易漏。
+        "--collect-all", "aiohttp",
+        "--collect-all", "multidict",
+        "--collect-all", "yarl",
         # ---- ffmpeg ----
         # 三个引擎（m3u8 / yt_dlp / nm3u8dl）都要 ffmpeg 合流。发布版里
         # **只有 dist/doubi-gui/ 会进安装包**（installer/doubi.nsi 就一句

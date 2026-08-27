@@ -259,3 +259,207 @@ def test_bundled_ffmpeg_probes_meipass_first(monkeypatch, tmp_path):
     assert resolved == str(target / name), (
         f"_MEIPASS 没被优先采用，实际返回 {resolved}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 4. 非 .py 资源：--collect-submodules 收不到它们
+# ---------------------------------------------------------------------------
+# 0.3.0 踩过：catch_lite.js 没有 --add-data，构建成功、测试全绿、发布版
+# 一嗅探就报「catch_lite.js 加载失败；安装包可能损坏」。
+#
+# 为什么本地永远发现不了：开发时 importlib.resources 落到真实 src 目录，
+# 文件就在那儿；只有冻结后才走 _MEIPASS，那里才是空的。
+#
+# 下面两条不硬编码文件名，而是从**代码本身**推出「有哪些资源要进包」，
+# 这样以后新增任何 resources.files(...) 读的文件都会被自动纳入检查。
+
+
+def _iter_resource_reads() -> list[tuple[Path, int, str, str]]:
+    """AST 扫出 ``resources.files("pkg").joinpath("name")`` 形态的资源读。
+
+    返回 ``(源文件, 行号, 包名, 资源名)``。用 AST 而不是 grep：要拿到
+    的是两个字符串字面量的**值**，grep 只能确认「这行提到了 joinpath」。
+    """
+    found: list[tuple[Path, int, str, str]] = []
+    for path in _iter_src_py():
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            if not isinstance(fn, ast.Attribute) or fn.attr != "joinpath":
+                continue
+            inner = fn.value
+            # 只认 files(...) 的直接返回值，形如 files("pkg").joinpath("x")
+            if not isinstance(inner, ast.Call):
+                continue
+            inner_fn = inner.func
+            name = inner_fn.attr if isinstance(inner_fn, ast.Attribute) else (
+                inner_fn.id if isinstance(inner_fn, ast.Name) else None
+            )
+            if name != "files":
+                continue
+            if not (inner.args and isinstance(inner.args[0], ast.Constant)):
+                continue
+            if not (node.args and isinstance(node.args[0], ast.Constant)):
+                continue
+            pkg, res = inner.args[0].value, node.args[0].value
+            if isinstance(pkg, str) and isinstance(res, str):
+                found.append((path, node.lineno, pkg, res))
+    return found
+
+
+def test_every_importlib_resource_exists_in_the_repo():
+    """代码里点名要读的资源，仓库里必须真有它。
+
+    先钉住这一半：路径写错（改名、挪目录）会在这里红，而不是等到
+    运行时被 except FileNotFoundError 吞掉变成一句模糊的错误提示。
+
+    资源可以是文件（catch_lite.js）也可以是目录（ui/locales），
+    所以判据是 exists() 而不是 is_file()。
+    """
+    reads = _iter_resource_reads()
+    assert reads, "一个 resources.files(...).joinpath(...) 都没扫到，扫描逻辑可能失效了"
+
+    for path, lineno, pkg, res in reads:
+        assert pkg.startswith("doubi"), (
+            f"{path.name}:{lineno} 读的是第三方包 {pkg} 的资源，本测试的假设不成立"
+        )
+        target = ROOT / "src" / Path(pkg.replace(".", "/")) / res
+        assert target.exists(), (
+            f"{path.name}:{lineno} 要读 {pkg}/{res}，但 {target} 不存在"
+        )
+
+
+def _add_data_targets() -> set[str]:
+    """解析出 build_exe.py 里所有 ``--add-data`` 的包内目标目录。
+
+    按「列表里紧跟在 ``--add-data`` 后面的那个元素」配对，而不是把源码
+    里所有 f-string 都当候选——后者会把预检的中文报错消息也算进来
+    （第一版就踩了这个，assert 失败消息里出现了「它是发布版唯一的
+    ffmpeg 来源」这种字符串）。
+    """
+    tree = ast.parse(BUILD_SCRIPT.read_text(encoding="utf-8"), filename=str(BUILD_SCRIPT))
+    targets: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.List, ast.Tuple)):
+            continue
+        for prev, cur in zip(node.elts, node.elts[1:]):
+            if not (isinstance(prev, ast.Constant) and prev.value == "--add-data"):
+                continue
+            # 值形如 f"{CONST}{sep}dst/dir"，取末段常量即包内目标
+            if isinstance(cur, ast.JoinedStr) and cur.values:
+                tail = cur.values[-1]
+                if isinstance(tail, ast.Constant) and isinstance(tail.value, str):
+                    targets.add(tail.value.lstrip("/"))
+            elif isinstance(cur, ast.Constant) and isinstance(cur.value, str):
+                _, _, dst = cur.value.rpartition(";")
+                targets.add((dst or cur.value).lstrip("/"))
+    return targets
+
+
+def test_every_non_py_resource_read_at_runtime_has_an_add_data_entry():
+    """每个运行时要读的非 .py 资源，都必须在 build_exe.py 里有 --add-data。
+
+    ``--collect-submodules doubi`` 只把 Python 模块收进 PYZ，
+    .js / .json / .svg 这类数据文件一个都不带。漏一个的后果不是构建
+    失败，而是发布版里静默少一个文件——这正是 0.3.0 的事故形态。
+    """
+    targets = _add_data_targets()
+    assert targets, "没解析到任何 --add-data 目标，解析逻辑可能失效了"
+
+    for path, lineno, pkg, res in _iter_resource_reads():
+        if res.endswith(".py"):
+            continue
+        pkg_dir = pkg.replace(".", "/")
+        # 单文件资源 → 目标是所在包目录；整目录资源 → 目标是该目录本身
+        covered = pkg_dir in targets or f"{pkg_dir}/{res}" in targets
+        assert covered, (
+            f"{path.name}:{lineno} 运行时要读 {pkg}/{res}，但 build_exe.py 里"
+            f"没有对应的 --add-data 目标（期望 {pkg_dir!r} 或 {pkg_dir + '/' + res!r}）。"
+            f"现有目标：{sorted(targets)}。"
+            "缺了它构建照样成功，但发布版会少这个文件。"
+        )
+
+
+def test_build_script_preflights_every_add_data_source_file():
+    """单文件类型的构建输入必须有 is_file() 预检。
+
+    这是 FFMPEG_EXE 那段注释立下的规矩：「早失败而不是让 --add-data
+    静默丢一个不存在的路径」。PyInstaller 对不存在的 --add-data 源
+    只是警告，不报错，所以预检是唯一的拦截点。
+    """
+    mod = _load_build_module()
+    source = BUILD_SCRIPT.read_text(encoding="utf-8")
+
+    single_file_inputs = [
+        name
+        for name in ("SVG_TEMPLATE", "CATCH_LITE_JS", "FFMPEG_EXE")
+        if isinstance(getattr(mod, name, None), Path)
+    ]
+    assert single_file_inputs, "一个单文件构建输入都没找到，常量可能被改名了"
+
+    for name in single_file_inputs:
+        assert f"if not {name}.is_file():" in source, (
+            f"{name} 没有预检，缺文件时构建会静默成功并产出坏包"
+        )
+        assert getattr(mod, name).is_file(), f"缺少构建输入 {getattr(mod, name)}"
+
+
+def test_catch_lite_js_is_the_only_source_of_the_injected_script():
+    """catch_lite.js 没有兜底路径，所以它是硬依赖。
+
+    对比 icon.png：那个只是 QtSvg 不可用时的兜底，且读之前有
+    is_file() 保护，不打包只是安全降级。catch_lite.js 缺了则整个
+    通用嗅探直接返回错误——两者不能用同一套标准对待。
+    """
+    sniffer_src = (SRC / "core" / "sniffer.py").read_text(encoding="utf-8")
+
+    assert "安装包可能损坏" in sniffer_src, (
+        "加载失败时的用户可见提示没了？那这条测试要重写"
+    )
+    # 加载失败只有「返回空串 → 报错」这一条路，没有第二个 JS 来源
+    assert sniffer_src.count("catch_lite.js") >= 2
+    assert "MediaRecorder" not in sniffer_src, (
+        "JS 逻辑不该内联进 Python，那样就有两个真源了"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 6. aiohttp 是 HLS 下载的唯一可行路径，必须显式收集（M6.20）
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("package", ["aiohttp", "multidict", "yarl"])
+def test_aiohttp_stack_is_explicitly_collected(package: str):
+    """aiohttp 全家必须 --collect-all，不能靠静态分析推导。
+
+    背景：捆绑的 tools/nm3u8dl/ffmpeg.exe 是 N_m3u8DL-CLI 的定制构建，
+    编译时没启用任何 TLS 后端，``-protocols`` 里根本没有 https。喂它
+    https 播放列表会立刻 "Protocol not found" 退出。现实中的 m3u8
+    几乎全是 https，所以 aiohttp 分片下载器不是降级备选，而是 HLS
+    的**主路径**——漏了它，HLS 下载 100% 不可用。
+
+    为什么静态分析不够：m3u8.py / direct_http.py 用的是函数内延迟
+    ``import aiohttp``；而 multidict / yarl / propcache 带 .pyd
+    C 扩展。这两点叠加，漏包的表现是运行时 ModuleNotFoundError，
+    构建期毫无征兆。
+    """
+    source = BUILD_SCRIPT.read_text(encoding="utf-8")
+    assert f'"--collect-all", "{package}"' in source, (
+        f"{package} 没有被显式收集；HLS 下载会在用户机上 ImportError"
+    )
+
+
+def test_aiohttp_is_a_declared_dependency():
+    """既然是主路径，pyproject 必须声明它——不能只靠碰巧装上了。"""
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert "aiohttp" in pyproject, "aiohttp 未在 pyproject.toml 声明"
+
+
+def test_aiohttp_stack_is_not_excluded():
+    """反向守护：别让体积精简顺手把 aiohttp 全家排除掉。"""
+    mod = _load_build_module()
+    for package in ("aiohttp", "multidict", "yarl", "propcache", "frozenlist"):
+        assert package not in mod.EXCLUDE_MODULES, (
+            f"{package} 被排除了，HLS 下载会完全失效"
+        )
