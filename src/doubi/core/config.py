@@ -60,6 +60,7 @@ DEFAULTS: dict[str, Any] = {
     "aria2_secret": None,
     # ---- 通用嗅探（generic adapter） ----
     # 详见 docs/superpowers/specs/2026-08-25-generic-sniffer-design.md
+    "sniff_enabled": True,              # 关掉后 generic 兜底直接返回提示，不起浏览器
     "sniff_duration_sec": 15,            # 嗅探时长 5–60 秒
     "sniff_headless": True,             # 后台跑无头浏览器
     "sniff_user_agent": "",             # 空串用 Playwright 默认 UA
@@ -101,6 +102,7 @@ class AppConfig:
     aria2_rpc_url: str = DEFAULTS["aria2_rpc_url"]
     aria2_secret: Optional[str] = DEFAULTS["aria2_secret"]
     # ---- 通用嗅探（generic adapter） ----
+    sniff_enabled: bool = DEFAULTS["sniff_enabled"]
     sniff_duration_sec: int = DEFAULTS["sniff_duration_sec"]
     sniff_headless: bool = DEFAULTS["sniff_headless"]
     sniff_user_agent: str = DEFAULTS["sniff_user_agent"]
@@ -206,6 +208,10 @@ def load_config(path: Optional[Path] = None, *, env_prefix: str = "DOUBI_") -> A
         engine=str(data.get("engine", DEFAULTS["engine"])),
         aria2_rpc_url=str(data.get("aria2_rpc_url", DEFAULTS["aria2_rpc_url"])),
         aria2_secret=data.get("aria2_secret", DEFAULTS["aria2_secret"]),
+        sniff_enabled=_coerce(
+            data.get("sniff_enabled", DEFAULTS["sniff_enabled"]),
+            DEFAULTS["sniff_enabled"],
+        ),
         sniff_duration_sec=_coerce(
             data.get("sniff_duration_sec", DEFAULTS["sniff_duration_sec"]),
             DEFAULTS["sniff_duration_sec"],

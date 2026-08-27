@@ -422,3 +422,94 @@ def test_build_options_covers_every_shared_config_field(monkeypatch):
         if getattr(options, name) != getattr(cfg, name)
     ]
     assert not missing, f"_build_options drops config fields: {missing}"
+
+
+# ---------------------------------------------------------------------------
+# Generic sniffer endpoints (M6.16)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def no_real_browser(monkeypatch):
+    """把 ``Sniffer`` 换成替身，防止测试真起 Chromium 等满 15 秒。
+
+    ``POST /api/v1/parse`` 会 ``asyncio.create_task`` 一个后台解析；未知 URL 走
+    兜底嗅探，不拦的话这组用例会真的下载/启动浏览器，慢且在无 Chromium 的 CI 上
+    行为不定。
+    """
+    class _Stub:
+        def __init__(self, options):
+            self.options = options
+
+        async def sniff(self, url):
+            from doubi.core.sniffer import SniffResult
+            return SniffResult(page_url=url, page_title="stub", items=[],
+                               error="stubbed out in tests")
+
+    monkeypatch.setattr("doubi.platforms.generic.adapter.Sniffer", _Stub)
+
+
+def test_sniff_capability_selfcheck(client):
+    """``GET /api/v1/sniff/status`` 无 task_id 时回能力自检。
+
+    ``available`` 是运维排查「为什么所有未知 URL 都解析失败」的第一现场：
+    打包漏了 Chromium 或忘了 ``playwright install`` 都会让它是 False，而
+    具体错误只在任务记录里看得到。
+    """
+    r = client.get("/api/v1/sniff/status")
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body) >= {"available", "enabled", "duration_sec", "headless"}
+    assert isinstance(body["available"], bool)
+
+
+def test_sniff_status_unknown_task_returns_404(client):
+    r = client.get("/api/v1/sniff/status/does-not-exist")
+    assert r.status_code == 404
+
+
+def test_parse_rejects_blank_url(client):
+    r = client.post("/api/v1/parse", json={"url": ""})
+    assert 400 <= r.status_code < 500
+
+
+def test_parse_returns_task_id_and_is_pollable(client, no_real_browser):
+    """解析走「提交 + 轮询」：POST 立刻回 task_id，GET 能查到同一条记录。
+
+    同步返回是不行的——兜底嗅探要真起浏览器并等满 ``sniff_duration_sec`` 秒，
+    默认超时 10s 的 HTTP 客户端会先断连，看起来像服务挂了。
+    """
+    r = client.post("/api/v1/parse", json={"url": "https://example.com/page"})
+    assert r.status_code == 200
+    body = r.json()
+    assert "task_id" in body
+    assert body["url"] == "https://example.com/page"
+    assert body["status"] in {"pending", "running", "completed", "failed"}
+    # 内部的 asyncio.Task 句柄不能泄漏到响应里（不可 JSON 序列化）。
+    assert "_task" not in body
+
+    r2 = client.get(f"/api/v1/sniff/status/{body['task_id']}")
+    assert r2.status_code == 200
+    assert r2.json()["task_id"] == body["task_id"]
+    assert "_task" not in r2.json()
+
+
+def test_parse_flags_sniffing_only_for_generic_fallback(client, no_real_browser):
+    """``sniffing`` 只对走兜底的 URL 为真。
+
+    M6.16 起 ``detect()`` 对**任意** http(s) URL 都返回非 None（GenericAdapter
+    兜底），所以判据必须是 ``priority < 0``，否则抖音 / B 站这些具体平台会被
+    误报成「要等 15 秒」。
+    """
+    unknown = client.post(
+        "/api/v1/parse", json={"url": "https://not-a-known-site.example/page"}
+    ).json()
+    assert unknown["sniffing"] is True
+    assert unknown["expected_sec"] > 0
+
+    known = client.post(
+        "/api/v1/parse", json={"url": "https://www.bilibili.com/video/BV1xx411c7mD"}
+    ).json()
+    assert known["sniffing"] is False, "具体平台不该被报成兜底嗅探"
+    assert known["expected_sec"] == 0
+

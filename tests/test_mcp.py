@@ -47,7 +47,20 @@ def test_tools_list_includes_all_registered():
         })
     resp = asyncio.run(_run())
     names = {t["name"] for t in resp["result"]["tools"]}
-    assert names == {"platforms", "parse_url", "add_to_queue", "get_status", "list_jobs"}
+    # 用 == 而非 >= 是刻意的：新增工具时这里必须同步更新，删掉工具时也会立刻变红。
+    assert names == {
+        "platforms", "parse_url", "add_to_queue", "get_status", "list_jobs",
+        "sniff_status",
+    }
+
+
+def test_every_advertised_tool_has_a_handler():
+    """``tools/list`` 宣告的每个工具都必须在 ``_HANDLERS`` 里有实现。
+
+    历史坑：往 ``TOOLS`` 加了描述却忘了注册 handler，客户端能看到工具、一调用就
+    报 method not found。两张表必须严格同集。
+    """
+    assert set(mcp_server.TOOLS) == set(mcp_server._HANDLERS)
 
 
 def test_unknown_method_returns_error():

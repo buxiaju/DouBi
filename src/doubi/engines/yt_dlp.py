@@ -37,6 +37,7 @@ import yt_dlp
 
 from ..core.models import DownloadOptions, MediaItem, MediaType
 from ..core.storage.file_layout import resolve_item_dir
+from ._subproc import find_bundled_ffmpeg
 from .base import Engine, EngineProgress, EngineProgressCallback
 
 logger = logging.getLogger("doubi.engines.yt_dlp")
@@ -104,24 +105,23 @@ class YtDlpEngine(Engine):
         """Find an ffmpeg binary, or ``None``.
 
         Priority:
-          1. ffmpeg on PATH
-          2. imageio-ffmpeg's bundled static binary (always available
-             when the ``imageio-ffmpeg`` pip package is installed)
+          1. the ffmpeg shipped with DouBi (``tools/nm3u8dl/ffmpeg.exe``,
+             also present inside the frozen bundle)
+          2. ffmpeg on PATH
 
         yt-dlp needs ffmpeg to merge bestvideo+bestaudio into a single
         file; B 站 (and most sites) only offer DASH split streams, so
-        without ffmpeg the download fails. The imageio-ffmpeg fallback
-        is what the original douyin-downloader used — it ships a real
-        ffmpeg static build inside the wheel, no system install needed.
+        without ffmpeg the download fails. That is why the release build
+        carries its own copy instead of relying on the user having
+        installed ffmpeg system-wide.
         """
+        bundled = find_bundled_ffmpeg()
+        if bundled:
+            return bundled
         on_path = shutil.which("ffmpeg")
         if on_path:
             return on_path
-        try:
-            import imageio_ffmpeg  # type: ignore
-            return imageio_ffmpeg.get_ffmpeg_exe()
-        except Exception:
-            return None
+        return None
 
     def supports(self, item: MediaItem) -> bool:
         return bool(item.source_url)

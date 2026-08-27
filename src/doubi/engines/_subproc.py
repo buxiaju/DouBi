@@ -7,6 +7,7 @@ Provides:
     too long (handles frozen ffmpeg / N_m3u8DL-CLI),
   - robust \r/\n-aware line splitting at the caller via ``on_chunk``
     instead of default asyncio line-iterator.
+* ``find_bundled_ffmpeg`` — locates the ffmpeg shipped with the app.
 
 The cancellation model is intentionally aggressive: the
 ``cancel_check`` flag is checked *every* time we read a chunk; if the
@@ -23,6 +24,7 @@ import os
 import signal
 import sys
 from collections.abc import Awaitable, Callable, Sequence
+from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger("doubi.engines.subproc")
@@ -32,6 +34,49 @@ logger = logging.getLogger("doubi.engines.subproc")
 # a few seconds between 2835-segment chunks, so 3 minutes is a fairly
 # safe upper bound: 180s without *any* output is definitely a hang.
 DEFAULT_OUTPUT_WATCHDOG_SECONDS = 180.0
+
+
+def find_bundled_ffmpeg() -> Optional[str]:
+    """Locate the ffmpeg binary that ships with DouBi.
+
+    All three engines (m3u8, yt_dlp, nm3u8dl) need ffmpeg to mux, and
+    all three used to fall back to ``imageio_ffmpeg``. That package is
+    83.6 MB of bundle for a single executable, so the release build
+    ships ``tools/nm3u8dl/ffmpeg.exe`` (10.91 MB) instead and excludes
+    ``imageio_ffmpeg`` from PyInstaller. This helper is the shared
+    lookup so the path logic lives in exactly one place.
+
+    Search order:
+
+    1. ``sys._MEIPASS/tools/nm3u8dl`` — the frozen bundle. This must
+       come first: in a frozen app ``Path.cwd()`` is wherever the user
+       launched the .exe from (often ``C:\\Windows\\System32`` when
+       started from a shortcut), so a cwd-relative probe would miss.
+    2. ``tools/nm3u8dl`` relative to cwd — the dev checkout layout.
+    3. ``tools/nm3u8dl`` relative to the repo root inferred from
+       ``__file__`` — dev runs launched from another directory.
+
+    Returns ``None`` when nothing is found; callers then fall back to
+    ``shutil.which("ffmpeg")`` and finally degrade gracefully.
+    """
+    name = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
+    roots: list[Path] = []
+
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        roots.append(Path(meipass) / "tools" / "nm3u8dl")
+    roots.append(Path.cwd() / "tools" / "nm3u8dl")
+    # engines/_subproc.py -> engines -> doubi -> src -> repo root
+    roots.append(Path(__file__).resolve().parents[3] / "tools" / "nm3u8dl")
+
+    for root in roots:
+        candidate = root / name
+        try:
+            if candidate.is_file():
+                return str(candidate)
+        except OSError:
+            continue
+    return None
 
 
 class SubprocessTimeout(Exception):

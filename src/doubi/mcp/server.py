@@ -101,6 +101,20 @@ async def _do_parse_url(adapter, url: str) -> dict:
     item = await adapter.parse(url)
     if item is None:
         return {"error": f"failed to parse {url}"}
+    # 通用嗅探的正常产出是一个 COLLECTION（N 条 sniffed 直链），只回顶层
+    # 字段的话 MCP 客户端拿到的是「解析成功但什么都没有」。递归一层把
+    # children 也摊出来。
+    children = [
+        {
+            "item_id": c.item_id,
+            "title": c.title,
+            "media_type": c.media_type.value,
+            "source_url": c.source_url,
+            "direct_url": c.extra.get("direct_url"),
+            "mime": c.extra.get("mime"),
+        }
+        for c in (item.children or [])
+    ]
     return {
         "platform": item.platform.value,
         "item_id": item.item_id,
@@ -108,6 +122,26 @@ async def _do_parse_url(adapter, url: str) -> dict:
         "author": item.author.name if item.author else None,
         "media_type": item.media_type.value,
         "source_url": item.source_url,
+        "child_count": len(children),
+        "children": children,
+    }
+
+
+def _tool_sniff_status(arguments: dict) -> dict:
+    """通用嗅探能力自检：装没装 Playwright、开没开、等多久。
+
+    MCP 客户端（模型）拿到「解析失败」时无法自己去翻日志，给它一个可调用
+    的自检口，才能自主判断是「这个站抓不到」还是「嗅探器根本没装起来」。
+    """
+    from ..core.sniffer import Sniffer
+
+    cfg = load_config(None)
+    return {
+        "available": Sniffer.is_available(),
+        "enabled": cfg.sniff_enabled,
+        "duration_sec": cfg.sniff_duration_sec,
+        "headless": cfg.sniff_headless,
+        "auto_play": cfg.sniff_auto_play,
     }
 
 
@@ -209,6 +243,14 @@ TOOLS: dict[str, dict[str, Any]] = {
             "additionalProperties": False,
         },
     },
+    "sniff_status": {
+        "description": (
+            "Report generic-sniffer capability: whether Playwright is available, "
+            "whether sniffing is enabled, and how long an unknown URL will take. "
+            "Call this when parse_url fails on an unrecognized site."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
 }
 
 _HANDLERS: dict[str, Callable[[dict], Any]] = {
@@ -217,6 +259,7 @@ _HANDLERS: dict[str, Callable[[dict], Any]] = {
     "add_to_queue": _tool_add_to_queue,
     "get_status": _tool_get_status,
     "list_jobs": _tool_list_jobs,
+    "sniff_status": _tool_sniff_status,
 }
 
 
@@ -315,6 +358,12 @@ async def run_stdio() -> None:
             pass
 
     logger.info("DouBi MCP server started (pid=%d)", __import__("os").getpid())
+
+    # 通用嗅探（M6.16）：把 AppConfig 注入兜底适配器。这是 MCP 侧唯一的
+    # ``AppConfig → Sniffer`` 注入口，四个入口（CLI/GUI/REST/MCP）各自负责
+    # 调一次，漏掉哪个那个入口的嗅探配置就静默失效（硬约束 #4）。
+    from ..platforms.generic import GenericAdapter
+    GenericAdapter.set_config(load_config(None))
     while True:
         line = await loop.run_in_executor(None, sys.stdin.readline)
         if not line:

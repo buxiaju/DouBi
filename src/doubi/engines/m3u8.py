@@ -21,7 +21,11 @@ from typing import Optional
 
 from ..core.models import DownloadOptions, MediaItem
 from ..core.storage.file_layout import resolve_item_dir
-from ._subproc import SubprocessTimeout, run_supervised_subprocess
+from ._subproc import (
+    SubprocessTimeout,
+    find_bundled_ffmpeg,
+    run_supervised_subprocess,
+)
 from .base import (
     Engine,
     EngineProgress,
@@ -55,16 +59,19 @@ _FFMPEG_FATAL = (
 
 
 def _resolve_ffmpeg() -> Optional[str]:
+    """Locate ffmpeg: bundled copy first, then PATH.
+
+    The bundled copy wins over PATH because it is version-pinned and
+    known-good, whereas a system ffmpeg could be anything. Returns None
+    when neither exists — ``M3u8Engine`` then degrades to the aiohttp
+    segment downloader instead of failing.
+    """
+    bundled = find_bundled_ffmpeg()
+    if bundled:
+        return bundled
     on_path = shutil.which("ffmpeg")
     if on_path:
         return on_path
-    try:
-        import imageio_ffmpeg
-        path = imageio_ffmpeg.get_ffmpeg_exe()
-        if path and Path(path).exists():
-            return path
-    except Exception:
-        pass
     return None
 
 

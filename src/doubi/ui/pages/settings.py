@@ -110,6 +110,9 @@ def build_settings_widgets():
         # 变更要么重启生效（database_path / theme），要么下一次下载
         # 入队时自然重新读（container / max_quality 等）。
         promptBeforeDownloadChanged = pyqtSignal(bool)
+        # 保存后通知主窗口把嗅探配置推到 parse_page（解析按钮的
+        # 「嗅探中… (Ns)」文案要用到 N），载荷是 ``(enabled, duration_sec)``。
+        sniffConfigChanged = pyqtSignal(bool, int)
 
         def __init__(self, parent: Optional[QWidget] = None):
             super().__init__(parent)
@@ -244,6 +247,33 @@ def build_settings_widgets():
             net_form.addRow("限速", self.rate_limit)
             net_form.addRow("启用数据库", self.database)
             body_layout.addWidget(self._network_card["widget"])
+
+            # ---- 通用嗅探 ----
+            # 只有「未知站点」才会走这条路：registry 里 GenericAdapter 的
+            # priority=-1，抖音 / B 站等具体平台永远先匹配，这些开关对它们无效。
+            self._sniff_card = self._build_card(
+                "通用嗅探",
+                "未识别的网站会用无头浏览器嗅探视频地址；已支持的平台不受影响",
+            )
+            sniff_form = QFormLayout(self._sniff_card["body"])
+            sniff_form.setVerticalSpacing(SPACE_MD)
+            sniff_form.setHorizontalSpacing(SPACE_LG)
+            sniff_form.setContentsMargins(0, 0, 0, 0)
+
+            self.sniff_enabled = SwitchButton(self._sniff_card["body"])
+            self.sniff_duration = LineEdit(self._sniff_card["body"])
+            self.sniff_duration.setPlaceholderText("15（秒，建议 5–60）")
+            self.sniff_headless = SwitchButton(self._sniff_card["body"])
+            self.sniff_auto_play = SwitchButton(self._sniff_card["body"])
+            self.sniff_user_agent = LineEdit(self._sniff_card["body"])
+            self.sniff_user_agent.setPlaceholderText("留空用浏览器默认 UA")
+
+            sniff_form.addRow("启用通用嗅探", self.sniff_enabled)
+            sniff_form.addRow("嗅探时长（秒）", self.sniff_duration)
+            sniff_form.addRow("无头模式", self.sniff_headless)
+            sniff_form.addRow("自动播放触发", self.sniff_auto_play)
+            sniff_form.addRow("User-Agent", self.sniff_user_agent)
+            body_layout.addWidget(self._sniff_card["widget"])
 
             # ---- 主题与外观 ----
             self._appearance_card = self._build_card(
@@ -447,6 +477,11 @@ def build_settings_widgets():
             self.rate_limit.setText(self._cfg.rate_limit or "")
             self.database.setChecked(self._cfg.database)
             self.prompt_before_download.setChecked(self._cfg.prompt_before_download)
+            self.sniff_enabled.setChecked(self._cfg.sniff_enabled)
+            self.sniff_duration.setText(str(self._cfg.sniff_duration_sec))
+            self.sniff_headless.setChecked(self._cfg.sniff_headless)
+            self.sniff_auto_play.setChecked(self._cfg.sniff_auto_play)
+            self.sniff_user_agent.setText(self._cfg.sniff_user_agent or "")
             self._sync_theme_combo()
             self.cookies_dir_label.setText(
                 str(Path.home() / ".doubi" / "cookies")
@@ -621,6 +656,17 @@ def build_settings_widgets():
             data["database"] = self.database.isChecked()
             data["prompt_before_download"] = self.prompt_before_download.isChecked()
 
+            # 通用嗅探。时长夹到 5–60：低于 5 秒基本抓不到 m3u8（页面还没起播），
+            # 高于 60 秒用户会以为程序卡死。非法输入回落到默认 15。
+            data["sniff_enabled"] = self.sniff_enabled.isChecked()
+            try:
+                data["sniff_duration_sec"] = min(60, max(5, int(self.sniff_duration.text() or 15)))
+            except ValueError:
+                data["sniff_duration_sec"] = 15
+            data["sniff_headless"] = self.sniff_headless.isChecked()
+            data["sniff_auto_play"] = self.sniff_auto_play.isChecked()
+            data["sniff_user_agent"] = self.sniff_user_agent.text().strip()
+
             theme_name = self._selected_theme_name()
             data["theme"] = theme_name
             set_theme(theme_name)
@@ -651,6 +697,23 @@ def build_settings_widgets():
                     duration=5000,
                 )
                 return
+
+            # 嗅探配置要立即在本进程生效，否则用户改完时长还得重启才看得到
+            # 变化。``self._cfg`` 是内存里那份，同步它 + 重新注入兜底适配器，
+            # 就等于走了一遍启动时的 ``GenericAdapter.set_config``。
+            self._cfg.sniff_enabled = data["sniff_enabled"]
+            self._cfg.sniff_duration_sec = data["sniff_duration_sec"]
+            self._cfg.sniff_headless = data["sniff_headless"]
+            self._cfg.sniff_auto_play = data["sniff_auto_play"]
+            self._cfg.sniff_user_agent = data["sniff_user_agent"]
+            try:
+                from ...platforms.generic import GenericAdapter
+                GenericAdapter.set_config(self._cfg)
+            except Exception:  # noqa: BLE001 - 注入失败不该阻断保存
+                logger.exception("failed to push sniff config to GenericAdapter")
+            self.sniffConfigChanged.emit(
+                self._cfg.sniff_enabled, self._cfg.sniff_duration_sec
+            )
 
             InfoBar.success(
                 title="设置已保存",

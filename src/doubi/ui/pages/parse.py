@@ -200,6 +200,12 @@ def build_parse_widgets():
             adapter = PlatformRegistry.detect(text)
             if adapter is None:
                 return
+            # M6.16 起 GenericAdapter 兜底匹配**任意** http(s) URL，于是
+            # ``detect()`` 对「复制了一条文档链接」也会返回非 None，剪贴板
+            # 就会疯狂抢粘贴。这里只认具体平台（priority >= 0）：兜底嗅探
+            # 仍然可以手动粘贴触发，但不该由剪贴板自动代劳。
+            if getattr(adapter, "priority", 0) < 0:
+                return
 
             # 用户正在输入框里打字时不自动覆盖
             if self.url_input.hasFocus():
@@ -224,6 +230,17 @@ def build_parse_widgets():
         def set_prompt_before_download(self, enabled: bool) -> None:
             """设置页保存后由主窗口转发下来：是否下载前先弹选项框。"""
             self._prompt_before_download = enabled
+
+        def set_sniff_config(self, enabled: bool, duration_sec: int) -> None:
+            """设置页保存后由主窗口转发下来：通用嗅探开关与时长。
+
+            ``self._cfg`` 是构造时读的快照，不同步的话用户改完嗅探时长，
+            解析按钮还会显示旧的 ``嗅探中… (15s)``。真正的注入
+            （``GenericAdapter.set_config``）由设置页自己做，这里只更新
+            本页要用到的两个显示字段。
+            """
+            self._cfg.sniff_enabled = enabled
+            self._cfg.sniff_duration_sec = duration_sec
 
         def _ask_prompt_overrides(self) -> Optional[dict]:
             """弹「下载选项」对话框。返回 None 表示用户取消。
@@ -389,13 +406,32 @@ def build_parse_widgets():
 
         # ---- parsing --------------------------------------------------
 
+        def _sniff_seconds_for(self, urls: list[str]) -> int:
+            """待解析 URL 里若有走 generic 兜底的，返回预计嗅探秒数，否则 0。
+
+            解析按钮文案要区分「解析中…」和「嗅探中… (15s)」：兜底嗅探要真
+            起一个无头浏览器等满 ``sniff_duration_sec`` 秒，不给预期用户会以为
+            卡死。判据是 ``detect()`` 返回的适配器 ``priority < 0``（只有
+            GenericAdapter 是负优先级）。
+            """
+            from ...core.registry import PlatformRegistry
+
+            if not getattr(self._cfg, "sniff_enabled", True):
+                return 0
+            for url in urls:
+                adapter = PlatformRegistry.detect(url)
+                if adapter is not None and getattr(adapter, "priority", 0) < 0:
+                    return int(getattr(self._cfg, "sniff_duration_sec", 15))
+            return 0
+
         def _on_parse_clicked(self):
             urls = self._parse_urls()
             if not urls:
                 self._toast(InfoBar.warning, "没有有效链接", "请至少粘贴一个 URL（每行一个）。")
                 return
             self.parse_btn.setEnabled(False)
-            self.parse_btn.setText("解析中…")
+            sniff_sec = self._sniff_seconds_for(urls)
+            self.parse_btn.setText(f"嗅探中… ({sniff_sec}s)" if sniff_sec else "解析中…")
 
             async def _do():
                 try:

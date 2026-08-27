@@ -130,7 +130,15 @@ class _BaseBrowserLogin:
 
         started = time.monotonic()
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=self.headless)
+            # channel="chromium" 必须和 core/sniffer.py 保持一致：发布版不打包
+            # chrome-headless-shell.exe（270.7 MB），只带完整 Chromium。虽然
+            # 扫码登录一律 headless=False，headed 模式也已实测确认 channel
+            # 生效；显式写上是为了让「两处 launch 必须同参数」这条约束在代码
+            # 里可见，避免以后有人给登录加 headless 选项时踩坑。
+            browser = p.chromium.launch(
+                channel="chromium",
+                headless=self.headless,
+            )
             try:
                 context_opts: dict = {}
                 if self.user_agent:

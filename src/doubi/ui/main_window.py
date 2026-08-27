@@ -141,6 +141,15 @@ def build_main_window():
             self.settings_interface.promptBeforeDownloadChanged.connect(
                 self.parse_interface.set_prompt_before_download
             )
+            # 通用嗅探（M6.16）同理：设置页保存后把开关与时长推给解析页，
+            # 解析按钮的「嗅探中… (Ns)」文案才不会停留在旧值。
+            self.parse_interface.set_sniff_config(
+                self.settings_interface._cfg.sniff_enabled,
+                self.settings_interface._cfg.sniff_duration_sec,
+            )
+            self.settings_interface.sniffConfigChanged.connect(
+                self.parse_interface.set_sniff_config
+            )
 
             # 主题循环按钮固定在导航栏底部
             self.theme_toggle = NavigationToolButton(FluentIcon.BRUSH)

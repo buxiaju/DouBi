@@ -1,7 +1,7 @@
 # Generic Sniffer 适配器 — 任意 URL 视频嗅探
 
 **日期**: 2026-08-25
-**状态**: design / in-progress
+**状态**: implemented（2026-08-27 完成四入口接通与测试守卫）
 **关联里程碑**: M6.16
 
 ## 目标
@@ -52,16 +52,34 @@ URL → registry.detect() → (无 normal-priority 匹配) → GenericAdapter.pa
 
 ## 引擎路由规则
 
-URL 扩展名 + MIME 双判：
+> **实现修正（2026-08-27）**：原设计写的「HLS→YtDlp、直链→Aria2」在实现期
+> 已被更专精的引擎取代。以下是**实际**行为，以代码为准。
 
-| 特征 | 引擎 | 理由 |
+adapter 不直接选引擎，只在 child 的 `extra` 里写路由**提示位**
+（`is_hls` / `is_dash` / `is_direct_video`），真正的选择在
+`pipeline._select_engine()`：按 `extra_engines` 顺序取第一个
+`supports()` 为真且 `is_available` 的引擎，全不命中才落到默认引擎。
+
+| 特征 | 实际引擎 | 理由 |
 |---|---|---|
-| `.m3u8` / `.m3u` 或 `application/vnd.apple.mpegurl` | YtDlpEngine | HLS 解析+合并 TS，Aria2 不支持 |
-| `.mpd` 或 `application/dash+xml` | YtDlpEngine | DASH 同上 |
-| `.mp4` / `.webm` / `.ts` 直链 | Aria2Engine 优先，YtDlpEngine 兜底 | Aria2 多线程加速更优 |
-| 其他 / 未知扩展名 | YtDlpEngine | yt-dlp generic extractor 自识别 |
+| `.m3u8` / `.m3u` / `is_hls` | `Nm3u8dlEngine`（二进制可用）→ 降级 `M3u8Engine`（ffmpeg） | 比 yt-dlp 更快，且能处理分片加密 |
+| `.mp4` `.m4v` `.webm` `.flv` `.mkv` `.avi` `.mov` | `DirectHttpEngine`（aiohttp 分块） | 无需外部二进制，进度更细 |
+| `.mpd` / `is_dash` | 默认引擎（yt-dlp，或 cfg.engine=aria2 时 Aria2） | 见下方「已知缺口」 |
+| 其他 / 未知扩展名 | 默认引擎 | yt-dlp generic extractor 自识别 |
 
-sniffed child 在 `extra.direct_url` 塞直链（Aria2 现有契约）。
+`.ts` **不会**作为独立条目出现：它在 `sniffer._ALLOWED_VIDEO_EXTS` 阶段
+就被当作 HLS 分片过滤掉了，不是可独立下载的视频。
+
+sniffed child 仍在 `extra.direct_url` 塞直链（Aria2 契约），同时被
+REST `_item_to_dict()` 和 MCP `_do_parse_url()` 用于对外输出。
+
+### 已知缺口（不阻塞 M6.16 收尾）
+
+- `is_dash` 目前**无消费者**：只有写入点，没有任何引擎的 `supports()` 读它。
+  DASH 靠默认 yt-dlp 兜底，行为正确但属于「歪打正着」。
+- `Aria2Engine` 在 generic 场景实际不参与路由竞争：`DirectHttpEngine` 排在
+  它之前且会命中所有直链，所以 `cfg.engine=aria2` 也不会让 sniffed `.mp4`
+  走 aria2。
 
 ## catch_lite.js
 
@@ -106,6 +124,7 @@ async def sniff(self, url: str) -> SniffResult:
 ## 配置字段（AppConfig 扁平）
 
 ```python
+sniff_enabled: bool = True           # 总开关；False 时不启动浏览器
 sniff_duration_sec: int = 15         # 5–60
 sniff_headless: bool = True
 sniff_user_agent: str = ""           # 空串用 Playwright 默认 UA
@@ -121,14 +140,26 @@ sniff_capture_types: tuple[str, ...] = (
 `test_sniff_options_forwarded_to_sniffer`，把 `sniff_duration_sec=42` 推离
 默认值，断言 Sniffer 实例拿到的是 42。
 
-## GUI / CLI / REST 集成
+## GUI / CLI / REST / MCP 集成（已落地）
 
-- **GUI**：解析页零改动（COLLECTION + child 模式 UI 已有）。进度对话框加
-  generic URL 分支文案：「嗅探中… (15s)」。settings.py 加「嗅探」卡片。
-- **CLI**：`doubi download <unknown-url>` 自动生效（registry 兜底）。新增
-  `--sniff-duration N` 和 `--no-sniff` flag。
-- **REST**：`POST /api/parse` 接受任意 URL。新增 `GET /api/sniff/status/<task_id>`
-  供前端轮询嗅探进度。
+四入口都必须调 `GenericAdapter.set_config(cfg)`，否则用户改的 `sniff_*`
+静默失效（硬约束 #4）。实际注入点：
+
+| 入口 | 注入位置 | 附加改动 |
+|---|---|---|
+| CLI | `cli/main.py::_apply_sniff_overrides()` | `--sniff-duration N` / `--sniff` / `--no-sniff`，三层优先级（flag > 配置 > 默认） |
+| GUI | `ui/app.py`（启动）+ `ui/pages/settings.py`（改设置后） | 设置页「通用嗅探」卡片（5 控件，时长 5–60 夹紧）；`sniffConfigChanged` 信号推给解析页 |
+| REST | `server/app.py::_apply_sniff_config()` | `POST /api/v1/parse`、`GET /api/v1/sniff/status/{task_id}`、`GET /api/v1/sniff/status`（能力自检） |
+| MCP | `mcp/server.py::run_stdio()` | `sniff_status` 工具；`parse_url` 展平 children |
+
+**判定「这是兜底嗅探吗」的唯一谓词是 `adapter.priority < 0`**。因为
+generic 让 `detect()` 对任意 http(s) URL 都返回非 None，用「detect 是否为
+None」判断会永远为真。该谓词用在 GUI 剪贴板过滤、GUI 嗅探秒数提示、
+REST `_expected_sniff_sec()` 三处。
+
+REST 的 `POST /api/v1/parse` 立即返回 `task_id` 并 `asyncio.create_task`
+后台解析，由 `GET /api/v1/sniff/status/{task_id}` 轮询。asyncio 只持弱引用，
+所以 task 句柄存在 `_task` 键里防 GC，且从所有响应中剔除（不可 JSON 序列化）。
 
 ## 错误处理
 
@@ -137,14 +168,19 @@ sniff_capture_types: tuple[str, ...] = (
 - 嗅探超时 / 0 个 URL：返回单个错误 MediaItem，UI 显示明确报错。
 - 单个 child 下载失败：pipeline 现有错误处理路径不变。
 
-## 测试策略
+## 测试策略（实际文件名）
 
-- `test_config_forwarding.py`：sniff_* 字段从 AppConfig → Sniffer 转发
-- `test_sniffer.py`：用 monkeypatch 替换 `async_playwright()`，离线测试
-  `_merge_sources()` 去重 + 排序逻辑、`_capture_meta()` 过滤逻辑
-- `test_generic_adapter.py`：monkeypatch Sniffer，验证 COLLECTION 容器
-  生成、child MediaItem 字段填充、Playwright 不可用时降级路径
-- `test_registry.py`：加 priority 顺序测试，generic 兜底逻辑
+| 文件 | 覆盖 |
+|---|---|
+| `tests/test_config_forwarding.py` | sniff_* 从 AppConfig → Sniffer 实例（推离默认值）；四入口各自调了 `set_config`；`sniff_enabled=False` 不构造浏览器 |
+| `tests/test_generic_sniffer.py` | `_merge_sources()` 去重排序、`_capture_meta()` MIME 过滤、COLLECTION 容器与 child 字段、Playwright 缺失降级、registry priority 兜底 |
+| `tests/test_server.py` | 三个 REST 嗅探端点；`no_real_browser` fixture 防测试真起 Chromium |
+| `tests/test_mcp.py` | 工具白名单（`==` 严格同集）+ `TOOLS`/`_HANDLERS` 同集守卫 |
+
+守卫经变异测试验证：删掉 `sniff_options_from_config` 里的
+`duration_sec=cfg.sniff_duration_sec` 后 `test_sniff_options_forwarded_to_sniffer`
+确实变红（`assert 15 == 42`）。这正是「推离默认值」的价值 —— 若断言用默认
+值 15，删掉搬运后仍会通过。
 
 ## 已知限制（写入 spec）
 

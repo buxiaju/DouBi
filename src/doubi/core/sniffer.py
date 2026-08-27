@@ -385,7 +385,22 @@ class Sniffer:
 
         try:
             async with async_playwright() as p:  # type: ignore[misc]
-                browser = await p.chromium.launch(headless=self.options.headless)
+                # channel="chromium" 是**体积优化的前置条件**，不是可选装饰。
+                #
+                # Playwright 1.4x+ 把 headless 拆成了独立的
+                # chrome-headless-shell.exe（270.7 MB），默认
+                # ``launch(headless=True)`` 只认它，不认完整 Chromium。发布版
+                # 为省这 270 MB 不打包 headless_shell（见 scripts/build_exe.py
+                # 的 _BROWSER_SKIP_PREFIXES），于是必须显式声明 channel，
+                # 让 Playwright 走完整 Chromium 自带的 Chrome「new headless」。
+                #
+                # 缺了这个参数，发布版一嗅探就抛
+                # ``Executable doesn't exist at ...chrome-headless-shell.exe``。
+                # 两处 launch（这里 + core/auth/browser_login.py）必须同时带。
+                browser = await p.chromium.launch(
+                    channel="chromium",
+                    headless=self.options.headless,
+                )
                 try:
                     context_kwargs: dict[str, Any] = {}
                     if self.options.user_agent:

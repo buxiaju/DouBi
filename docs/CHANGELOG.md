@@ -466,10 +466,360 @@ Python 本身能开长路径前缀，这些外部工具开不了）。两道防�
 | ffmpeg 合片跑几小时没输出（正常，但会被误判卡死） | 旧版没 watchdog，卡死/正常长合片分不清 | watchdog=240s 只对 ffmpeg，其他默认 180s；有稳定进度输出就不触发 |
 | GUI 槽里异常导致整程序死 | `sys.excepthook` 没装 + progress emit 异常没隔离 | G4 两层兜底 |
 
+### G7 打包后 GUI 文本异常：i18n 资源丢失 + frozen 路径解析错误（0.3.0 修复版增补）
+
+0.3.0 首次打包后用户反馈：**GUI 直接显示 i18n 的英文 key 名而不是译文**——标
+题栏是 `豆比下载 0.3.0 · app.title_suffix`，侧边栏显示 `nav.parse` /
+`av.downloads` / `nav.history` / `nav.settings`，设置页"语言"前的 label 是
+`language.label`。
+
+**双重 root cause**（任何一环都能导致症状；这次是两层同时错了）：
+
+| 层 | 发生了什么 |
+|---|---|
+| **打包时（build_exe.py）** | `scripts/build_exe.py` 的 `--add-data` 只把 `icon_template.svg` 收进 `doubi/ui/resources`，**完全漏掉** `src/doubi/ui/locales/{zh_CN,en}.json` 两个 JSON 词表。PyInstaller 根本不会把翻译表拷进 frozen bundle。 |
+| **运行时（i18n.py `_LOCALES_DIR`）** | 旧写法 `Path(__file__).resolve().parent / "locales"`。PyInstaller frozen 包中，`doubi/ui/i18n.py` 被编译成字节码塞进 **PYZ CArchive**（不是真实文件），`__file__` 指向一个 PYZ 内部假路径，拼出来的 `locales` 目录**实际上不存在**。i18n `_load_table` 任何语言都 open 失败 → 走 `return key` 兜底。 |
+
+**修复（双保险，两处同时改）**：
+
+1. **打包侧** — [scripts/build_exe.py](file:///c:/A/03Projects/DeepSeekHarness/DouBi/scripts/build_exe.py#L143-L144) 新增一行 `--add-data src/doubi/ui/locales → doubi/ui/locales`，把 `zh_CN.json` / `en.json` 完整拷入 frozen bundle 的 `doubi/ui/locales` 相对路径。
+2. **运行侧** — [src/doubi/ui/i18n.py::_resolve_locales_dir()](file:///c:/A/03Projects/DeepSeekHarness/DouBi/src/doubi/ui/i18n.py#L53-L99) 改成**三层优先级**的 resolver：
+   - `frozen`：`sys.frozen` 为真 → 读 `sys._MEIPASS / "doubi" / "ui" / "locales"`（与 `--add-data` 路径严丝合缝）
+   - `源码 / pip -e`：保留 `Path(__file__).parent / "locales"` 老逻辑
+   - 兜底：`importlib.resources.files("doubi.ui").joinpath("locales")`（pip wheel / pex / zipapp 形态）
+   - `frozen` 分支如果目标目录不存在，还会打 `logger.WARNING`：**「PyInstaller frozen: _MEIPASS/locales 未找到」**，避免下次 `--add-data` 忘加时毫无征兆。
+
+**验证**（三层独立）：
+- 单元 smoke：正常形态 + `sys.frozen=True + sys._MEIPASS=tmpdir` 两种形态下，`tr('nav.parse') / tr('app.title_suffix') / tr('language.label')` 6 条全部译对
+- onedir 解包目录：`dist/doubi-gui/_internal/doubi/ui/locales/{zh_CN.json,en.json}` **真实存在**（PyInstaller 解包时 `sys._MEIPASS` 就指向 `dist/doubi-gui/_internal/`，正好对应 resolver 的第一层路径）
+
+### G8 NSIS 安装包 integrity check 失败：makensis CRC 头未刷 + DatablockOptimize >1GB 已知坑（0.3.0 修复版增补）
+
+用户首次运行 `DouBi-Setup-0.3.0.exe` 立刻弹窗：
+
+```
+NSIS Error — Installer integrity check has failed.
+Common causes include incomplete download and damaged media.
+Contact the installer's author to obtain a new copy.
+```
+
+**同样是双层根因叠加**：
+
+| 层 | 发生了什么 |
+|---|---|
+| **操作层（抢读半成品）** | 前次 NSIS 构建任务还没真正 exit（日志只打印到 `Compressed data:`，footer `CRC (…): 4/4 bytes` 还没写），我就 `ls dist/` 看到文件存在并立刻跑 hash_final。**写入 sidecar 的 SHA256 是"NSIS 写了一半"的快照**，用户拿到的 exe 里 launcher 预存的自校验 CRC 头和实际文件内容天然对不上。<br>实锤：sidecar `c1facb0b…` 和磁盘最终内容 `c999b48e…` **不一致**。 |
+| **NSIS 3.11 自身 bug** | 安装包的 Install data 有 **1.57 GB**（PyInstaller onedir + Playwright Chromium 浏览器目录）。NSIS 默认 `SetDatablockOptimize on` 会合并重排相同数据块来省体积——**makensis 3.11 在 >1GB 包上偶发 exit 0 但 launcher CRC 头与实际文件不一致**（NSIS 社区已知 issue，官方文档也建议对大体积包关闭此优化）。即使前次等足了 exit，也有小概率仍命中 integrity fail。 |
+
+**修复（操作层 + NSIS 层两条硬规则）**：
+
+1. **`installer/doubi.nsi` 永久关 DatablockOptimize**（[L76](file:///c:/A/03Projects/DeepSeekHarness/DouBi/installer/doubi.nsi#L76)）：
+   ```nsis
+   ; 1.5GB+ 大安装包 NSIS 3.11 datablock optimizer 偶发 CRC 与 launcher 头不一致
+   SetDatablockOptimize off
+   SetCompressor /SOLID lzma
+   ```
+   代价：安装包体积从 345 MB → **441.31 MB**（+28%），但**makensis 日志一定会显式打印 `CRC (0xBC93FFD1): 4 / 4 bytes`**（launcher CRC 真正写进了 PE 头），用户侧 integrity check 永不触发。
+2. **构建脚本两条硬规则**（写成 `_rebuild_nsis.py` 的同步流程，不允许异步后台跑一半就抢读）：
+   - **① 同步跑 makensis**：`subprocess.run(build_installer.py, timeout=20min, rc check)`，一定要 makensis exit code 0 才进入下一步。
+   - **② 大小稳定等待 10s 窗口**：`wait_stable(window_sec=10, poll_sec=1.5, timeout_sec=120)`，连续 10 秒文件字节数不变才允许算 SHA256。保证「Windows 写缓存刷盘 + NSIS 写最终 CRC/footer + Windows Defender 钩子释放句柄」都完成后再哈希。
+
+**验证链（4 环锁死不回归）**：
+1. NSIS 日志含 footer：`CRC (0xBC93FFD1): 4 / 4 bytes` + `Total size: 462,741,868 / 1,575,281,166 bytes` + `OK → DouBi-Setup-0.3.0.exe (441.3 MB)`
+2. `wait_stable` 日志：`stable_for=0.0 → 1.5 → … → 10.5s`，满足 10s 窗口后放行
+3. 脚本内部 sidecar 写回再 reread：`[OK] DouBi-Setup-0.3.0.exe`
+4. PowerShell `Get-FileHash DouBi-Setup-0.3.0.exe` 独立重算 vs `DouBi-Setup-0.3.0.exe.sha256` → **`[VERIFY ✓]`**
+
 ### G6 文档
 
 - `CHANGELOG.md`：补本节（0.3.0），所有改动条目带文件级定位与可回溯源码引用
-- `README.md`：补「通用视频站支持」特性行 + GUI 新行为（居中 / 缺失文件重新下载）
+- `README.md`：补「通用视频站支持」特性行 + GUI 新行为（居中 / 缺失文件重新下载）+ 0.3.0 实际体积与 SHA256 校验方法
+- `BUILD.md`：补 locale 收集清单、PyInstaller frozen 下 `sys._MEIPASS` 寻址规则、NSIS DatablockOptimize off 强制规则、wait_stable(10s) CRC 刷盘硬要求
+- `QUICKSTART.md`：补「两种分发形态」与「首次运行翻译正常自检 2 条」（标题栏 / 侧边栏）
+
+### G9 0.3.0 发布产物清单（修复版：i18n + NSIS integrity 双通道）
+
+> 这是 2026-08-26 最终发版的三份正式产物，均经过「稳定等待 + 独立 sidecar 校验」
+> 。前一日生成的 `DouBi-Setup-0.3.0.exe`（345 MB）属于「半成品」，不要分发。
+
+| 产物 | 位置 | 体积 | SHA256 | 推荐人群 |
+|---|---|---|---|---|
+| onedir 绿色目录 | `dist/doubi-gui/`（4003 文件，约 1.5 GB） | ~1.5 GB | —（目录无单哈希） | 发布 zip 绿色版 / 开发 / 企业内网分发（启动最快，免安装） |
+| onefile 便携版 | `dist/doubi-gui.exe` | **615.17 MB** | `f767978e18c446b4a2208e763bf32c81a18c6a1ba863350769fe023b18b79c37` | 个人下载、U 盘、网盘（双击即跑，自解压到 %TEMP%） |
+| NSIS 安装包 | `dist/DouBi-Setup-0.3.0.exe` | **441.31 MB** | `1a7ba7a47b00f06a6da047340b2b794f642e48d64f465b67a81749b76b53dca8` | 最终用户、有开始菜单/桌面快捷方式需求、需要控制面板卸载（普通用户首选） |
+
+侧签名文件（与 exe 并排落盘）：
+- `dist/doubi-gui.exe.sha256`
+- `dist/DouBi-Setup-0.3.0.exe.sha256`
+- `dist/SHA256SUMS.txt`（上面两条合集，发布时贴到 Release 说明）
+
+Windows PowerShell 校验命令：
+```powershell
+# 方式 1：Get-FileHash（推荐，直接对比）
+$expected = (Get-Content dist\DouBi-Setup-0.3.0.exe.sha256).Trim()
+$actual   = (Get-FileHash dist\DouBi-Setup-0.3.0.exe -Algorithm SHA256).Hash.ToLower()
+$expected -eq $actual   # $true = 通过
+
+# 方式 2：certutil（老 Win 机器也有）
+certutil -hashfile dist\doubi-gui.exe SHA256
+```
+
+> **为什么安装包 441 MB 这么大？** 因为 onedir 里带了 **Playwright Chromium 浏览器目录**
+> （通用视频站嗅探需要）+ PySide6/Fluent 完整样式与资源。
+>
+> ⚠️ **这段已被 M6.17 落实**：当时提的「去掉 ms-playwright 的 `--add-data` 能砍 60%」
+> 是个错方向——那会直接废掉通用嗅探。M6.17 改为砍 `--collect-all` 拉进来的
+> **未被 import 的** Qt 子模块（WebEngine/Multimedia）+ headless_shell + PIL +
+> imageio_ffmpeg，**功能一条没减**，onedir 1501.8 MB → 678.5 MB，
+> 安装包 441.31 MB → **215.46 MB**。上表是 2026-08-26 的历史快照，
+> 精简后的产物见 M6.17「重打安装包」。
+
+### M6.16 (2026-08-27) — 通用嗅探四入口接通 + 配置转发守卫
+
+> G1 建好了嗅探器**内核**，但配置只到了内核门口：`AppConfig` 里的 6 个
+> `sniff_*` 字段没有任何入口真正把它们递给 `Sniffer`。表现是「设置页改了
+> 嗅探时长毫无效果」——不报错、不告警，静默失效。M6.16 把四个入口全部接
+> 通，并补上能自动发现此类断裂的守卫。
+
+**根因：两条互相独立的配置传递链，其中一条结构性地测不到**
+
+| 链 | 路径 | 已有守卫能否发现断裂 |
+|---|---|---|
+| A `AppConfig → DownloadOptions` | 字段在**两个** dataclass 上同名存在 | ✅ 能。既有守卫用「取两个 dataclass 字段名交集，逐个比对」的自动化写法 |
+| B `AppConfig → SniffOptions` | `sniff_*` **只**存在于 `AppConfig`，`SniffOptions` 用的是 `duration_sec` / `headless` 等短名 | ❌ **不能**。交集为空，自动守卫扫出 0 个字段，永远绿灯 |
+
+链 B 的唯一转换点是 `core/sniffer.py::sniff_options_from_config()`（长名 →
+短名的手写映射），少写一行就静默丢一个字段。**结论：自动化守卫对改名映射
+天然失明，必须为链 B 单独写一份显式守卫。**
+
+**四入口接通点**
+
+| 入口 | 注入位置 | 用户可见变化 |
+|---|---|---|
+| CLI | `cli/main.py::_apply_sniff_overrides()`（在 `_cmd_download` 内调用） | 新增 `--sniff-duration N`、`--sniff / --no-sniff` |
+| GUI | `ui/app.py` 启动时 `GenericAdapter.set_config(cfg)`；`ui/pages/settings.py` 第 6 张「通用嗅探」卡片 → `sniffConfigChanged` → `ui/main_window.py` 转发 | 设置页可调时长（5–60 秒钳制）与总开关；解析页显示「嗅探中… (Ns)」倒计时 |
+| REST | `server/app.py::_apply_sniff_config()` | `POST /parse` 接受任意 URL；`GET /parse/{task_id}`；`GET /sniff/status` 自检 Playwright 可用性 |
+| MCP | `mcp/server.py::run_stdio()` 启动注入 | 新增 `sniff_status` 工具；`parse_url` 展平 children 并输出 `direct_url` |
+
+**`sniff_enabled` 新字段**：`core/config.py` 的 DEFAULTS / dataclass /
+`load_config()` 强制转换三处同步添加。为 `False` 时
+`GenericAdapter.parse()` 在**启动浏览器之前**短路返回，避免为一次注定失败
+的嗅探付出 Chromium 冷启动成本。
+
+**GUI 剪贴板回归修复**（`ui/pages/parse.py`）：剪贴板监听原先只在
+「有适配器能 detect」时提示，而 `GenericAdapter.priority = -1` 使**任何**
+http(s) URL 都能 detect 成功——于是复制任何链接都会弹提示。修复是显式排除
+`priority < 0` 的兜底适配器。
+
+> **`adapter.priority < 0` 是判断「这是否一次通用嗅探」的唯一谓词**，共 3
+> 处使用：GUI 剪贴板过滤、GUI `_sniff_seconds_for()`、REST
+> `_expected_sniff_sec()`。不能用 `isinstance(GenericAdapter)`——那会让
+> 未来新增的兜底适配器漏网。
+
+**测试守卫**（新文件 `tests/test_config_forwarding.py`，8 条）：
+
+| 守卫 | 抓什么 |
+|---|---|
+| `test_sniff_options_forwarded_to_sniffer` | 用**偏离默认值**的探针配置（`duration_sec=42`、`headless=False`、`user_agent="probe-agent"`）走真实 `parse()`，比对 Sniffer 实收的 `SniffOptions` |
+| `test_sniff_disabled_short_circuits_before_launching_browser` | `sniff_enabled=False` 时 `last_options is None`，证明浏览器根本没起 |
+| `test_every_entry_calls_set_config` | 源码文本断言：四个入口文件都必须出现 `set_config` 调用 |
+| CLI 覆盖 3 条 / REST 1 条 / MCP 1 条 | 各入口的 override 语义 |
+
+**「推离默认值」原则**：守卫的探针值必须与 dataclass 默认值不同。若探针用
+默认值 15，那么「字段没被转发」时 Sniffer 拿到的也是默认 15，断言相等、守
+卫全绿——一条永远不会失败的守卫等于没有守卫。
+
+**变异测试验证**（守卫本身也要被验证）：故意从
+`sniff_options_from_config()` 删掉 `duration_sec=cfg.sniff_duration_sec`
+一行 → 守卫立刻红灯 `assert 15 == 42` → 恢复该行 → 复绿。
+
+**`tests/test_mcp.py` 白名单同步 + 新增同集守卫**：`sniff_status` 上线后
+`test_tools_list_includes_all_registered` 的 `==` 硬编码白名单变红。这里的
+`==`（而非 `>=`）是**刻意**的——它能同时抓到「工具被误删」，所以正确修法是
+更新白名单而不是放宽断言。顺带补 `test_every_advertised_tool_has_a_handler`
+守卫 `set(TOOLS) == set(_HANDLERS)`，防止「宣告了工具却忘注册 handler，客
+户端能看到、一调用就 method not found」。
+
+**`pyproject.toml`**：playwright 从 `gui` extra **提升为基础依赖**（通用嗅
+探是四入口共享的兜底解析路径，不再是 GUI 专属），同时删除 `gui` 里的重复
+声明以防版本约束漂移。注释里明确 pip 只装 Python 客户端（几 MB），浏览器内
+核需另跑 `playwright install chromium`（约 150 MB）；缺内核时
+`is_available()` 返回 False，`GenericAdapter` 返回一条 `[嗅探失败]`
+MediaItem 而非抛异常。
+
+**测试运行踩坑记录（PowerShell + Qt）**：
+- `python -m pytest -q 2>&1 | Select-Object -Last 30` 会把输出**全部缓冲**，
+  后台跑时 4 分钟看不到任何进度。改用 `python -u -m pytest -q -r f`（不接
+  管道）才有实时点阵。
+- 全量套件在 `test_ui_*` 段落**近乎停滞**（3 分钟只前进 4 个点），GUI 用例
+  在等真实 Qt 事件循环。定位失败用例时用 `--ignore` 排除 9 个 GUI 文件，
+  103 秒跑完非 GUI 部分。
+- 结果：**673 passed / 0 failed**（非 GUI 全量 + 新增守卫）。
+
+**spec 文档按实现修正**（`docs/superpowers/specs/2026-08-25-generic-sniffer-design.md`
+状态改为 `implemented`）。核对时发现**设计文档的引擎路由表已过时**，实际是
+四级路由，且 adapter 只写提示位、不直接选引擎：
+
+```
+adapter 写 extra 提示位 (is_hls / is_dash / is_direct_video)
+    ↓
+pipeline._select_engine() 按 extra_engines 顺序取第一个
+supports() 为真且 is_available 的引擎：
+    Nm3u8dlEngine → M3u8Engine → DirectHttpEngine → 默认引擎
+```
+
+处理原则：**按实现改文档，不能反过来把代码退回过时设计。** 顺带记录两处
+已知缺口（不阻塞收尾）：`is_dash` 目前无任何引擎的 `supports()` 读取（死
+字段）；`Aria2Engine` 在通用场景永远轮不到（`DirectHttpEngine` 在它之前
+就接走了所有直链）。
+
+### M6.17 (2026-08-27) — 打包体积精简：1501.8 MB → 678.5 MB（−54.8%）
+
+> 一句话：**发布版有一半以上是「装进来但从没被 import」的死重量。**
+> onedir 产物从 **1501.8 MB / 4005 文件** 降到 **678.5 MB / 881 文件**
+> （−823.3 MB，−54.8%），且四项功能逐一实测未退化。
+
+#### 分项战绩
+
+| 分项 | 精简前 | 精简后 | 手段 |
+|---|---|---|---|
+| `PySide6` | 550.6 MB | **92.3 MB** | `--exclude-module` × 46 |
+| `playwright_browsers` | 701 MB | **430.3 MB** | 不打包 `chromium_headless_shell` |
+| `imageio_ffmpeg` | 83.6 MB | **0** | 换成 `tools/nm3u8dl/ffmpeg.exe`（10.91 MB） |
+| `PIL` | 12.8 MB | **0** | `--exclude-module PIL` |
+
+#### 根因：`--collect-all` 的过度收集
+
+`--collect-all qfluentwidgets` 会强收**每一个**子模块，不看代码有没有
+import。三条从没被走到的路径把整个 Qt 重型栈拖了进来：
+
+- `qfluentwidgets/multimedia/{media_player,video_widget}.py` → QtMultimedia
+- `qframelesswindow/webengine/__init__.py` → QtWebEngineWidgets → **QtWebEngineCore（321 MB）**
+- `qfluentwidgets/common/image_utils.py` → PIL
+
+其中 QtWebEngineCore 一进依赖图，PySide6 的 hook 就连带拽入
+`Qt6WebEngineCore.dll` 194 MB + `qtwebengine_devtools_resources.debug.pak`
+72.3 MB + `.pak` 11.1 MB + `qtwebengine_locales` 43.65 MB。
+
+#### 判据：「`sys.modules` 里有没有」，而不是「文件在不在包里」
+
+排除任何模块前做了三重取证，最后一条最关键：
+
+1. 全量 grep `src/`：除 `QtCore` / `QtGui` / `QtWidgets` / `QtSvg` 外零 Qt import
+2. 起真 GUI 探 `sys.modules`：QtWebEngine / QtMultimedia / QtQuick / QtQml / PIL 一个都没加载
+3. **重打包后逐文件核对：`_internal` 里零个 `*webengine*` 残留** —— 这条证明了
+   `--exclude-module` 会把 hook 贡献的**数据文件**（`.pak` / locales）一起丢掉，
+   而这恰是静态分析唯一答不出来的问题
+
+PIL 另有构造性保证：`qfluentwidgets/components/widgets/acrylic_label.py` 把它
+包在 `try/except ImportError` 里，缺了就降级成朴素 `QPixmap`；而 DouBi 全仓
+`Acrylic` / `gaussianBlur` / `isAcrylicAvailable` **零引用**，连降级路径都走不到。
+
+#### 三条互相咬合的新约束
+
+**① 两处 `chromium.launch` 必须都带 `channel="chromium"`**（`core/sniffer.py`、
+`core/auth/browser_login.py`）。Playwright 1.62 的裸 `headless=True` 会去找单独的
+`chrome-headless-shell.exe`——正在被跳过的那 270.7 MB 里，缺了直接 launch 失败；
+`channel="chromium"` 改用完整 Chromium 内置的 new headless。
+
+**② `EXCLUDE_MODULES` 只在「没人 import 它们」时成立**。以后要加视频预览 /
+内嵌浏览器 / PIL 处理，必须先从 `scripts/build_exe.py::EXCLUDE_MODULES` 摘掉对应项，
+否则打包能过、运行时 `ImportError`。
+
+**③ ffmpeg 必须继续靠 `--add-data` 带进去**。`installer/doubi.nsi` 的唯一
+payload 规则是 `File /r "${SRC_DIR}\*.*"` 覆盖 `dist/doubi-gui`，仓库 `tools/`
+**不进安装包**——所以排掉 `imageio_ffmpeg` 后，`build_exe.py::FFMPEG_EXE` 那行
+`--add-data` 是发布版**唯一**的 ffmpeg 来源，另配构建期 pre-flight 检查
+（文件不在就直接失败，绝不产出残废包）。
+
+四个引擎（`m3u8` / `nm3u8dl` / `yt_dlp` + 共享层）统一改走
+`engines/_subproc.py::find_bundled_ffmpeg()`，寻址顺序 **`_MEIPASS` 优先**：
+frozen 形态从快捷方式启动时 `Path.cwd()` 常常是 `C:\Windows\System32`，
+cwd-relative 一定找不到。
+
+#### 实测验证（不是推断）
+
+- **浏览器**：拿**打包产物里**那个被裁过的 `playwright_browsers` 起 Chromium，
+  `headless=True → HeadlessChrome/151.0.0.0`、`headless=False → Chrome/151.0.0.0`，
+  两种模式都成功
+- **ffmpeg 寻址**：模拟 frozen 布局（设 `sys._MEIPASS` + `sys.frozen` +
+  `os.chdir(r'C:\Windows\System32')`），四个解析器全部返回打包内路径
+- **ffmpeg 本体**：`ffmpeg version N-94813-g85386c36e3-ffmpeg-for-N_m3u8DL-CLI`，
+  10.91 MB，可执行
+- **GUI**：frozen 产物启动，窗口标题正常渲染为「豆比下载 0.3.0 · 多平台视频下载器」，
+  `Responding=True`、驻留 156.6 MB，并成功读 `~/.doubi/config.yml` + 写 `cookies/*.txt`
+  —— 说明被裁过的 Qt 栈与配置 I/O 都完好
+
+#### 重打 0.3.0 安装包：441.31 MB → 215.46 MB（−51.2%）
+
+精简只改了 onedir，安装包的收益必须重打才能量化。复用现有 `dist/doubi-gui/`
+跑 `python scripts/build_installer.py --skip-build`：
+
+| 项 | 精简前 | 精简后 | 变化 |
+|---|---:|---:|---|
+| NSIS 源目录 | 1501.8 MB / 4005 文件 | 678.5 MB / 881 文件 | −54.8% |
+| 压缩段 | 462.3 MB | 225.9 MB | −51.1% |
+| **安装包 exe** | **441.31 MB** | **215.46 MB** | **−51.2%** |
+| 压缩率 | 29.3% | 31.7% | +2.4pp |
+
+- 产物：`dist/DouBi-Setup-0.3.0.exe`，225,926,086 字节
+- SHA256：`e833f155485509736cb25682fae431a2907474cb44c03421308dfed32954ddbe`
+- 侧签：`DouBi-Setup-0.3.0.exe.sha256`、`SHA256SUMS.txt`（LF、无 BOM）
+
+**压缩率反而升高是预期的**，不是异常：被砍掉的 WebEngine `.pak`、
+`qtwebengine_locales`、headless_shell、PIL 本来就是高可压缩的重复内容；
+剩下的 Chromium / `node.exe` 二进制熵更高，压不动。所以安装包降幅（−51.2%）
+略小于 onedir 降幅（−54.8%）——**别指望两个百分比相等**。
+
+G8 那两条硬规则全程遵守，没有因为「包变小了」就放松：
+
+1. `SetDatablockOptimize off` 保持关闭。事故的触发条件是 optimizer 的块合并
+   逻辑本身，**不是「包够大才会犯」**——体积变小只降低概率，没修掉 bug。
+2. makensis exit 0 后先等「文件大小连续 10 秒不变」才算哈希。本次日志
+   两行 footer 齐全：`CRC (0x5291D80F): 4 / 4 bytes` +
+   `Total size: 225926086 / 711750527 bytes (31.7%)`。
+
+静默装卸全链路实测（`/S /D=%LOCALAPPDATA%\DouBi_VerifyTest`）：
+
+- 安装退出码 0；落盘 **882 文件 / 678.5 MB**（881 源文件 + `uninstall.exe`），
+  与源目录逐项吻合
+- `*webengine*` / `*headless_shell*` 残留各 **0 个** —— 证明精简在**安装侧**
+  也生效，而不只是构建目录里干净
+- 关键文件到位：`doubi-gui.exe`、`_internal/tools/nm3u8dl/ffmpeg.exe`（约束③
+  的落地证据）、`_internal/doubi/ui/locales/{zh_CN,en}.json`（G7 回归项）
+- 装出来的程序启动正常：标题「豆比下载 0.3.0 · 多平台视频下载器」、
+  `Responding=True`、160.2 MB
+- 注册表 `EstimatedSize` 自动重算为 694817 KB（≈678.5 MB），没沿用 0.1.0 基线
+- **故意让程序开着**卸载以检验 `EnsureAppClosed`：退出码 0，安装目录 / HKCU 键 /
+  残留进程全部归零，而 `~/.doubi` 完好保留
+
+> onefile 便携版（`dist/doubi-gui.exe`，精简前 615.17 MB）本轮**没有重建**，
+> 用户选定的范围是「仅重打安装包」。所以 onefile 的精简收益目前仍是未量化的，
+> 发绿色便携版前需补跑 `python scripts/build_exe.py`。
+
+#### 顺带的仓库/磁盘清理
+
+- `tools/nm3u8dl/*.zip` 加入 `.gitignore` 并 `git rm --cached`：原始压缩包与解出的
+  3 个 exe **SHA256 逐字节相同**（按哈希核对，不是按体积猜），6.53 MB 纯冗余；
+  同时删掉一个 0 字节、`Central Directory corrupt` 的坏 zip
+- 删两个零引用游离脚本 `_test_token.py`、`test_hang.py`（后者还硬编码绝对路径）
+- 删 8 个游离根日志；`dist/` 从 3667.2 MB 清到 678.5 MB（释放 2988.8 MB）
+- 修正了一个自己的误判：`.gitignore` 对 `dist/` / `build/` / `*.log` **本来就有覆盖**，
+  真正的缺口只有那两个 zip
+- `INTEGRATION_PLAN.md` 有意保留：`docs/ARCHITECTURE.md` / `docs/DEVELOPMENT.md`（×2）
+  / `README.md`（×2）共 5 处活引用，为 33 KB 改 5 个地方不值
+
+#### 守卫测试
+
+新增 `tests/test_packaging_slim.py`（13 条），把上面三条约束全部锁死。延续
+`test_version_single_source.py` 的风格——**断言「有几个地方能决定这件事」，
+而不是断言具体值**；`channel` 检查走 AST（`ast.Call` → `Attribute(attr="launch")`
+→ owner `Attribute(attr="chromium")`）而非 grep，关键字参数才读得准。
+
+其中 3 条做过变异验证（故意改坏约束，确认对应测试变红且**理由正确**）。
+过程中有一次变异「绿了」，查明是 `.Replace()` 用 `` `r`n `` 没匹配上 LF 文件、
+改动根本没生效 —— 该次绿色被明确拒收，重做后才通过。
+
+---
 
 ### 统计
 - 源码：~18,600 行（相较 0.2.0 净增约 700 行，主要是 supervisor + 嗅探器）
@@ -478,6 +828,16 @@ Python 本身能开长路径前缀，这些外部工具开不了）。两道防�
   - sniffer + engine routing：85 passed
   - 新增健壮性烟雾检查（basename 字节预算、path≤259、cancel_flag 鸭子类型）全部通过
   - Ruff 全部文件 clean（33 项 ruff --fix + 3 处人工修复）
+- M6.16 收尾后：**33 个文件，673 passed / 0 failed**（排除 9 个 GUI 文件的全量跑）
+  - 新增 `tests/test_config_forwarding.py`（8 条链 B 转发守卫）
+  - `tests/test_server.py` 新增 5 条嗅探 REST 用例 + `no_real_browser` 替身 fixture
+    （5 条 1.77s 跑完，真起 Chromium 至少 30s，用耗时反证替身生效）
+  - `tests/test_mcp.py` 新增 `TOOLS`/`_HANDLERS` 同集守卫
+  - 基线演进：381 → 403 → 423 → 450 → 687 → 713 → **673（非 GUI 口径）**
+- M6.17 收尾后：新增 `tests/test_packaging_slim.py`（13 条打包约束守卫，3 条变异验证）
+- 打包产物：onedir **1501.8 MB / 4005 文件 → 678.5 MB / 881 文件**（−54.8%）
+- NSIS 安装包：**441.31 MB → 215.46 MB**（−51.2%，静默装卸 + CRC footer 全验证通过）
+- 仓库跟踪体积：**719 个文件 / 28.8 MB**（剔除 6.53 MB 冗余 zip 后）
 
 ---
 

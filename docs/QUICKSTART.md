@@ -1,5 +1,45 @@
 # DouBi 快速上手
 
+## 分发形态（无需 Python 环境，下载即跑）
+
+如果你的目标是**直接用软件**（不是开发 / 改代码），从 Release 拿
+下面其中一种就行，不用看「安装」节的 pip / Playwright install 命令。
+
+| 形态 | 文件（0.3.0） | 体积 | 启动速度 | 推荐 |
+|---|---|---|---|---|
+| **NSIS 安装包**（普通用户首选） | `DouBi-Setup-0.3.0.exe` | 441 MB | 快 | 装到 `%LOCALAPPDATA%\DouBi`，开始菜单 / 桌面快捷方式，控制面板正常卸载，卸载不删 `~/.doubi` |
+| **Onefile 便携版**（U 盘/网盘） | `doubi-gui.exe` | 615 MB | 慢 1–2 秒（自解压到 `%TEMP%/_MEIxxxxx`） | 免安装，拷到哪都能跑；跨机转移直接复制单文件 |
+| Onedir 绿色目录（内网 / 运维） | `doubi-gui/` 整个目录 zip | ~1.5 GB | **最快** | 企业内网分发，解压即可，无需任何安装步骤 |
+
+> 所有形态都**已内置 Playwright Chromium 浏览器**（通用 URL 嗅探需要），
+> 首次使用不需要再 `python -m playwright install chromium`。
+
+### 新包到手 10 秒自检（防止 i18n 资源漏打包回归）
+
+0.3.0 首发版曾出现过「打包漏加 i18n JSON → GUI 直接显示英文 key」的
+bug，新包到手跑两条肉眼检查就能确认无问题（见 CHANGELOG G7）：
+
+1. **标题栏**：**左上角**标题应为「豆比下载 0.3.0 · 多平台视频下载器」，
+   不是「豆比下载 0.3.0 · app.title_suffix」。
+2. **左侧导航**：侧边栏从上到下文字是「解析 / 下载 / 历史 / 设置」，
+   不是「nav.parse / av.downloads / nav.history / nav.settings」。
+
+如果出现后者，就是打包时的 `--add-data locales` 漏加或 frozen 寻址错，
+请换一份带有 `*.sha256` 侧签的正式发版包，不要用私有构建产物。
+
+### 下载后完整性校验（推荐）
+
+PowerShell 对比侧签（无需装任何工具）：
+
+```powershell
+# 验证 NSIS 安装包
+$e=(Get-Content DouBi-Setup-0.3.0.exe.sha256).Trim()
+$a=(Get-FileHash DouBi-Setup-0.3.0.exe -Algorithm SHA256).Hash.ToLower()
+$e -eq $a     # 必须 $true
+```
+
+得到 `True` 再继续。
+
 ## 安装
 
 ```bash
@@ -131,6 +171,24 @@ doubi-gui --theme deep_sea   # 本次启动强制用「深海」主题
 
 `doubi` 是品牌主题——配色直接取自应用图标（深紫底 + 琥珀橙主色），其他 6 套是
 通用主题。
+
+### 0.3.0 GUI 行为提示（3 条）
+
+从 0.3.0 起，GUI 默认打开就具备下面三个用户体验增强（CHANGELOG G2）：
+
+1. **主窗口自动居中** —— 用 `QGuiApplication.primaryScreen().availableGeometry()`
+   计算可用区域（已扣任务栏高度），再 `moveCenter` 居中，不会出现"写了居中结
+   果窗口只露右下角"的 bug。
+2. **完成 + 缺本地文件 → 「缺失」徽标 + 重新下载** —— 历史里下载完成的视频，
+   如果你在文件管理器里手动删了，再打开「下载-已完成」tab，那条记录会标成
+   红色 **缺失** 徽标，提示「文件已删除」，右侧按钮变成 **重新下载**（之前
+   只有失败 / 取消才能重试）。
+3. **静默异常兜底** —— 就算设置页面某个 Qt 槽抛出未处理异常，应用也不会
+   像 0.2.x 那样悄无声息闪退；异常会完整写入日志文件，下载中的任务不会被
+   跨层误杀。出问题时先看 `~/.doubi/logs/`。
+
+> 窗口居中、缺失重新下载、异常兜底，这三条在 0.3.0 安装包 / onefile
+> / onedir 三形态里都是默认开启的，不需要加命令行开关。
 
 三种切换方式：
 

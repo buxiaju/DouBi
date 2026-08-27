@@ -24,6 +24,7 @@ from ..core.registry import PlatformRegistry
 
 # Trigger platform adapter registration
 from .. import platforms  # noqa: F401
+from ..platforms.generic import GenericAdapter
 from . import auth_cmd
 
 
@@ -93,6 +94,15 @@ def _build_parser() -> argparse.ArgumentParser:
                       help="download subtitles (config: write_subtitles)")
     p_dl.add_argument("--resume", action=argparse.BooleanOptionalAction, default=None,
                       help="resume partial downloads instead of restarting (config: resume)")
+
+    # 通用嗅探（generic 兜底适配器）。未知 URL 会走 Playwright 嗅探，这两个
+    # 开关控制它的时长和总开关。--no-sniff 由 BooleanOptionalAction 生成。
+    p_dl.add_argument("--sniff-duration", type=int, default=None, metavar="N",
+                      help="seconds to sniff an unknown URL for media (5-60, "
+                           "config: sniff_duration_sec, default: 15)")
+    p_dl.add_argument("--sniff", action=argparse.BooleanOptionalAction, default=None,
+                      help="enable generic sniffing for unknown URLs; use --no-sniff "
+                           "to skip the headless browser entirely (config: sniff_enabled)")
 
     p_dl.add_argument("--strategy", default=None,
                       help="for container URLs, choose strategy (e.g. post, like, space, favlist)")
@@ -267,6 +277,26 @@ def _resolve_concurrency(args: argparse.Namespace, cfg: AppConfig) -> int:
     return int(_pick(args.concurrent, cfg.concurrent_jobs))
 
 
+def _apply_sniff_overrides(args: argparse.Namespace, cfg: AppConfig) -> AppConfig:
+    """把 ``--sniff-duration`` / ``--no-sniff`` 叠到 ``cfg``，并注入 GenericAdapter。
+
+    ``sniff_*`` 字段**不在** :class:`DownloadOptions` 上——它们是解析期参数
+    （怎么找到媒体 URL），不是下载期参数（怎么把文件搬下来），所以走不了
+    ``_build_options`` 那条搬运线，``test_build_options_covers_every_shared_config_field``
+    也看不见它们。:meth:`GenericAdapter.set_config` 是 ``AppConfig → Sniffer``
+    的唯一注入口，四个入口（CLI/GUI/REST/MCP）各自负责调用它，漏掉哪个，
+    那个入口的嗅探设置就静默失效（硬约束 #4）。
+
+    优先级同其他下载参数：命令行 > 配置文件 > 内置默认。
+    """
+    cfg.sniff_enabled = bool(_pick(getattr(args, "sniff", None), cfg.sniff_enabled))
+    cfg.sniff_duration_sec = int(
+        _pick(getattr(args, "sniff_duration", None), cfg.sniff_duration_sec)
+    )
+    GenericAdapter.set_config(cfg)
+    return cfg
+
+
 def _cmd_download(args: argparse.Namespace) -> int:
     setup_logger("DEBUG" if args.verbose else "INFO", verbose=args.verbose)
     quiet_external_loggers()
@@ -279,6 +309,7 @@ def _cmd_download(args: argparse.Namespace) -> int:
         return 2
 
     cfg = load_config(args.config)
+    _apply_sniff_overrides(args, cfg)
     options = _build_options(args, cfg)
     # 路径规范化在这里做而不是在 _build_options 里，理由见那边的 docstring。
     options.output_root = Path(options.output_root).expanduser().resolve()

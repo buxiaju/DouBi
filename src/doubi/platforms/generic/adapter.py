@@ -85,12 +85,21 @@ class GenericAdapter(PlatformAdapter):
         用户能看到明确报错。
         """
         cfg = self._config or load_config()
+        page_title_fallback = _domain_from_url(url)
+
+        # sniff_enabled=False（配置文件或 CLI --no-sniff）时直接短路：不起
+        # 浏览器、不等 15 秒，返回一个说明性的错误 item。这样「兜底适配器
+        # 拖慢每一个未知 URL」在需要时可以一键关掉。
+        if not cfg.sniff_enabled:
+            logger.info("generic sniff 已禁用（sniff_enabled=False），跳过 %s", url)
+            return _build_error_item(url, "通用嗅探已禁用（sniff_enabled=False）", page_title_fallback)
+
         options = sniff_options_from_config(cfg)
         sniffer = Sniffer(options)
         result: SniffResult = await sniffer.sniff(url)
 
         page_url = result.page_url or url
-        page_title = result.page_title or _domain_from_url(url)
+        page_title = result.page_title or page_title_fallback
 
         if result.error or not result.items:
             err_msg = result.error or "未嗅探到任何视频 URL"

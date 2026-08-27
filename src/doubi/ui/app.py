@@ -209,12 +209,20 @@ def main(argv: list[str] | None = None) -> int:
 
     # 必须在建窗口之前定主题：各页面构造时会按当前 token 取色。
     # load_config 内部已处理 DOUBI_THEME 环境变量与配置文件。
-    theme_name = args.theme or load_config(None).theme
+    cfg = load_config(None)
+    theme_name = args.theme or cfg.theme
     set_theme(theme_name)
     # 语言同主题：建窗前定下来，导航标签等首次渲染就走正确词表。
     # i18n 模块不 import Qt，可和 theme 一样安全早导。
     from .i18n import set_language
-    set_language(load_config(None).language)
+    set_language(cfg.language)
+
+    # 通用嗅探（M6.16）：把 AppConfig 注入兜底适配器。这是 GUI 侧唯一的
+    # ``AppConfig → Sniffer`` 注入口，漏掉它设置页的嗅探卡片就只是摆设
+    # （adapter 会 lazy 读默认 YAML，但拿不到本进程内的 args 覆盖）。
+    # 四个入口各自负责调一次，见硬约束 #4。
+    from ..platforms.generic import GenericAdapter
+    GenericAdapter.set_config(cfg)
 
     if not args.no_event_loop:
         loop = QEventLoop(app)

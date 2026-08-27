@@ -7,6 +7,9 @@ Endpoints:
     POST /api/v1/download          — submit a download job
     GET  /api/v1/jobs/{job_id}     — query one job
     GET  /api/v1/jobs              — list recent jobs
+    POST /api/v1/parse             — submit a parse task (任意 URL，含通用嗅探)
+    GET  /api/v1/sniff/status/{id} — poll one parse task
+    GET  /api/v1/sniff/status      — sniffer capability self-check
 
 Usage::
 
@@ -19,8 +22,10 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import sys
+import uuid
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -31,7 +36,7 @@ from ..core.models import DownloadOptions
 from ..core.registry import PlatformRegistry
 from .. import platforms  # noqa: F401  -- ensure all platform adapters are registered on startup
 from .jobs import JobManager
-from .schemas import DownloadRequest
+from .schemas import DownloadRequest, ParseRequest
 from .security import (
     TOKEN_ENV_VAR,
     InsecureBindingError,
@@ -150,6 +155,55 @@ def _build_options() -> DownloadOptions:
     )
 
 
+def _item_to_dict(item) -> dict[str, Any]:
+    """把 :class:`MediaItem` 摊平成 JSON。容器项带上 children。
+
+    通用嗅探的正常产出就是一个 COLLECTION（N 条 sniffed 直链），所以这里
+    必须递归一层——只回顶层字段的话，客户端拿到的是「解析成功但什么都没有」。
+    ``direct_url`` 单独提出来是 Aria2 现有契约，客户端要转投别的下载器时
+    直接用得上。
+    """
+    children = [
+        {
+            "item_id": c.item_id,
+            "title": c.title,
+            "media_type": c.media_type.value,
+            "source_url": c.source_url,
+            "direct_url": c.extra.get("direct_url"),
+            "mime": c.extra.get("mime"),
+            "ext": c.extra.get("ext"),
+        }
+        for c in (item.children or [])
+    ]
+    return {
+        "platform": item.platform.value,
+        "item_id": item.item_id,
+        "title": item.title,
+        "author": item.author.name if item.author else None,
+        "media_type": item.media_type.value,
+        "source_url": item.source_url,
+        "child_count": len(children),
+        "children": children,
+    }
+
+
+def _apply_sniff_config():
+    """把 ``AppConfig`` 注入 :class:`GenericAdapter`，并回传那份 cfg。
+
+    ``sniff_*`` 不在 :class:`DownloadOptions` 上（它们是解析期参数），所以
+    ``_build_options`` 那条搬运线看不见它们，
+    ``test_build_options_covers_every_shared_config_field`` 也守不住。
+    ``set_config`` 是 ``AppConfig → Sniffer`` 的唯一注入口，四个入口
+    （CLI/GUI/REST/MCP）各自调一次，漏掉哪个那个入口的嗅探配置就静默失效
+    （硬约束 #4）。
+    """
+    from ..platforms.generic import GenericAdapter
+
+    cfg = load_config(None)
+    GenericAdapter.set_config(cfg)
+    return cfg
+
+
 def build_app(*, token: str | None = None):
     """Build a FastAPI app bound to a default JobManager.
 
@@ -176,6 +230,7 @@ def build_app(*, token: str | None = None):
         ) from e
 
     options = _build_options()
+    sniff_cfg = _apply_sniff_config()
     expected_token = resolve_token(token)
 
     # 闸门必须来自 .deps：那里 ``Request`` 是模块级名字，注解才能被 FastAPI
@@ -246,6 +301,91 @@ def build_app(*, token: str | None = None):
     async def list_jobs() -> dict[str, Any]:
         jobs = await manager.list_jobs()
         return {"jobs": [j.to_dict() for j in jobs]}
+
+    # ---- 通用嗅探（M6.16）---------------------------------------------
+    # 解析走「提交 + 轮询」而不是同步返回：兜底嗅探要真起一个无头浏览器、
+    # 等满 sniff_duration_sec 秒，同步阻塞会让默认超时 10s 的 HTTP 客户端
+    # 直接断连，看起来像服务挂了。POST 立刻回 task_id，前端拿
+    # GET /api/v1/sniff/status/{task_id} 轮询。
+    parse_tasks: dict[str, dict[str, Any]] = {}
+    app.state.parse_tasks = parse_tasks
+
+    def _expected_sniff_sec(url: str) -> int:
+        """这个 URL 会走兜底嗅探吗？会就返回预计秒数，否则 0。
+
+        判据是 ``detect()`` 返回的适配器 ``priority < 0``——只有
+        GenericAdapter 是负优先级，抖音 / B 站等具体平台永远先匹配，不该
+        被报成「要等 15 秒」。
+        """
+        if not sniff_cfg.sniff_enabled:
+            return 0
+        adapter = PlatformRegistry.detect(url)
+        if adapter is None or getattr(adapter, "priority", 0) >= 0:
+            return 0
+        return int(sniff_cfg.sniff_duration_sec)
+
+    async def _run_parse(task_id: str, url: str) -> None:
+        rec = parse_tasks[task_id]
+        rec["status"] = "running"
+        try:
+            adapter = PlatformRegistry.detect(url)
+            if adapter is None:
+                rec.update(status="failed", error=f"no platform matches the URL: {url}")
+                return
+            item = await adapter.parse(url)
+            if item is None:
+                rec.update(status="failed", error=f"failed to parse {url}")
+                return
+            rec.update(status="completed", result=_item_to_dict(item))
+        except Exception as e:  # noqa: BLE001 - 轮询端点要能读到失败原因
+            logger.exception("parse task %s failed", task_id)
+            rec.update(status="failed", error=f"{type(e).__name__}: {e}")
+
+    @app.post("/api/v1/parse", dependencies=[Depends(require_token)])
+    async def create_parse(req: ParseRequest = Body(...)) -> dict[str, Any]:
+        url = (req.url or "").strip()
+        if not url:
+            raise HTTPException(status_code=400, detail="url is required")
+        task_id = uuid.uuid4().hex[:12]
+        expected = _expected_sniff_sec(url)
+        parse_tasks[task_id] = {
+            "task_id": task_id,
+            "url": url,
+            "status": "pending",
+            "sniffing": expected > 0,
+            "expected_sec": expected,
+            "result": None,
+            "error": None,
+        }
+        # 故意不 await：任务在后台跑，端点立刻返回。句柄挂在 record 上
+        # 防止被 GC 提前回收（asyncio 只持弱引用）。
+        parse_tasks[task_id]["_task"] = asyncio.create_task(_run_parse(task_id, url))
+        return {k: v for k, v in parse_tasks[task_id].items() if k != "_task"}
+
+    @app.get("/api/v1/sniff/status/{task_id}", dependencies=[Depends(require_token)])
+    async def sniff_status(task_id: str) -> dict[str, Any]:
+        rec = parse_tasks.get(task_id)
+        if rec is None:
+            raise HTTPException(status_code=404, detail="parse task not found")
+        return {k: v for k, v in rec.items() if k != "_task"}
+
+    @app.get("/api/v1/sniff/status", dependencies=[Depends(require_token)])
+    async def sniff_capability() -> dict[str, Any]:
+        """不带 task_id 时回「嗅探能力自检」：装没装 Playwright、开没开。
+
+        运维排查「为什么所有未知 URL 都解析失败」时，第一眼要看的就是
+        ``available``——打包漏了 Chromium 或没 ``playwright install`` 都
+        会让它是 False，而错误信息在任务里才看得到。
+        """
+        from ..core.sniffer import Sniffer
+
+        return {
+            "available": Sniffer.is_available(),
+            "enabled": sniff_cfg.sniff_enabled,
+            "duration_sec": sniff_cfg.sniff_duration_sec,
+            "headless": sniff_cfg.sniff_headless,
+            "auto_play": sniff_cfg.sniff_auto_play,
+        }
 
     return app
 

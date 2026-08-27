@@ -28,19 +28,55 @@
 
 ### Windows 用户：直接装
 
-自行构建安装程序（仓库已内置便携版 NSIS，不需要额外安装任何打包工具）：
+仓库已内置便携版 NSIS，不需要额外安装打包工具，一条命令产出正式安装包：
 
 ```bash
 python scripts/build_installer.py
 ```
 
-产出 `dist/DouBi-Setup-<version>.exe`（约 213 MB），双击安装即可：
+正式分发有**两种一键运行形态**（不用装 Python，不用 Playwright install）：
 
-- 装到 `%LOCALAPPDATA%\DouBi`，**不需要管理员权限**，无 UAC 弹窗
-- 自动创建开始菜单与桌面快捷方式，控制面板可正常卸载
-- 卸载零残留；`~/.doubi` 里的配置与下载记录默认**保留**，需要清除时在卸载界面勾选
+| 形态 | 文件 | 体积（0.3.0） | 说明 |
+|---|---|---|---|
+| **NSIS 安装包**（推荐给普通用户） | `dist/DouBi-Setup-0.3.0.exe` | **441.31 MB** | 双击安装到 `%LOCALAPPDATA%\DouBi`，**无 UAC 弹窗**；开始菜单 + 桌面快捷方式；控制面板正常卸载；卸载零残留，`~/.doubi` 配置默认保留 |
+| **Onefile 便携版**（推荐给 U 盘/网盘） | `dist/doubi-gui.exe` | **615.17 MB** | 单文件即跑，启动时自解压到 `%TEMP%/_MEIxxxxx`；免安装；机器之间直接拷 |
+| Onedir 绿色目录（CI/内网分发） | `dist/doubi-gui/` | ~1.5 GB / 4003 文件 | **启动最快**；直接 zip 打包即可发布"绿色版" |
 
-首次打包耗时约 10 分钟（LZMA 压缩 825 MB 是单线程的），细节见 [docs/BUILD.md](docs/BUILD.md)。
+> 体积为什么这么大？**安装包里已经带上了 Playwright Chromium 浏览器目录**
+> （通用视频站嗅探的核心依赖）+ PySide6/Fluent 完整样式资源。如果只
+> 用 B 站 / YouTube 内置 yt-dlp 解析、不需要通用 Playwright 嗅探，可以在
+> `scripts/build_exe.py` 里去掉 ms-playwright 的 `--add-data`，体积大约砍 60%。
+
+#### 下载后的 SHA256 校验（推荐做）
+
+每次发布 `dist/` 目录里都会生成三份侧签文件：`SHA256SUMS.txt`、
+`doubi-gui.exe.sha256`、`DouBi-Setup-0.3.0.exe.sha256`。Windows PowerShell
+一键对比（无需安装任何软件）：
+
+```powershell
+# 方式 1：Get-FileHash（推荐）
+$expected = (Get-Content dist\DouBi-Setup-0.3.0.exe.sha256).Trim()
+$actual   = (Get-FileHash dist\DouBi-Setup-0.3.0.exe -Algorithm SHA256).Hash.ToLower()
+$expected -eq $actual    # $true = 通过
+
+# 方式 2：certutil（老 Win 机器也有）
+certutil -hashfile dist\doubi-gui.exe SHA256
+```
+
+#### 首次运行「翻译正常」自检 2 条（10 秒确认包是好的）
+
+0.3.0 曾出现过「打包漏加 i18n JSON 导致 GUI 显示英文 key」的 bug（见
+CHANGELOG G7），新包到手后跑两条就能确认没回归：
+
+1. **标题栏**：应为「**豆比下载 0.3.0 · 多平台视频下载器**」。如果末尾是
+   `app.title_suffix` 这种英文 key → 包坏了，换一个新的。
+2. **左侧导航**：从上到下应为「**解析 / 下载 / 历史 / 设置**」。如果看到
+   `nav.parse` / `av.downloads` / `nav.history` / `nav.settings` → 同样是
+   i18n 资源没打进去。
+
+首次打包（LZMA 压缩 1.5 GB，单线程）耗时约 **3–6 分钟**，详细参数、打包期
+两条硬规则（DatablockOptimize off + wait_stable 10s）、发布期验证清单
+见 [docs/BUILD.md](docs/BUILD.md)。
 
 > 推 tag `v*` 后 GitHub Actions 会自动跑测试 + 打包 + 上传安装包并附 SHA256 校验到
 > GitHub Release（draft），见 [`.github/workflows/build.yml`](.github/workflows/build.yml)。

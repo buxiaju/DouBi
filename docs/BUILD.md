@@ -156,6 +156,11 @@ cmd = [
     "--specpath", str(ROOT),
     "--icon", str(ICON),                          # ★ 关键：嵌入 .ico 进 .exe 资源
     "--add-data", f"{SVG_TEMPLATE}{sep}doubi/ui/resources",  # SVG 模板进 .exe
+    # ★ 0.3.0 新增：i18n JSON 词表（zh_CN.json / en.json）。
+    # 漏了这行，打包后 GUI 就直接显示 nav.parse / app.title_suffix 这类
+    # i18n key 名（见 CHANGELOG G7）。目标路径必须和 i18n._resolve_locales_dir()
+    # 在 frozen 形态里用的 "doubi/ui/locales" 完全一致。
+    "--add-data", f"{LOCALES_DIR}{sep}doubi/ui/locales",
     "--collect-all", "qframelesswindow",          # 第三方 Qt 库的隐藏资源
     "--collect-all", "qfluentwidgets",
     "--paths", str(ROOT / "src"),
@@ -163,6 +168,27 @@ cmd = [
     str(launcher),                                # ★ 关键：自动生成的启动壳，见下文
 ]
 ```
+
+**需要强制收集的两类数据文件**（漏任何一个都会触发"源码里正常、打包后异常"类 bug）：
+
+| 数据 | 参数 | 为什么必须手动加 | 代码侧对应 |
+|---|---|---|---|
+| `icon_template.svg` | `--add-data SRC → doubi/ui/resources` | 不是 Python 模块，PyInstaller 静态分析抓不到；图标系统运行时按路径 open | `src/doubi/ui/resources/__init__.py` 的 `ICON_SVG_PATH` |
+| `locales/{zh_CN,en}.json` | `--add-data SRC → doubi/ui/locales` | i18n 翻译表是纯 JSON；漏加就表现为 GUI 出现 `nav.parse` 等英文 key（CHANGELOG G7 实锤） | `src/doubi/ui/i18n.py::_resolve_locales_dir()` |
+
+**运行时寻址必须匹配 frozen 路径**：打包后源码文件不再存在真实文件，`Path(__file__)`
+指向 PYZ CArchive 内部的一个「假路径」，用它拼子目录是找不到任何文件的。
+`i18n._resolve_locales_dir()` 因此走**三层 fallback**：
+
+1. `frozen`（有 `sys.frozen` 且设了 `sys._MEIPASS`）：
+   `sys._MEIPASS / "doubi" / "ui" / "locales"` → 正好落在 PyInstaller `--add-data` 的目标目录
+2. 源码形态：`Path(__file__).parent / "locales"`（开发环境）
+3. 兜底：`importlib.resources.files("doubi.ui").joinpath("locales")`（pip wheel / zipapp）
+
+> 打包后如果要快速排查"locale 到底收没收进来"：onedir 就直接
+> `dir dist\doubi-gui\_internal\doubi\ui\locales\`，能看到 `zh_CN.json` 就通过；
+> onefile 可以临时 `set DOU_DEBUG_I18N=1` 启动，日志里会有 WARNING 级提示
+> "PyInstaller frozen: _MEIPASS/locales 未找到"。
 
 **`--icon src/doubi/ui/resources/icon.ico`** —— 没有这个参数，任务栏
 图标就是 PyInstaller 默认的（也是 Python 默认的）。**这是任务栏图标
@@ -198,6 +224,13 @@ if __name__ == "__main__":
 PyInstaller 默认钩子抓不全。`--collect-all` 显式收齐所有子模块与
 数据文件。**没有这个参数，标题栏 / fluent 控件会显示异常或崩溃**。
 
+> ⚠️ 但 `--collect-all` 是把双刃剑：它会强收**每一个**子模块，包括代码
+> 从没 import 过的 `multimedia` / `webengine` / `image_utils`，一路把
+> QtWebEngineCore + QtMultimedia + PIL 拖进来（321 + 12.8 MB）。0.3.0 因此
+> 追加了三类参数——`--exclude-module`（46 个）、浏览器目录按子项展开的
+> `--add-data`（跳过 headless_shell）、ffmpeg 的 `--add-data`。**这三者
+> 互相咬合，改动前务必先读 §4.5。**
+
 **`--add-data icon_template.svg` —— 注意源路径与目标路径的写法**：
 
 ```python
@@ -223,15 +256,23 @@ icon_template_path = lambda: RESOURCE_DIR / "icon_template.svg"
 
 ```
 dist/
-└── doubi-gui.exe                      # 234,943,742 bytes (235 MB)
+└── doubi-gui/                         # onedir：678.5 MB / 881 个文件
+    ├── doubi-gui.exe
+    └── _internal/
 ```
 
-体积说明：
-- Python 3.13 runtime 约 25 MB
-- PySide6 约 100 MB（包含 Qt 6 全部模块）
-- qfluentwidgets + qframelesswindow 约 20 MB
-- 其它依赖（yt-dlp / playwright / httpx / aiohttp / ...）约 70 MB
-- 业务代码 < 5 MB
+体积说明（0.3.0 精简后实测，onedir 口径）：
+
+| 项 | 体积 | 能不能再砍 |
+|---|---|---|
+| `playwright_browsers/chromium-1234` | 430.3 MB | ❌ 通用嗅探的硬地板 |
+| `playwright/driver`（其中 `node.exe` 88.3 MB） | 103.5 MB | ❌ Playwright 驱动进程必需 |
+| `PySide6` | 92.3 MB | ⚠️ 已从 550.6 MB 砍下来，见 §4.5 |
+| `tools/nm3u8dl`（含 ffmpeg.exe 10.91 MB） | 10.9 MB | ❌ 引擎直接调用 |
+| Python 3.13 runtime + 其它依赖 + 业务代码 | 约 40 MB | — |
+
+> 精简前是 **1501.8 MB / 4005 个文件**，一半以上是「装进来但从没被 import」
+> 的死重量。完整取数、判据与三条不能动的约束见 §4.5。
 
 **压缩**：onefile 模式 PyInstaller 默认开 LZMA 压缩（`--noupx` 时
 不用 UPX），压缩比约 50%。要更小可加 `--upx-dir` 跑 UPX，但会拖慢
@@ -260,6 +301,106 @@ setWindowIcon(icon) + QApplication.setWindowIcon(icon)
 **关键点**：onefile 解包需要时间，启动后头 1-2 秒内窗口不显示。
 这是 PyInstaller 的硬限制（不是 bug），可以预先用闪屏掩盖——
 `splash.show_splash(app)` 在主窗口创建前显示，详见 `ui/splash.py`。
+
+### 4.5 体积精简：1501.8 MB → 678.5 MB（0.3.0）
+
+**结果**：onedir 产物 **1501.8 MB / 4005 文件 → 678.5 MB / 881 文件**
+（−823.3 MB，−54.8%）。分项：
+
+| 分项 | 精简前 | 精简后 | 手段 |
+|---|---|---|---|
+| `PySide6` | 550.6 MB | **92.3 MB** | `--exclude-module` 排 46 个 Qt 模块 |
+| `playwright_browsers` | 701 MB | **430.3 MB** | 不打包 `chromium_headless_shell`（270.7 MB） |
+| `imageio_ffmpeg` | 83.6 MB | **0** | 换成仓库自带的 `ffmpeg.exe`（10.91 MB） |
+| `PIL` | 12.8 MB | **0** | `--exclude-module PIL` |
+
+#### 为什么会胖：`--collect-all` 的过度收集
+
+`--collect-all qfluentwidgets` 会强行收进**每一个**子模块，不管代码有没有
+import 它。于是三条无人问津的路径把整个 Qt 重型栈拖了进来：
+
+| 拖油瓶 | 拖进来什么 | 代价 |
+|---|---|---|
+| `qfluentwidgets/multimedia/{media_player,video_widget}.py` | QtMultimedia | 数十 MB |
+| `qframelesswindow/webengine/__init__.py` | QtWebEngineWidgets → QtWebEngineCore | **321 MB** |
+| `qfluentwidgets/common/image_utils.py` | PIL | 12.8 MB |
+
+QtWebEngineCore 一旦进依赖图，PySide6 的 hook 就会连带拽入
+`Qt6WebEngineCore.dll`（194 MB）、`qtwebengine_devtools_resources.debug.pak`
+（72.3 MB）、`qtwebengine_resources.pak`（11.1 MB）、`qtwebengine_locales`
+（43.65 MB）。
+
+#### 排除安全的判据
+
+**判据是「运行时 `sys.modules` 里有没有」，不是「文件在不在包里」。** 三重取证：
+
+1. `Grep` 全量 `src/`：除 `QtCore` / `QtGui` / `QtWidgets` / `QtSvg` 外无任何
+   Qt 模块被 import。
+2. 起真 GUI 后探测 `sys.modules`：QtWebEngine / QtMultimedia / QtQuick /
+   QtQml / PIL **一个都没加载**。
+3. 重打包后逐文件核对：`_internal` 里 **零个** `*webengine*` 残留
+   —— 这条最关键，它证明了 `--exclude-module` 会连 hook 贡献的**数据文件**
+   （`.pak` / locales）一起丢掉，而这是静态分析唯一答不出来的问题。
+
+PIL 还有一层构造性保证——`qfluentwidgets` 自己就把它当**可选**依赖：
+
+```python
+# qfluentwidgets/components/widgets/acrylic_label.py
+try:
+    from ...common.image_utils import gaussianBlur
+    isAcrylicAvailable = True
+except ImportError:
+    isAcrylicAvailable = False
+    def gaussianBlur(imagePath, ...):
+        return QPixmap(imagePath)          # 优雅降级
+```
+
+而 DouBi 全仓 `Acrylic` / `gaussianBlur` / `isAcrylicAvailable` 零引用，
+所以排掉 PIL 连降级路径都走不到。
+
+#### 三条不能动的约束
+
+这三条互相咬合，**动其中任何一条都会让发布版在用户机上炸**：
+
+**① 两处 `chromium.launch` 必须都带 `channel="chromium"`**
+
+Playwright 1.62 的 `headless=True` 默认要找单独的
+`chrome-headless-shell.exe`（就在被我们跳过的 270.7 MB 目录里），缺了直接
+launch 失败。`channel="chromium"` 改用完整 Chromium 内置的 "new headless"。
+两处调用点：`core/sniffer.py`、`core/auth/browser_login.py`。
+
+已用**打包产物本身**验证两种模式都能起：
+`headless=True → HeadlessChrome/151.0.0.0`、`headless=False → Chrome/151.0.0.0`。
+
+**② `EXCLUDE_MODULES` 只在「没人 import 它们」时才安全**
+
+以后若要引入视频预览、内嵌浏览器、PIL 图像处理，必须先从
+`scripts/build_exe.py::EXCLUDE_MODULES` 里删掉对应项，否则打包能过、
+运行时 `ImportError`。
+
+**③ ffmpeg 必须继续靠 `--add-data` 带进去**
+
+`installer/doubi.nsi` 只有一条 payload 规则
+（`File /r "${SRC_DIR}\*.*"` 覆盖 `dist/doubi-gui`），仓库里的 `tools/`
+**不进安装包**。所以排掉 `imageio_ffmpeg` 之后，
+`build_exe.py::FFMPEG_EXE` 的那行 `--add-data` 是发布版**唯一**的 ffmpeg
+来源，还配了构建期 pre-flight 检查（文件不存在就直接失败，不生成残废产物）。
+
+四个引擎统一走 `engines/_subproc.py::find_bundled_ffmpeg()`，寻址
+**`_MEIPASS` 优先**——frozen 形态下从快捷方式启动时 `Path.cwd()` 常常是
+`C:\Windows\System32`。已模拟 frozen 布局（设 `sys._MEIPASS` + `sys.frozen`
++ `os.chdir(r'C:\Windows\System32')`）验证四个解析器全部返回打包内路径。
+
+#### 守卫测试
+
+上述约束全部由 `tests/test_packaging_slim.py`（13 条）锁死，其中 3 条做过
+变异验证（故意改坏约束，确认对应测试变红且理由正确）：
+
+- `test_there_are_exactly_two_chromium_launch_sites` — 新增第三处 launch 会被抓住
+- `test_every_chromium_launch_pins_channel_to_chromium` — AST 检查，不是 grep
+- `test_no_source_file_imports_an_excluded_module` — 排除项与实际 import 冲突即报
+- `test_excluding_imageio_ffmpeg_requires_bundling_a_replacement` — 约束 ③
+- `test_bundled_ffmpeg_probes_meipass_first` — 寻址顺序
 
 ## 5. 踩过的坑
 
@@ -352,24 +493,38 @@ python scripts/build_installer.py              # onedir 构建 + 编译安装包
 python scripts/build_installer.py --skip-build # 复用现有 dist/doubi-gui/
 ```
 
-产物：`dist/DouBi-Setup-<version>.exe`（当前 0.1.0 约 **213 MB**）。
+产物：`dist/DouBi-Setup-<version>.exe`（当前 0.3.0 实测 **215.5 MB**）。
+
+体积精简（§4.5）之前这里是 441.3 MB；onedir 从 1501.8 MB 砍到 678.5 MB 后，
+安装包同步降到 215.5 MB（**−225.8 MB / −51.2%**），已回到 0.1.0（213 MB）的量级。
 
 链路是 `build_installer.py` → `build_exe.py --onedir` → `makensis`：
 
 ```
-pyproject.toml:version
-    ↓ 正则读出来，作为唯一版本真源
-scripts/build_exe.py --onedir  →  dist/doubi-gui/（14.7 MB exe + _internal/ 3308 文件，787 MB）
+pyproject.toml:version（AST 解析，单一真源）
+    ↓ 读出后同步写入 src/doubi/__init__.py:__version__
+       （GUI APP_VERSION / REST /health / NSIS / pyproject 全部派生自它，
+        杜绝手抄漂移。UI 标题栏显示的版本号就是 __init__.__version__）
+scripts/build_exe.py --onedir  →  dist/doubi-gui/（881 文件，总 678.5 MB，含精简后的 Playwright Chromium）
     ↓ /DSRC_DIR=<绝对路径>
 tools/nsis/nsis-3.11/makensis.exe  installer/doubi.nsi
-    ↓ LZMA solid 压缩，825 MB → 213 MB（27.0%），单线程约 10 分钟
-dist/DouBi-Setup-0.1.0.exe
+    ↓ LZMA solid 压缩；SetDatablockOptimize off（见 §6.4 规则）
+      678.5 MB → 压缩段 225.9 MB → 最终安装包 215.5 MB（31.7%）
+      单线程 makensis 约 5-8 分钟
+dist/DouBi-Setup-0.3.0.exe
 ```
 
-**版本号只有一个源**。`build_installer.py` 从 `pyproject.toml` 读出
-version，用 `/DPRODUCT_VERSION=` 注进 NSIS，绝不在 `.nsi` 里手抄——
-手抄必然漂移。界面上显示的版本号在
-`src/doubi/ui/resources/__init__.py:APP_VERSION`，改版本时两处要一起动。
+> 压缩率从 29.3% 升到 31.7% 是预期的：被砍掉的 WebEngine `.pak`、
+> headless_shell、PIL 等本来就是**高可压缩**的重复内容，剩下的
+> Chromium/node.exe 二进制熵更高，压不动。所以安装包的降幅（−51.2%）
+> 略小于 onedir 的降幅（−54.8%）。
+
+**版本号只有一个源**。`build_installer.py` 从 `src/doubi/__init__.py` AST
+静态解析 `__version__`（不是抄 pyproject 里的动态 `attr =`），再用
+`/DPRODUCT_VERSION=` 注进 NSIS。所以 GUI APP_VERSION / REST `/health` /
+NSIS 安装包 `VIProductVersion` 三处永远一致，绝不用手抄。
+`VIProductVersion` 必须是四段纯数字，因此写成 `"${PRODUCT_VERSION}.0"`
+（0.3.0 → 0.3.0.0）。`VIAddVersionKey /LANG=2052` —— 2052 是简体中文 LCID。
 
 **NSIS 不在 PATH 里**（便携版），所以脚本按顺序探测
 `tools/nsis/nsis-3.11/makensis.exe` 和 `.../Bin/makensis.exe`。
@@ -446,15 +601,67 @@ IntFmt $0 "0x%08X" $0
 WriteRegDWORD HKCU "${UNINST_KEY}" "EstimatedSize" "$0"
 ```
 
-单位是 KB。实测写入 806347，对应 787 MB，与安装目录实际占用一致。
+单位是 KB。0.1.0 基线写入 806347，对应 787 MB；0.3.0 引入 Playwright Chromium
+后安装目录约 1.57 GB，`${GetSize}` 会自动重新计算。
 
-### 6.4 静默验证配方
+### 6.4 NSIS 构建期两条硬规则（0.3.0 integrity fail 事故后新增，绝不能丢）
+
+**规则 1：`installer/doubi.nsi` 里永远 `SetDatablockOptimize off`**（在
+`SetCompressor /SOLID lzma` 之前）。
+
+```nsis
+; 0.3.0 事故修复：1.57 GB 大安装包 NSIS 3.11 datablock optimizer 偶发 launcher
+; 预存 CRC 头与实际文件 CRC 不一致，用户侧双击即弹 "NSIS Error — Installer
+; integrity check has failed"。关掉 optimizer 体积从 ~345 MB → 441 MB (+28%)，
+; 但 makensis 日志保证显式打印 "CRC (0xXXXXXXXX): 4 / 4 bytes"（launcher CRC
+; 真写进 PE 头），永不触发 integrity check。
+SetDatablockOptimize off
+SetCompressor /SOLID lzma
+```
+
+> 体积精简（§4.5）后源目录只剩 678.5 MB，但**这条规则依然不许动**。
+> 事故的触发条件是 optimizer 的块合并逻辑本身，不是「包够大才会犯」——
+> 体积变小只是降低了概率，没有修掉 bug。0.3.0 精简后重打的
+> 215.5 MB 安装包同样是在 `SetDatablockOptimize off` 下编译并验证通过的。
+
+> 为什么不用 `NCRC`？`/NCRC` 只是让 NSIS launcher 跳过自校验运行，**并没有
+> 修 bug**，文件被真的篡改时也会静默放过（安全退化），企业安全软件还会
+> 把「跳过自校验的 NSIS exe」当木马。正确做法是从源头保证 CRC 头正确。
+
+**规则 2：makensis exit 0 后，必须再等「文件大小连续 10 秒不变」才允许算哈希。**
+
+原因三层叠加：
+- NSIS 关闭 `Compressed data:` 流后，还有 PE 尾 CRC/footer 要写进文件最后 4KB
+- Windows 写缓存 + Defender/火绒钩子会在句柄 close 之后再异步刷字节
+- 异步构建脚本（前次的后台 job）非常容易「`ls dist/` 看到文件存在」就以为完成了——实际 SHA256 对 NSIS 写一半的快照算出来的，用户拿到 exe 立刻 integrity fail
+
+最小可落地 Python 实现（发布流程建议固定）：
+```python
+def wait_stable(p: Path, window_sec: float = 10.0, poll_sec: float = 1.5):
+    last_size, last_change = -1, time.time()
+    while True:
+        cur = p.stat().st_size if p.exists() else -1
+        if cur != last_size:
+            last_size = cur
+            last_change = time.time()
+        if time.time() - last_change >= window_sec and cur > 0:
+            return cur
+        time.sleep(poll_sec)
+```
+
+验证 makensis 真的写了 CRC footer（日志里一定要有下面两行，缺任何一行都不要发布）：
+```
+CRC (0x5291D80F):                  4 / 4 bytes
+Total size:                225926086 / 711750527 bytes (31.7%)
+```
+
+### 6.5 静默验证配方
 
 手工点安装向导没法反复跑，用静默模式装到隔离目录：
 
 ```powershell
-# 装（/D= 必须是最后一个参数，且不能加引号）
-.\dist\DouBi-Setup-0.1.0.exe /S /D=$env:LOCALAPPDATA\DouBi_VerifyTest
+# 装（/D= 必须是最后一个参数，且不能加引号；<version> 替换为例如 0.3.0）
+.\dist\DouBi-Setup-<version>.exe /S /D=$env:LOCALAPPDATA\DouBi_VerifyTest
 
 # 查注册表
 Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\DouBi"
@@ -463,28 +670,37 @@ Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\DouB
 & "$env:LOCALAPPDATA\DouBi_VerifyTest\uninstall.exe" /S
 ```
 
-实测结论：安装/卸载均退出码 0；`_internal/` 3308 个文件一个不少；
-卸载后安装目录、两个 HKCU 键、开始菜单、桌面快捷方式全部清空，
-残留进程 0 个，而 `~/.doubi` 完好保留。
+实测结论（0.3.0 精简后重打的 215.5 MB 安装包）：安装/卸载均退出码 0；
+落盘 882 个文件 / 678.5 MB（881 个源文件 + `uninstall.exe`），与 `dist/doubi-gui/`
+逐项吻合；`*webengine*` 与 `*headless_shell*` 残留均为 **0 个**（证明精简在安装侧
+也生效，不只是构建目录里干净）；注册表 `EstimatedSize` 自动重算为 694817 KB。
+装出来的 `doubi-gui.exe` 启动后标题栏为「豆比下载 0.3.0 · 多平台视频下载器」、
+`Responding=True`、内存 160.2 MB。卸载（**故意让程序开着**以检验 `EnsureAppClosed`）
+后安装目录、HKCU 键、开始菜单、桌面快捷方式全部清空，残留进程 0 个，
+而 `~/.doubi` 完好保留。
 
-### 6.5 编译像卡住了？先确认再等
+### 6.6 编译像卡住了？先确认再等
 
-LZMA solid 压缩 825 MB 是单线程的，中途**几分钟没有任何输出**是正常的。
+LZMA solid 压缩 1.57 GB 是单线程的，中途**几分钟没有任何输出**是正常的。
 别急着 Ctrl-C，先看它是真在干活还是真死了：
 
 ```powershell
 Get-Process makensis | Select-Object CPU, WorkingSet   # CPU 时间应持续增长
-Get-ChildItem "$env:TEMP\ns*.tmp"                      # 暂存 datablock 会涨到 ~800 MB
+Get-ChildItem "$env:TEMP\ns*.tmp"                      # 暂存 datablock 会涨到 ~1.5 GB
 ```
 
-CPU 在涨、临时文件在涨，就是在压缩。
+CPU 在涨、临时文件在涨，就是在压缩。makensis 退出前日志最后一行通常是
+`Compressed data: ...`，真正结束后还会追加「CRC / Total size / OK」三行。
 
-## 7. 验证清单
+## 7. 验证清单（0.3.0 修订版）
 
 发版前手动检查（不在单元测试里）：
 
-- [ ] `dist/doubi-gui.exe` 文件存在且大小 ~235 MB
+- [ ] `dist/doubi-gui.exe`（onefile 便携版）文件存在（精简后未重新量化，见 §4.5）
+- [ ] onedir `dist/doubi-gui/doubi-gui.exe` 存在，整个目录约 **881 文件 / 678.5 MB**
+- [ ] **打包期 i18n 收集验证（onedir）**：`dir dist\doubi-gui\_internal\doubi\ui\locales\` 能看到 `zh_CN.json`、`en.json`（CHANGELOG G7 回归检查）
 - [ ] 双击启动 → 闪屏 → 主窗口出现
+- [ ] **GUI 翻译正常自检（2 条）**：① 标题栏显示 `豆比下载 0.3.0 · 多平台视频下载器`（不是 `app.title_suffix`）；② 左侧导航文字是「解析 / 下载 / 历史 / 设置」（不是 `nav.parse`）
 - [ ] **任务栏左下角应用图标是豆比**（不是 Python 双蛇）
 - [ ] 标题栏左上是豆比（28px，与 M5+ 期望一致）
 - [ ] 切换主题 → 标题栏图标换色
@@ -492,12 +708,20 @@ CPU 在涨、临时文件在涨，就是在压缩。
 - [ ] 打开「扫码登录」对话框 → 标题栏 + 任务栏分组图标都是豆比
 - [ ] 关闭窗口 → 进程正常退出，无残留
 - [ ] 在资源管理器中右键 .exe → 「属性」看到「豆比」图标
-- [ ] 标题栏版本号与 `pyproject.toml` 一致（曾出现过 UI 显示 0.6.0 而
-      安装包写 0.1.0 的不一致）
+- [ ] 标题栏版本号与 `src/doubi/__init__.py:__version__` 一致（单一真源，杜绝 UI 0.6.0 / 安装包 0.1.0 那种漂移）
 
-安装包额外检查：
+安装包额外检查（0.3.0 新增三条，CHANGELOG G8 integrity fail 回归检查）：
 
-- [ ] `dist/DouBi-Setup-<version>.exe` 存在，约 213 MB
+- [ ] `dist/DouBi-Setup-<version>.exe` 存在，**约 215 MB**（精简后基线；精简前是 441 MB。
+      如果拿到的是 345 MB 那一档，说明 `SetDatablockOptimize` 被打开了，不要发——见 §6.4）
+- [ ] **发布前 CRC/footer 证据**：makensis 构建日志里显式有 `CRC (0xXXXXXXXX): 4 / 4 bytes` 和 `Total size: ...` 两行
+- [ ] **双击不弹 integrity check fail**：首次运行安装包，NSIS launcher 自校验通过（正常进入中文安装向导）
+- [ ] **侧签 SHA 校验通过**：PowerShell 执行
+  ```powershell
+  $e=(Get-Content dist\DouBi-Setup-0.3.0.exe.sha256).Trim()
+  $a=(Get-FileHash dist\DouBi-Setup-0.3.0.exe -Algorithm SHA256).Hash.ToLower()
+  $e -eq $a   # 必须 $true
+  ```
 - [ ] 安装过程无 UAC 弹窗（当前用户安装）
 - [ ] 安装界面中文无乱码
 - [ ] 控制面板「应用和功能」里能看到「豆比下载 <version>」，大小正确

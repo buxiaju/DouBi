@@ -39,6 +39,15 @@ dependencies = [
     "aiosqlite>=0.19.0",
     "qrcode>=7.4",          # used by bilibili QR login in the CLI
     "gmssl>=3.2",           # sm3 for douyin a_bogus signing (M6.7, platforms/douyin/sign)
+    # M6.16 起，通用嗅探（platforms/generic）是 CLI/GUI/REST/MCP 四入口共享的兜底
+    # 解析路径，因此 playwright 从 gui extra 提升为基础依赖。
+    #
+    # 注意：pip 装的只是 Python 客户端（几 MB），浏览器内核要另外执行
+    #   playwright install chromium
+    # 才会下载（约 150 MB）。缺内核时 Sniffer.is_available() 返回 False，
+    # GenericAdapter 会返回一条「[嗅探失败] Playwright 未安装」的 MediaItem
+    # 而不是抛异常，所以未装内核也不会让主流程崩掉。
+    "playwright>=1.40.0",
 ]
 
 [project.optional-dependencies]
@@ -48,7 +57,8 @@ gui = [
     "qrcode>=7.4",
     "psutil>=5.9",
     "qasync>=0.27.1",        # asyncio <-> Qt event-loop bridge
-    "playwright>=1.40.0",   # browser-based auto-login (M3.1.1)
+    # playwright 不在这里重复声明：M6.16 已提升到 [project] dependencies。
+    # 浏览器自动登录（M3.1.1）和通用嗅探（M6.16）共用同一个 playwright。
 ]
 server = [
     "fastapi>=0.100",

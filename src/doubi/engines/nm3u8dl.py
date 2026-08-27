@@ -26,7 +26,11 @@ from typing import Optional
 
 from ..core.models import DownloadOptions, MediaItem
 from ..core.storage.file_layout import resolve_item_dir
-from ._subproc import SubprocessTimeout, run_supervised_subprocess
+from ._subproc import (
+    SubprocessTimeout,
+    find_bundled_ffmpeg,
+    run_supervised_subprocess,
+)
 from .base import (
     Engine,
     EngineProgress,
@@ -70,28 +74,26 @@ def _find_cli() -> Optional[str]:
 
 
 def _find_ffmpeg() -> Optional[str]:
-    """Locate ffmpeg — prefer the one bundled with N_m3u8DL-CLI."""
-    cli_dir = None
+    """Locate ffmpeg — prefer the one sitting next to N_m3u8DL-CLI.
+
+    N_m3u8DL-CLI ships its own ffmpeg build, and that copy is the one
+    the release bundle carries (see ``scripts/build_exe.py``), so it is
+    tried before PATH. ``find_bundled_ffmpeg`` also covers the frozen
+    ``sys._MEIPASS`` layout, which ``_find_cli`` cannot reach.
+    """
     cli = _find_cli()
     if cli:
-        cli_dir = Path(cli).parent
-
-    if cli_dir:
-        bundled = cli_dir / "ffmpeg.exe"
+        bundled = Path(cli).parent / "ffmpeg.exe"
         if bundled.exists():
             return str(bundled)
+
+    shipped = find_bundled_ffmpeg()
+    if shipped:
+        return shipped
 
     on_path = shutil.which("ffmpeg")
     if on_path:
         return on_path
-
-    try:
-        import imageio_ffmpeg
-        path = imageio_ffmpeg.get_ffmpeg_exe()
-        if path and Path(path).exists():
-            return path
-    except Exception:
-        pass
 
     return None
 
