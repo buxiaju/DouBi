@@ -186,7 +186,21 @@ def test_cli_no_sniff_disables():
 
 
 def test_rest_applies_sniff_config(monkeypatch):
-    """REST：``_apply_sniff_config()`` 读到的 cfg 要原样注入并回传。"""
+    """REST：``_apply_sniff_config()`` 读到的 cfg 要原样注入并回传。
+
+    ``importorskip`` 不能省：``doubi.server.app`` 会导入 ``.schemas``，而
+    ``schemas`` 顶层就 ``from pydantic import BaseModel``（那是故意的，好让
+    Pydantic v2 把注解解析成真类型而不是前向引用）。fastapi / pydantic 是可选
+    依赖，CI 只装 ``pip install .``，所以裸导入会让这条**报错**而不是跳过——
+    0.3.0 发版 CI 就是这么红的。和 ``test_server.py`` 保持同一约定：缺可选依赖
+    则跳过。
+
+    只跳这一条、不在模块顶层跳，是因为同文件里 CLI / MCP 两条守卫只依赖
+    stdlib，不该被 REST 的可选依赖连坐。
+    """
+    pytest.importorskip("pydantic")
+    pytest.importorskip("fastapi")
+
     from doubi.server import app as app_mod
 
     probe = AppConfig(sniff_duration_sec=42, sniff_enabled=False)
