@@ -741,6 +741,15 @@ CPU 在涨、临时文件在涨，就是在压缩。makensis 退出前日志最�
 
 发版前手动检查（不在单元测试里）：
 
+- [ ] **模拟 CI 依赖集跑一遍全量测试**（0.3.0 CI 红了才补的一条，见
+      CHANGELOG M6.21 / DEVELOPMENT §15.1）。本地装齐 extras + 惯用
+      `-m "not slow"`，比 CI 的「只有基础依赖 + 无 mark 过滤」**小一圈**，
+      所以「测试里裸导入可选依赖」这类失效模式在本地必然漏过去。做法：临时脚本
+      往 `sys.meta_path` 插一个 Blocker，对 `pydantic` / `fastapi` / `uvicorn` /
+      `PySide6` / `qfluentwidgets` / `qasync` / `psutil` 抛 `ModuleNotFoundError`
+      并清掉 `sys.modules` 里的同名模块，再 `pytest.main(["-q", "--maxfail=5"])`。
+      判绿标准不是「没红」，而是 **passed+failed 与 CI 相等、skipped 也相等**
+      （0.3.0 基线：`629 passed / 146 skipped`）
 - [ ] `dist/doubi-gui.exe`（onefile 便携版）文件存在（精简后未重新量化，见 §4.5）
 - [ ] onedir `dist/doubi-gui/doubi-gui.exe` 存在，整个目录约 **1002 文件 / 687.4 MB**
 - [ ] **侧签哈希与 exe 实际匹配**：`dist/DouBi-Setup-<v>.exe.sha256` 和
@@ -763,7 +772,8 @@ CPU 在涨、临时文件在涨，就是在压缩。makensis 退出前日志最�
 
 安装包额外检查（0.3.0 新增三条，CHANGELOG G8 integrity fail 回归检查）：
 
-- [ ] `dist/DouBi-Setup-<version>.exe` 存在，**约 215 MB**（精简后基线；精简前是 441 MB。
+- [ ] `dist/DouBi-Setup-<version>.exe` 存在，**约 219 MB**（0.3.0 当前基线：
+      精简后 215.46 MB，M6.20 补 aiohttp 全链后 **219.02 MB**；精简前是 441 MB。
       如果拿到的是 345 MB 那一档，说明 `SetDatablockOptimize` 被打开了，不要发——见 §6.4）
 - [ ] **发布前 CRC/footer 证据**：makensis 构建日志里显式有 `CRC (0xXXXXXXXX): 4 / 4 bytes` 和 `Total size: ...` 两行
 - [ ] **双击不弹 integrity check fail**：首次运行安装包，NSIS launcher 自校验通过（正常进入中文安装向导）
@@ -800,6 +810,19 @@ CI 已就位——见 `.github/workflows/build.yml`（`build-installer`）。
 **测试段**——`pip install .` + `pytest --maxfail=5`，`QT_QPA_PLATFORM=offscreen`
 让无头环境也能跑 GUI 类测试（PySide6 缺失时自动 skip）。超 5 个失败
 直接终止，避免花 25 分钟跑完一整轮注定红的测试。
+
+> **CI 不装任何 extras**，只有 `pip install .` 的基础依赖 + `pytest
+> pytest-asyncio ruff`。也就是说 `fastapi` / `pydantic` / `uvicorn` /
+> `PySide6` 在 runner 上**都不存在**，测试里凡是会走到这些包的地方必须有
+> `pytest.importorskip` 守卫，否则**报错**而不是跳过。0.3.0 就因为
+> `test_config_forwarding.py` 漏了这个守卫，让 `v0.3.0` 标签上留了一次红色
+> CI（详见 CHANGELOG M6.21、约定见 DEVELOPMENT §15.1）。
+>
+> 另外 CI 的 pytest **不带 `-m "not slow"`**，测试集与本地惯用口径不等价：
+> `test_theme_apply_gui.py`（`gui` + `slow`）在 CI 因缺 PySide6 被 skip，
+> 在本地却会真起 Qt 事件循环并长时间挂住——所以 CI 45s 跑完，本地 10 分钟+。
+> 想不动测试就闭掉这个缺口，只有两条路：给 CI 装齐 extras（变慢），或者把
+> §7 那条「模拟 CI 依赖集」检查当成发版前必做项。
 
 **打包段**——`python scripts/build_installer.py`，链路就是 §6.1 的
 `build_installer.py → build_exe.py --onedir → makensis`，与本地完全一致。
@@ -975,10 +998,15 @@ git push Github v0.3.0 --force
 `dist\doubi-gui.exe`。0.3.0 实际只传了三个文件：
 
 ```
-DouBi-Setup-0.3.0.exe          225,926,086 bytes
+DouBi-Setup-0.3.0.exe          229,657,135 bytes   # 219.02 MB
 DouBi-Setup-0.3.0.exe.sha256   88 bytes
 SHA256SUMS.txt                 88 bytes
 ```
+
+> **同名资产不能共存**：M6.20 修下载链路后安装包重打过一次
+> （215.46 MB / `225,926,086` bytes → **219.02 MB / `229,657,135` bytes**），
+> 换资产必须**先删线上旧文件再上传**，否则同名冲突。换完记得同步改正文里的
+> 体积与 SHA256——正文哈希和资产 `digest` 不一致比体积写错严重得多。
 
 ## 9. 跨平台
 

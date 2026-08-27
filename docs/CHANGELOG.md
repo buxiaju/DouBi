@@ -678,6 +678,10 @@ supports() 为真且 is_available 的引擎：
 > 一句话：**发布版有一半以上是「装进来但从没被 import」的死重量。**
 > onedir 产物从 **1501.8 MB / 4005 文件** 降到 **678.5 MB / 881 文件**
 > （−823.3 MB，−54.8%），且四项功能逐一实测未退化。
+>
+> 注：标题与本段是 **M6.17 当时**的数字。M6.20 补进 aiohttp 全链后当前值为
+> **687.4 MB / 1002 文件（−54.2%）**、安装包 **219.02 MB**——引用体积数据时
+> 请以 M6.20 一节或本文末「统计」为准。
 
 #### 分项战绩
 
@@ -1116,6 +1120,108 @@ M6.17 的 `e833f155…`，与实际 exe 不匹配** —— 任何照它校验的
 
 ---
 
+### M6.21 (2026-08-27) — 修复：发版 CI 红（`ModuleNotFoundError: No module named 'pydantic'`）
+
+M6.20 的提交 `086bbaf` 连同移动后的 `v0.3.0` 标签推上去，`build-installer #3`
+在 **1m54s** 就红了。失败发生在**测试段**，所以打包段与 `Create GitHub Release`
+两步都没执行——这反而省事：线上没有产生需要清理的 draft release。
+
+```
+1 failed, 628 passed, 146 skipped in 45.82s
+FAILED tests/test_config_forwarding.py::test_rest_applies_sniff_config
+  - ModuleNotFoundError: No module named 'pydantic'
+```
+
+#### 根因：一条裸导入穿过了懒导入的防线
+
+```
+test_config_forwarding.py:190  from doubi.server import app      ← 修复前的行号
+  → server/app.py:39           from .schemas import DownloadRequest, ParseRequest
+    → server/schemas.py:10     from pydantic import BaseModel, Field   ← 炸在这里
+```
+
+`fastapi` / `pydantic` / `uvicorn` 只在 `[project.optional-dependencies].server`
+里，而 CI 装的是 `pip install .` + `pytest pytest-asyncio ruff`，**不带任何 extras**。
+
+这条链**不能靠懒导入解决**：`schemas.py` 是故意把模型定义在模块顶层的，
+好让 Pydantic v2 把注解解析成真类型而不是前向引用。
+
+值得记的是这是一个**已经解决过的 bug 类别的复发**。`c5913c5` 当初把
+`doubi/server/__init__.py` 改成 PEP 562 懒导入模块，正是为了阻止
+`from doubi.server import security`（只用 stdlib）被 pydantic 连坐。
+教训一句话：**懒导入只能保护「入口不被连坐」，保护不了「有人直接敲门」**——
+`from doubi.server import app` 要的就是 `app` 本身，`__getattr__` 会老老实实
+把重型链拉进来，这是它的正确行为，不是漏洞。
+
+#### 修复：按既有约定加 `importorskip`，且只加在函数内
+
+项目里早有这条约定，只有 `test_config_forwarding.py` 漏了：
+
+| 位置 | 守卫 |
+|---|---|
+| `test_server.py:24-26` | `fastapi` / `httpx` / `pydantic` |
+| `test_server_security.py:277-278` | 同上 |
+| `test_version_single_source.py:92` | `setuptools` |
+| `test_prompt_options.py:40` | `PySide6.QtWidgets` |
+| **`test_config_forwarding.py:201-202`** | **本次补上 `pydantic` / `fastapi`** |
+
+`importorskip` 放在**函数内而不是模块顶层**是刻意的：同文件里 CLI / MCP 两条
+转发守卫只依赖 stdlib，`test_every_entry_calls_set_config` 更是**源码文本级**
+断言（读 `_ENTRY_SOURCES` 里四个文件的文本 grep `GenericAdapter.set_config`，
+一个模块都不 import）。把跳过条件提到顶层，会让这些本该在任何环境下都生效的
+守卫被 REST 的可选依赖连坐——那等于用一个静默降低覆盖的办法去修一个报错。
+
+顺带审计了全部测试文件的可选依赖裸导入：`httpx` 是**基础依赖**
+（`pyproject.toml:35`，`httpx>=0.25`），所以 `test_bilibili_adapter.py` /
+`test_douyin_adapter.py` 里的顶层 `import httpx` 是安全的。
+pydantic / fastapi 是唯一的缺口。
+
+#### 验证：模拟 CI 依赖集，而不是「本地能跑就算过」
+
+本地装着全部 extras，直接跑必然复现不出来。用 `sys.meta_path` 插一个
+Blocker（`find_spec` 对 `pydantic` / `fastapi` / `uvicorn` / `PySide6` /
+`qfluentwidgets` / `qasync` / `psutil` 抛 `ModuleNotFoundError`，并清掉
+`sys.modules` 里已导入的同名模块），再照 CI 原命令跑全量：
+
+| 口径 | 结果 |
+|---|---|
+| CI（修复前） | `1 failed, 628 passed, 146 skipped in 45.82s` |
+| 本地模拟 CI（修复后） | **`629 passed, 146 skipped in 104.79s`** |
+
+`628 + 1 = 629` **且 skipped 数完全相同**——两个等式一起才构成证据：
+前者说明环境等价（不是少收集了用例而"变绿"），后者说明没有测试被**多**跳过
+（不是把问题掩盖成 skip）。单跑该文件亦可见
+`SKIPPED [1] tests\test_config_forwarding.py:201: could not import 'pydantic'`。
+
+#### 附带发现：CI 与本地的测试集有两处不等价
+
+排查中本地全量跑卡在 `[ 82%]` 十几分钟不动，起初以为是新问题，其实是**第二个**
+独立的 CI/本地分歧：
+
+1. **CI 不过滤 mark**——`build.yml:72` 是 `python -m pytest -q --maxfail=5`，
+   没有 `-m "not slow"`；而我本地把关一直用 `-m "not slow"`，比 CI **小一圈**。
+   这个失效模式因此必然漏过去。
+2. **`slow` 标记在两边的实际效果相反**——全项目只有
+   `test_theme_apply_gui.py:33`（`pytestmark = [pytest.mark.gui, pytest.mark.slow]`）
+   带此标记。本地装着 PySide6，它会**真的起 Qt 事件循环**并长时间挂住；CI 没有
+   PySide6，它直接被 skip。这就解释了 CI 45.82s vs 本地 10 分钟+ 的差距。
+
+换句话说，**「本地全量」既不是 CI 的超集也不是子集**，两边各自漏掉对方覆盖的一块。
+
+#### 影响与后续
+
+只改了一个测试文件（+15/−1），**不触及任何发布产物**——`219.02 MB` 安装包与
+`5d28ba83…b03eae` 哈希均不受影响，无需重打包。修复提交 `20ffa0a` 只推 master
+（两个远端），**刻意不再移动 `v0.3.0` 标签**：标签已经在 M6.18 里挪过一次，
+再挪一次会二次改写发布史，而这次的改动对产物零影响，不值得。代价是
+`v0.3.0` 标签上留着一次红色 CI 记录——**留着比抹掉更诚实**。
+
+待决（未采纳，记录备选）：让 CI 装齐 extras（代价是变慢），或把「屏蔽可选依赖
+跑一遍全量」固化成发版前检查（已写入 `BUILD.md` §7），或干脆去掉 CI 的
+`Create GitHub Release` 步骤改为纯构建。
+
+---
+
 ### 统计
 - 源码：~18,600 行（相较 0.2.0 净增约 700 行，主要是 supervisor + 嗅探器）
 - 新文件：`engines/_subproc.py`，`engines/base.py` 增加 filename/cancel helpers
@@ -1138,10 +1244,19 @@ M6.17 的 `e833f155…`，与实际 exe 不匹配** —— 任何照它校验的
     三包 `--collect-all` 正反向守卫。此处是 parametrize 展开后的用例数，
     与上文 M6.17「13 条」的函数口径不同）
   - 基线演进：381 → 403 → 423 → 450 → 687 → 713 → 838 → **846**
+- M6.21 收尾后：**629 passed / 146 skipped / 0 failed**（模拟 CI 依赖集的**无过滤**
+  全量跑，104.79s）。注意这与上面 M6.20 的 846 不是同一口径：
+  - 上面是**本地** `-m "not slow"`，装齐 extras；这里是**屏蔽可选依赖**
+    （pydantic/fastapi/uvicorn/PySide6/qfluentwidgets/qasync/psutil）、**不过滤 mark**
+  - 屏蔽依赖会把 GUI / REST 用例整批转成 skip，所以 passed 数反而更低——
+    数字变小不代表覆盖退化，**两个口径要分别对照各自的历史值**
+  - `tests/test_config_forwarding.py`：8 条中 1 条（`test_rest_applies_sniff_config`）
+    在无 pydantic 环境下改为 skip，其余 7 条（含源码文本级四入口守卫）照常执行
 - 打包产物：onedir **1501.8 MB / 4005 文件 → 678.5 MB / 881 文件**（−54.8%），
-  M6.20 补 aiohttp 全链后为 **687.4 MB / 1002 文件**（当前值）
+  M6.20 补 aiohttp 全链后为 **687.4 MB / 1002 文件**（当前值，相对原始基线 **−54.2%**）
 - NSIS 安装包：**441.31 MB → 215.46 MB**（−51.2%），M6.20 后 **219.02 MB**（当前值，
-  `sha256 5d28ba83…b03eae`，静默装卸 + `EnsureAppClosed` + CRC footer 全验证通过）
+  相对原始基线 **−50.4%**，`sha256 5d28ba83…b03eae`，静默装卸 + `EnsureAppClosed`
+  + CRC footer 全验证通过）
 - 仓库跟踪体积：**719 个文件 / 28.8 MB**（剔除 6.53 MB 冗余 zip 后）
 
 ---

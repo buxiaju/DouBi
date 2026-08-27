@@ -21,7 +21,7 @@
 12. [四端入口（CLI / GUI / REST / MCP）](#12-四端入口)
 13. [GUI 内部结构](#13-gui-内部结构)
 14. [平台风控专题（B 站 + 抖音，最重要的实战知识）](#14-平台风控专题b-站--抖音最重要的实战知识)
-15. [测试体系](#15-测试体系)
+15. [测试体系](#15-测试体系)（§15.1 可选依赖与 CI 口径差异）
 16. [代码约定与常见坑](#16-代码约定与常见坑)
 17. [如何安全地修改项目（改动检查单）](#17-如何安全地修改项目)
 18. [已知限制与路线图](#18-已知限制与路线图)
@@ -1356,6 +1356,54 @@ python -m pytest tests/test_row_mapping_cache.py --no-header -q 2>&1 | Select-Ob
 # 只收集不执行，核对用例数
 python -m pytest --collect-only -q 2>&1 | Select-Object -Last 3
 ```
+
+> 坑：`Select-Object -Last N` 会**缓冲到进程退出**才输出。后台跑一个长任务时
+> 屏幕上一直空白，看着像挂了其实在跑；判断是否真挂要看 `-q` 的
+> `[ NN%]` 进度是否停滞（改成 `| Tee-Object log.txt` 可以边跑边看）。
+
+### 15.1 可选依赖：测试里必须 `importorskip`（M6.21 血的教训）
+
+`pyproject.toml` 把依赖分成三档，**只有基础依赖在任何环境里都装得到**：
+
+| 档位 | 内容 | 测试里能否裸导入 |
+|---|---|---|
+| `[project] dependencies` | yt-dlp / aiohttp / **httpx** / rich / pyyaml / python-dateutil / aiosqlite / qrcode / gmssl / playwright | **可以** |
+| `optional-dependencies.gui` | PySide6 / PySide6-Fluent-Widgets / psutil / qasync | 不行 |
+| `optional-dependencies.server` | **fastapi / uvicorn / pydantic** | 不行 |
+
+CI（`.github/workflows/build.yml`）只装 `pip install .` + `pytest pytest-asyncio
+ruff`，**不带任何 extras**。所以：
+
+- 任何会走到 gui / server 档依赖的测试，**入口处必须**
+  `pytest.importorskip("pydantic")` 之类的守卫。既有范例：
+  `test_server.py:24-26`、`test_server_security.py:277-278`、
+  `test_prompt_options.py:40`、`test_version_single_source.py:92`。
+- **`importorskip` 放函数内、不要放模块顶层**，除非整个文件都依赖它。
+  `test_config_forwarding.py` 就是反例边界：同一个文件里 CLI / MCP 两条守卫
+  只用 stdlib，其中一条还是纯源码文本断言，不该被 REST 的可选依赖连坐。
+- **懒导入不能替代 `importorskip`**。`server/__init__.py` 是 PEP 562 懒导入模块
+  （见 §12.3），那只挡住「`import doubi.server.security` 被 pydantic 连坐」，
+  挡不住 `from doubi.server import app`——后者要的就是重型链本身。
+  0.3.0 发版 CI 就是这么红的：`app.py → schemas.py → from pydantic import ...`，
+  而 `schemas.py` 的模型**必须**定义在模块顶层（Pydantic v2 要把注解解析成真类型）。
+
+**本地跑绿 ≠ CI 会绿**，两边测试集互不包含：
+
+| | 本地惯用 | CI |
+|---|---|---|
+| 命令 | `pytest -m "not slow"` | `pytest -q --maxfail=5`（**无 mark 过滤**） |
+| 依赖 | 装齐 extras | 只有基础依赖 |
+| `test_theme_apply_gui.py` | 真起 Qt 事件循环，**极慢甚至挂住** | 无 PySide6 → skip |
+| 耗时参考 | 10 分钟+ | 45.82s |
+
+发版前把关要用**模拟 CI 依赖集**的跑法（写个临时脚本，往 `sys.meta_path`
+插一个 `find_spec` 对 pydantic/fastapi/uvicorn/PySide6/qfluentwidgets/qasync/psutil
+抛 `ModuleNotFoundError` 的 Blocker，并清掉 `sys.modules` 里已导入的同名模块，
+再 `pytest.main(["-q", "--maxfail=5"])`）。M6.21 实测 **629 passed / 146 skipped
+/ 104.79s**，与 CI 的 `628 passed + 1 failed + 146 skipped` 逐项对齐——
+**passed+failed 相等且 skipped 相等**两个条件同时成立，才能说环境等价且没有
+测试被多跳过（只看前者，可能是「少收集了用例而变绿」；只看后者，可能是
+「把报错掩盖成 skip」）。
 
 ---
 
