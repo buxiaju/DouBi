@@ -571,7 +571,8 @@ certutil -hashfile dist\doubi-gui.exe SHA256
 > **未被 import 的** Qt 子模块（WebEngine/Multimedia）+ headless_shell + PIL +
 > imageio_ffmpeg，**功能一条没减**，onedir 1501.8 MB → 678.5 MB，
 > 安装包 441.31 MB → **215.46 MB**。上表是 2026-08-26 的历史快照，
-> 精简后的产物见 M6.17「重打安装包」。
+> 精简后的产物见 M6.17「重打安装包」；**当前实际发布的是 M6.20 修复版
+> 219.02 MB**（补 aiohttp 全链 +3.56 MB，见 M6.20）。
 
 ### M6.16 (2026-08-27) — 通用嗅探四入口接通 + 配置转发守卫
 
@@ -821,6 +822,300 @@ G8 那两条硬规则全程遵守，没有因为「包变小了」就放松：
 
 ---
 
+### M6.18 (2026-08-27) — 发布与同步：SSH 接通 + 两处发版事故
+
+#### 代码同步到 GitHub（SSH）
+
+`Github` 远端从 HTTPS 切为 `git@github.com:buxiaju/DouBi.git`，
+`ssh -T git@github.com` 鉴权通过（`Hi buxiaju!`），推送
+`c5913c5..13f3393  master -> master`，回验
+`git rev-list --left-right --count Github/master...HEAD` → `0	0`，
+且 `Github/master:tests` 下 `test_config_forwarding.py` /
+`test_packaging_slim.py` 均已落地。
+
+三个环境事实值得记住（已写入 `docs/BUILD.md` §8.1–§8.2）：
+
+- GitHub 远端名是 **`Github`**，`origin` 是 **Gitee**；默认分支是 **`master`**
+- 本地 `master` 的 upstream 指向 `origin/master`，**裸跑 `git push` 会推去 Gitee**
+- `ssh -T git@github.com` **退出码 1 是成功**（GitHub 不给 shell）；PowerShell 把
+  git 的 stderr 进度渲染成红色 `NativeCommandError` 也**不是错误**——判据是退出码
+  和 refspec 行
+
+#### 事故 1：`v0.3.0` 标签指向了 0.2.0 时代的 commit
+
+`git log -n 1 --oneline v0.3.0` → `c5913c5 fix(ci): 修复 0.2.0 发版 CI 测试集合失败`，
+而非 `13f3393 release: 0.3.0 ...`。根因是**标签建在 release commit 推送之前**
+（标签 `created_at` 2026-08-25T11:00:13Z 早于 release commit）。且是**轻量标签**
+（`git cat-file -t` → `commit`）。
+
+影响面比"难看"严重：GitHub Release 的 **Source code (zip/tar.gz) 按标签解析**，
+所以从 Release 页下载源码会拿到旧代码，与新安装包资产不一致；`git describe`
+版本考古同样错。
+
+**尚未修复**——因为 `git push --force` 一个 `v*` 标签会触发
+`.github/workflows/build.yml`（`on: push: tags: ["v*"]`）重跑 CI，
+`softprops/action-gh-release@v2` 会 update 已发布的 Release 并**可能覆盖
+已人工验证的安装包资产**（NSIS 非可复现构建，新哈希必然不同）。安全补救
+路径见 `docs/BUILD.md` §8.4：先让触发器失效，再动标签。
+
+#### 事故 2：Release 正文粘贴截断
+
+已发布正文停在「Chromium 与 ffmpeg 均已随包提供」，**丢了 `静默安装`、
+`校验（SHA256）`、`已知限制` 三段** —— 后果是下载者拿不到官方哈希做比对。
+
+#### 好消息：二进制本体没问题
+
+线上 `DouBi-Setup-0.3.0.exe` 的 `digest` =
+`sha256:e833f155485509736cb25682fae431a2907474cb44c03421308dfed32954ddbe`、
+225,926,086 字节，与本地验证过的构建**逐字节一致**，三个资产 `state: uploaded`。
+即 CI 未曾覆盖过资产。
+
+#### 文档加固
+
+- `docs/BUILD.md`：新增 §8.1 仓库拓扑 / §8.2 SSH 配置 / §8.3 发布顺序（先推
+  commit 再打 annotated tag）/ §8.4 标签补救 / §8.5 手动发布填写要点；§7 增加
+  「发布后线上核对」5 项；修正两处旧错误（版本真源写成 `pyproject.toml`、
+  `main` 分支应为 `master`）；记下 CI 与本地 **sha256 sidecar 格式分歧**
+- `docs/DEVELOPMENT.md`：§17 增加「两个远端，别推错」；§18 修正过期的
+  「没有 i18n」（M6.14 已做），新增第 8 条已知限制「发布流程仍是手工序列」
+
+---
+
+### M6.19 (2026-08-27) — 修复：发布版通用嗅探全废（`catch_lite.js` 未进包）
+
+#### 现象
+
+用户在安装版里解析非平台链接，得到
+`[嗅探失败] silidm.com — catch_lite.js 加载失败；安装包可能损坏`。
+即**通用嗅探在发布版 100% 不可用**——而开发环境下一直正常。
+
+#### 根因
+
+`scripts/build_exe.py` 从未给 `catch_lite.js` 加 `--add-data`。
+
+关键认知：**`--collect-submodules doubi` 只收 Python 模块，不收数据文件**。
+`core/sniffer.py` 用 `importlib.resources.files("doubi.platforms.generic")`
+读这个 JS——`importlib` 让**路径**在冻结后仍正确，但它管不了**文件有没有进包**。
+两件事被长期混为一谈，旧 docstring 里那句「resource access via importlib 是
+PyInstaller 友好的方式」正是这个误解的载体（本次已改写）。
+
+证据链：
+
+- `dist/doubi-gui/_internal/doubi/` 递归列举只有 3 个文件
+  （`ui/locales/en.json`、`ui/locales/zh_CN.json`、`ui/resources/icon_template.svg`），
+  恰好就是当时 `--add-data` 的三个来源，`catch_lite.js` 不在其中
+- `git log -- scripts/build_exe.py` 显示嗅探特性提交 `c9ad826` 未动过这个文件
+  → **缺陷自通用嗅探引入之日就存在，不是 M6.17 精简砍掉的**；
+  M6.16 把嗅探接进四入口后它才被用户触达
+
+**为什么本地永远测不出来**：开发态 `importlib` 解析到真实 `src/` 目录，
+文件当然在；只有冻结产物（`sys._MEIPASS`）才暴露。这类缺陷的唯一拦截点
+在构建脚本本身，不在运行时测试。
+
+#### 修复
+
+`scripts/build_exe.py` 三处：`CATCH_LITE_JS` 常量、`is_file()` 预检
+（PyInstaller 对不存在的 `--add-data` 源**只告警不报错**，预检是唯一
+早失败的机会）、`--add-data f"{CATCH_LITE_JS}{sep}doubi/platforms/generic"`。
+
+验证：重建 onedir 后 `_internal/doubi/platforms/generic/catch_lite.js` 存在，
+9036 字节，SHA256 与源文件**逐字节一致**（`1E77A0B1…`）。
+
+#### 顺带排查了同类风险（结论：只有这一个是 bug）
+
+枚举 `src/doubi` 下全部 7 个非 `.py` 文件并逐个判定是否运行时读取：
+
+| 文件 | 判定 |
+|---|---|
+| `catch_lite.js` | **硬依赖**，无兜底，缺失即功能死 → 真 bug |
+| `en.json` / `zh_CN.json` / `icon_template.svg` | 已有 `--add-data` |
+| `icon.png` | **有保护的兜底**：`_render_png` 仅在 QtSvg 不可用时走到，且先 `is_file()` → 安全降级 |
+| `icon.svg` | 归档设计源，不参与渲染 |
+| `icon.ico` | 走 `--icon`，编译进 exe 资源 |
+
+即 `icon.png`/`icon.svg` 不打包是**有意的体积决策**，不是漏打包。
+
+#### 测试加固（`tests/test_packaging_slim.py` 13 → 17 条）
+
+原有 13 条守卫全绿却漏掉了这个 bug，所以新守卫**不硬编码文件名**，而是
+AST 扫描 `resources.files(pkg).joinpath(name)` 的调用点，再与 AST 解析出的
+`--add-data` 目标集合求差——**未来任何新资源自动纳入覆盖**。
+
+- `test_every_importlib_resource_exists_in_the_repo`
+- `test_every_non_py_resource_read_at_runtime_has_an_add_data_entry`（核心）
+- `test_build_script_preflights_every_add_data_source_file`
+- `test_catch_lite_js_is_the_only_source_of_the_injected_script`
+
+**变异验证**：删掉那行 `--add-data` 后，测试精确报出
+`sniffer.py:318 运行时要读 doubi.platforms.generic/catch_lite.js，
+但 build_exe.py 里没有对应的 --add-data 目标`，并列出现有目标供比对；
+文件字节级还原。绿测试不等于有效测试，必须这么验一遍。
+
+两条新测试第一版是**红的**，且红得有价值：
+
+- `ui/i18n.py:83` 读的是 `doubi.ui/locales` 这个**目录**
+  → 断言从 `is_file()` 放宽为 `exists()`（资源可以是目录）
+- 遍历全部 `ast.JoinedStr` 把预检的中文报错消息也当成了 `--add-data` 目标
+  → 改为严格按「列表里紧跟 `--add-data` 的那个元素」配对
+
+#### 影响与后续
+
+已发布的 `DouBi-Setup-0.3.0.exe` 的通用嗅探**不可用**，需重新发版才能修好；
+平台适配器（抖音/B站等）走独立代码路径，**不受影响**。
+
+---
+
+### M6.20 (2026-08-27) — 修复：HLS 下载全废（三个独立根因叠加）
+
+用户反馈「解析能成功，但下载失败」。UI 只显示 `engine returned False`，
+输出目录被创建但为空。排查下来是**三个彼此独立**的缺陷叠在一起，
+任何一个单独存在都足以让 https m3u8 下载 100% 失败。
+
+#### 根因 A：捆绑的 ffmpeg 没有 TLS 后端
+
+`tools/nm3u8dl/ffmpeg.exe` 是 N_m3u8DL-CLI 自带的 2019 定制构建
+（`N-94813-g85386c36e3-ffmpeg-for-N_m3u8DL-CLI`，gcc 8.2.0），
+编译时**未启用任何 TLS 后端**。喂它 https 播放列表会立刻退出：
+
+```
+https protocol not found, recompile FFmpeg with openssl, gnutls
+or securetransport enabled.
+```
+
+这个 ffmpeg 原本只承担 N_m3u8DL-CLI 的**本地 .ts 合并**职责——
+https 分片是 .NET 侧自己下的。而 N_m3u8DL-CLI 的二进制并没有进包
+（`nm3u8dl.py::_find_cli()` 也缺 `sys._MEIPASS` 分支），
+于是 ffmpeg 被直接递上了 https 播放列表。现实中 m3u8 几乎全是 https，
+所以这不是偶发，而是**必然失败**。
+
+修复：`_ffmpeg_supports_https()` 用 `-protocols` 探测能力（`lru_cache` 缓存，
+`CREATE_NO_WINDOW` 避免窗口闪烁），`_can_ffmpeg_fetch()` 在路由前拦截。
+关键改动是**判据从「ffmpeg 是否存在」变成「ffmpeg 是否胜任」**——
+旧代码只在 ffmpeg *缺失* 时回退 aiohttp，ffmpeg *无能* 时不会回退。
+
+#### 根因 B：分片 URL 用字符串拼接而非 urljoin
+
+`_fetch_segments` 原本 `base + line`。播放列表里混着三种 URI 形态，
+其中**根相对**形式（`/video/adjump/time/*.ts`，注入的广告分片）被拼成
+`.../bfc23af8d1b2//video/adjump/...`——多一个斜杠，源站回 404。
+真实案例 2835 个分片里有 18 个这种广告分片，下载在第 284 个分片处整体崩掉。
+
+修复：改用 `urljoin(url, line)`，三种形态统一正确解析。
+
+#### 根因 C：真实错误被 pipeline 吞掉
+
+`_ENGINE_ERROR_PREFIXES` 里缺 `m3u8 engine error:` 和 `无法创建输出目录`，
+`_wrap_engine_progress` 因此从不捕获它们，`last_error` 退化成毫无信息量的
+`engine returned False`——这正是用户唯一能看到的东西。**诊断信息的缺失
+本身就是一个 bug**：它让上面两个根因在整个排查前期都是隐形的。
+
+修复：补齐两个前缀（8 → 10 条）。
+
+#### 连带修复：分片下载器改为并发 + 分片级重试
+
+根因 A 的二阶后果值得单独记一笔：既然 ffmpeg 无法处理 https，
+aiohttp 分片下载器就**从「降级备选」升格为唯一可行路径**，
+它的性能与健壮性因此从次要变成关键。
+
+- **并发**：原实现是严格顺序 `for` 循环，2835 分片约需 10 分钟。
+  改为 `asyncio.Semaphore` 限流的 `gather`，复用 yt-dlp / aria2 已在用的
+  `concurrent_fragments` 旋钮（**不新造设置**，同名配置在所有引擎语义一致）。
+- **分片级重试**（3 次，线性退避）：这比提速更重要。按单分片 99.9% 成功率算，
+  2835 个分片一次全过的概率仅约 **5.7%**——没有重试，长播放列表几乎
+  注定失败，而且失败形态正是用户看到的那种「跑一半崩掉」。
+- 进度按**完成计数**而非分片下标递增，乱序完成时进度条仍单调。
+- 异常时显式 `cancel()` 并 `gather` 兄弟任务，避免 session 被提前关闭
+  引发一堆掩盖真实原因的 `Session is closed` 噪声。
+
+#### 打包缺口（自查发现，属发版阻断级）
+
+`grep` 发现 `build_exe.py` 里**完全没有 aiohttp 相关条目**。
+在根因 A 修复之前这只是隐患，之后则是**发版阻断**。两个原因说明
+仅靠静态分析不可靠：
+
+1. `m3u8.py` / `direct_http.py` 里是**函数内延迟导入** `import aiohttp`；
+2. `multidict` / `yarl` / `propcache` / `frozenlist` 都带 C 扩展（`.pyd`）。
+
+漏包的表现是**运行时** `ModuleNotFoundError`，构建期毫无征兆。
+修复：显式 `--collect-all aiohttp / multidict / yarl`。
+
+#### 验证
+
+有界端到端验证（**刻意不整片下载**——那等于实际抓取一部完整影视作品，
+既不必要也不合适；修复的正确性可以用有界方式精确证明）：
+
+| 检查项 | 结果 |
+|---|---|
+| `_can_ffmpeg_fetch` | `False` + 明确的无 TLS 告警（根因 A 生效） |
+| 分片总数 | 2835 |
+| 双斜杠 URL 数 | **0**（根因 B 生效） |
+| 广告分片 | 18 个，`HEAD` 全部 200 |
+| 24 分片顺序 vs 并发 | **10.03s → 3.31s**，输出字节完全一致 |
+| 新包 aiohttp 链 | PYZ 内 `aiohttp` 54 / `aiosignal` 1 / `aiohappyeyeballs` 5 / `attr` 13 个模块 + 4 个 `.pyd`；8 个模块**真实导入成功**（带来源断言，排除开发环境 site-packages 假阳性），旧包同项为 **0** |
+| 静默装卸（新包） | 安装/卸载退出码均 **0**；落盘 **1003 文件 / 687.4 MB**（= onedir 1002 + `uninstall.exe`），与构建目录逐项吻合 |
+| 装后关键文件 | `catch_lite.js` 8.8 KB、`ffmpeg.exe` 11174.5 KB、`_ssl.pyd` 177.7 KB、`_socket.pyd` 84.7 KB 全部在位 |
+| `EnsureAppClosed` | **故意开着程序卸载**：卸载前 1 个进程 → 卸载后 **0 个**，目录清空，`~/.doubi` 完好保留 |
+| 装后启动 | 标题栏「豆比下载 0.3.0 · 多平台视频下载器 - DouBi」（真实译文非键名），`Responding=True`，内存 152.1 MB |
+
+#### 重打 0.3.0 安装包（第二次）：215.46 MB → 219.02 MB
+
+补进 aiohttp 全链的代价，**这不是体积回退而是功能必需**——打包后的 ffmpeg
+无 TLS 后端（根因 A），aiohttp 成了 https 分片下载的唯一可行路径：
+
+| 项 | M6.17 精简后 | M6.20 修复后 | 变化 |
+|---|---|---|---|
+| onedir | 678.5 MB / 881 文件 | **687.4 MB / 1002 文件** | +8.9 MB / +121 文件 |
+| NSIS 安装包 | 215.46 MB | **219.02 MB** | +3.56 MB（+1.7%） |
+| 压缩率 | 31.7% | 31.8% | — |
+
+发布指纹。这一份**同时取代两个旧构建**（发版时务必替换线上资产）：
+
+| 构建 | 字节 | SHA256 | 状态 |
+|---|---|---|---|
+| M6.17 精简版 | 225,926,086 | `e833f155…54ddbe` | **已发布到 GitHub，必须替换** |
+| M6.19 `catch_lite` 修复版 | 225,938,999 | `59389653…390c2b` | 仅本地，从未发布 |
+| **M6.20 本版** | **229,657,135** | `5d28ba83…b03eae` | **应发布** |
+
+| 项 | 值 |
+|---|---|
+| 文件 | `dist/DouBi-Setup-0.3.0.exe` |
+| 字节 | `229657135`（219.02 MB） |
+| SHA256 | `5d28ba835acd4daf31685f5773edb6b0ee04acc861152b01724f8ac120b03eae` |
+| NSIS CRC | `0xB1919CD7` |
+| 构建时间 | 2026-08-27 13:30:34 |
+
+侧签 `DouBi-Setup-0.3.0.exe.sha256` 与 `SHA256SUMS.txt` 已同步重写
+（88 字节、LF、无 BOM，格式 `<hash> *<filename>`）。**这两个文件之前还留着
+M6.17 的 `e833f155…`，与实际 exe 不匹配** —— 任何照它校验的人都会失败，
+所以重打包后必须连侧签一起更新，不能只换 exe。已用 `Get-FileHash` 与
+`certutil` 两种独立工具交叉验证一致。
+
+> 查残留的坑：`Get-ChildItem -Filter *webengine*` 会命中
+> `_internal\qframelesswindow\webengine\` 这个**目录名**（内含一个 756 B 的
+> `__init__.py`），看起来像「精简失效」。按**文件**计残留为 **0**，且
+> `Qt6WebEngineCore.dll` / `qtwebengine_resources.pak` /
+> `qtwebengine_devtools_resources.debug.pak` / `QtWebEngineCore.pyd`
+> 四项全为 0——判定残留要数文件，不能数条目。
+
+新增 34 条回归测试：
+
+- `tests/test_engine_routing.py` +29（`TestFfmpegHttpsCapability` 10、
+  `TestSegmentUrlResolution` 5、`TestSegmentDownloadConcurrency` 8、
+  错误识别 3、真实服务器行为编排替身 `_FakeSegmentServer`）
+- `tests/test_packaging_slim.py` +5（aiohttp 栈必须被收集 / 已声明 / 未被排除）
+
+其中 `test_all_m3u8_emitted_prefixes_registered` 守护的是**根因 C 的模式**
+而非症状：它遍历引擎真实发出的消息，确保「引擎发什么」与「pipeline 认什么」
+这两份手工维护的清单不再脱节。
+
+#### 影响与后续
+
+已发布的 `DouBi-Setup-0.3.0.exe` 的 **HLS（m3u8）下载完全不可用**，
+需重新发版；走 yt-dlp 的平台（抖音/B站/YouTube）**不受影响**
+（用户的 bilibili 54.4 MB、douyin 8.3 MB 文件均正常）。
+
+---
+
 ### 统计
 - 源码：~18,600 行（相较 0.2.0 净增约 700 行，主要是 supervisor + 嗅探器）
 - 新文件：`engines/_subproc.py`，`engines/base.py` 增加 filename/cancel helpers
@@ -835,8 +1130,18 @@ G8 那两条硬规则全程遵守，没有因为「包变小了」就放松：
   - `tests/test_mcp.py` 新增 `TOOLS`/`_HANDLERS` 同集守卫
   - 基线演进：381 → 403 → 423 → 450 → 687 → 713 → **673（非 GUI 口径）**
 - M6.17 收尾后：新增 `tests/test_packaging_slim.py`（13 条打包约束守卫，3 条变异验证）
-- 打包产物：onedir **1501.8 MB / 4005 文件 → 678.5 MB / 881 文件**（−54.8%）
-- NSIS 安装包：**441.31 MB → 215.46 MB**（−51.2%，静默装卸 + CRC footer 全验证通过）
+- M6.19 收尾后：`catch_lite.js` 的 `--add-data` 守卫入网（精简版嗅探回归）
+- M6.20 收尾后：**846 passed / 4 skipped / 28 deselected（`-m "not slow"`，203s）**
+  - `tests/test_engine_routing.py`：47 → **76**（+29；ffmpeg TLS 能力探测 10、
+    分片 URL 解析 5、并发与重试 8、错误前缀识别 3，其余为既有用例）
+  - `tests/test_packaging_slim.py`：17 → **22**（+5；aiohttp/multidict/yarl
+    三包 `--collect-all` 正反向守卫。此处是 parametrize 展开后的用例数，
+    与上文 M6.17「13 条」的函数口径不同）
+  - 基线演进：381 → 403 → 423 → 450 → 687 → 713 → 838 → **846**
+- 打包产物：onedir **1501.8 MB / 4005 文件 → 678.5 MB / 881 文件**（−54.8%），
+  M6.20 补 aiohttp 全链后为 **687.4 MB / 1002 文件**（当前值）
+- NSIS 安装包：**441.31 MB → 215.46 MB**（−51.2%），M6.20 后 **219.02 MB**（当前值，
+  `sha256 5d28ba83…b03eae`，静默装卸 + `EnsureAppClosed` + CRC footer 全验证通过）
 - 仓库跟踪体积：**719 个文件 / 28.8 MB**（剔除 6.53 MB 冗余 zip 后）
 
 ---

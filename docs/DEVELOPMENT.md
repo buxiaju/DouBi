@@ -1570,6 +1570,14 @@ return YtDlpEngine()
 - 删除临时调试脚本（`_diag*.py`、`_probe*.py`、`_repro*.py`、`_win_check.log` 等）。PowerShell 删不掉时用 Python：`python -c "import os; os.remove('...')"`。
 - 不要提交 `doubi.db`、`Downloaded/`、`download_manifest.jsonl`、`_test_live/`（运行产物）。
 
+### 推送：本仓库有两个远端，别推错
+- `Github` → `git@github.com:buxiaju/DouBi.git`（**不叫 `origin`**）
+- `origin` → `https://gitee.com/buxiaju/dou-bi.git`（Gitee）
+- 默认分支是 **`master`**，且本地 `master` 的 upstream 是 `origin/master`，
+  所以裸跑 `git push` 会推到 **Gitee**。推 GitHub 要写全：
+  `git push Github master:master`。
+- 发版打 tag 的顺序、SSH 配置、标签打错的补救，见 `docs/BUILD.md` §8.1–§8.4。
+
 ---
 
 ## 18. 已知限制与路线图
@@ -1581,12 +1589,21 @@ return YtDlpEngine()
 3. **GUI 尚未实现**：已完成列表排序、章节下载。
    （M6.2 已补上：全部/单任务暂停恢复、弹幕、字幕、NFO；**M6.10 已补上跨进程恢复**，见 §13.2.1）
 4. **REST/MCP 的容器支持**：容器统计已修正（读 pipeline 写的 `child_count` / `downloaded_count` / `failed_count`），但仍是「整个容器一个 job」，无法单独重试其中某一子项。
-5. **没有 i18n**：全中文硬编码。
+5. ~~**没有 i18n**~~ **M6.14 已做**（见 §16.5）：自研 JSON 词典 + `tr()`，
+   内置 `zh_CN` / `en`，设置页可切换。新增字符串仍需手工补两份词典，
+   漏补时回退到 key 本身（打包期漏收 locales 会让全 UI 显示 key，
+   见 CHANGELOG G7）。
 6. **配置只读一次**：GUI 保存后需重启才生效的部分（代理等）没有提示重启。
 7. **CI 自动化但本地打包仍需手动**：「手动 dispatch 跑 build.yml」可发现
-   「现在的 main 分支能不能成功打包」，但日常 dev 迭代还是要本地跑
+   「现在的 master 分支能不能成功打包」，但日常 dev 迭代还是要本地跑
    ``scripts/build_installer.py``——CI 不是 dev loop 的替代品，只是不
    再依赖人记得跑。
+8. **发布流程仍是手工序列**：推 commit → 打 tag → 填 Release 正文 → 传资产
+   全靠人按顺序执行，没有守卫。0.3.0 因此踩了两个坑（tag 建在 release
+   commit 之前导致源码包错版本；Release 正文粘贴截断丢了 SHA256 校验段）。
+   补救靠 `docs/BUILD.md` §8.3 的固定顺序和 §7 的「发布后线上核对」清单，
+   **不是代码层面的保证**。另外强推 `v*` tag 会触发 CI 重建并可能覆盖
+   已验证的安装包资产（§8.4）。
 
 ### 对齐 Bili23 的路线图（已识别未做）
 
