@@ -15,9 +15,12 @@ import asyncio
 import logging
 import re
 import shutil
+import subprocess
 import tempfile
+from functools import lru_cache
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urljoin
 
 from ..core.models import DownloadOptions, MediaItem
 from ..core.storage.file_layout import resolve_item_dir
@@ -44,6 +47,16 @@ _VIDEO_EXT = {"mp4", "m4v", "webm", "ts", "flv", "mkv", "avi", "mov"}
 # ffmpeg progress line parser — extracts current time and total duration.
 # Typical: "frame=  123 fps= 45 q=23.0 size=    1024kB time=00:00:05.12 bitrate= 1600kbits/s speed=   25x"
 _PROGRESS_TIME_RE = re.compile(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)")
+
+# The packaged GUI is windowed, so any synchronous subprocess we spawn
+# must not flash a console. Only defined on Windows.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+# 分片级重试。一条 VOD 播放列表常有数千个分片，按每个分片 99.9% 的成功率
+# 算，2835 个分片一次跑通的概率也只有约 5.7%——所以重试不是「锦上添花」，
+# 而是让长播放列表能够下完的必要条件。退避按尝试次数线性增长。
+_SEGMENT_MAX_ATTEMPTS = 3
+_SEGMENT_RETRY_BACKOFF = 0.5
 
 # Common ffmpeg error patterns that indicate the HLS stream is valid
 # but unplayable with current settings.
@@ -73,6 +86,39 @@ def _resolve_ffmpeg() -> Optional[str]:
     if on_path:
         return on_path
     return None
+
+
+@lru_cache(maxsize=8)
+def _ffmpeg_supports_https(ffmpeg_path: str) -> bool:
+    """Whether this ffmpeg binary was built with a TLS backend.
+
+    Not every ffmpeg can fetch ``https://`` URLs. The copy we bundle is
+    the custom build shipped with N_m3u8DL-CLI, compiled *without*
+    openssl/gnutls because its only job there was concatenating already
+    downloaded local ``.ts`` files. Handing it an https playlist yields::
+
+        https protocol not found, recompile FFmpeg with openssl, gnutls
+        or securetransport enabled.
+
+    ``-protocols`` lists what the binary can actually do, so we ask it
+    once and cache the answer per path. A probe failure is treated as
+    "no https" so we degrade to the aiohttp downloader rather than
+    launching a doomed subprocess.
+    """
+    try:
+        proc = subprocess.run(
+            [ffmpeg_path, "-hide_banner", "-protocols"],
+            capture_output=True,
+            timeout=10,
+            check=False,
+            creationflags=_NO_WINDOW,
+        )
+    except (OSError, subprocess.SubprocessError):
+        logger.warning("[m3u8] could not probe ffmpeg protocols: %s", ffmpeg_path)
+        return False
+
+    listing = (proc.stdout + proc.stderr).decode("utf-8", errors="replace")
+    return any(line.strip() == "https" for line in listing.splitlines())
 
 
 def _parse_time_to_seconds(hms: str) -> float:
@@ -134,14 +180,36 @@ class M3u8Engine(Engine):
         ext = self._sanitize_output_ext(raw_ext)
         output_path = output_path_under(out_dir, basename, ext)
 
-        if self._ffmpeg:
+        if self._ffmpeg and self._can_ffmpeg_fetch(item.source_url):
             return await self._download_via_ffmpeg(
                 item, output_path, options, on_progress
             )
-        logger.warning("ffmpeg not found, falling back to aiohttp segment downloader")
+        logger.warning("ffmpeg unusable for this URL, falling back to aiohttp segment downloader")
         return await self._download_via_aiohttp(
             item, output_path, options, on_progress
         )
+
+    def _can_ffmpeg_fetch(self, url: str) -> bool:
+        """Whether handing *url* to ffmpeg can possibly work.
+
+        Guards the one case that always failed silently: an https
+        playlist given to a ffmpeg built without TLS. ffmpeg exits 1
+        with "Protocol not found" before writing a single byte, and
+        because the aiohttp fallback was only chosen when ffmpeg was
+        *missing* (not when it was incapable), the download died there
+        instead of degrading.
+        """
+        if not self._ffmpeg:
+            return False
+        if not url.lower().startswith("https"):
+            return True
+        if _ffmpeg_supports_https(self._ffmpeg):
+            return True
+        logger.warning(
+            "[m3u8] %s was built without TLS support; cannot fetch https playlist",
+            self._ffmpeg,
+        )
+        return False
 
     # ------------------------------------------------------------------
     # ffmpeg path — the robust, production-grade route
@@ -345,17 +413,18 @@ class M3u8Engine(Engine):
                 resp.raise_for_status()
                 text = await resp.text()
 
-        base = url.rsplit("/", 1)[0] + "/"
-        lines = text.splitlines()
         segments: list[str] = []
-        for line in lines:
+        for line in text.splitlines():
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
-            if line.startswith("http"):
-                segments.append(line)
-            else:
-                segments.append(base + line)
+            # urljoin, not string concatenation: playlists mix relative
+            # ("seg-1.ts"), root-relative ("/video/adjump/x.ts", common for
+            # injected ad segments) and absolute URIs. Naive concatenation
+            # turns the root-relative form into ".../dir//video/..." — a
+            # double slash the origin answers with 404, killing the whole
+            # download mid-way.
+            segments.append(urljoin(url, line))
         return segments
 
     async def _download_and_concat(
@@ -368,27 +437,71 @@ class M3u8Engine(Engine):
     ) -> None:
         tmp_dir = Path(tempfile.mkdtemp(prefix="doubi_m3u8_"))
         cancel_flag = getattr(options, "cancel_check", None)
+        total = len(segments)
+        # Reuse the knob yt-dlp 和 aria2 已经在用的 ``concurrent_fragments``，
+        # 而不是新造一个：同一个设置在所有引擎上应当含义一致。
+        limit = max(1, int(getattr(options, "concurrent_fragments", 4) or 1))
+        sem = asyncio.Semaphore(limit)
+        done = 0
 
-        try:
-            async with aiohttp.ClientSession() as session:
-                for idx, seg_url in enumerate(segments):
+        async def fetch_one(session, idx: int, seg_url: str) -> None:
+            nonlocal done
+            seg_path = tmp_dir / f"seg_{idx:05d}.ts"
+            async with sem:
+                for attempt in range(1, _SEGMENT_MAX_ATTEMPTS + 1):
                     if cancel_flag_polling(cancel_flag):
                         raise asyncio.CancelledError("aiohttp m3u8 download stopped")
-                    seg_path = tmp_dir / f"seg_{idx:05d}.ts"
-                    async with session.get(seg_url, proxy=options.proxy, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                        resp.raise_for_status()
-                        seg_data = await resp.read()
-                    seg_path.write_bytes(seg_data)
+                    try:
+                        async with session.get(seg_url, proxy=options.proxy) as resp:
+                            resp.raise_for_status()
+                            seg_data = await resp.read()
+                        seg_path.write_bytes(seg_data)
+                        break
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        # 一条播放列表动辄上千分片，偶发的连接重置/超时几乎
+                        # 必然发生。没有重试的话，任何一次抖动都会让整场
+                        # 下载前功尽弃，这正是之前用户看到的失败形态。
+                        if attempt >= _SEGMENT_MAX_ATTEMPTS:
+                            raise RuntimeError(
+                                f"segment {idx + 1}/{total} failed after "
+                                f"{attempt} attempts: {exc}"
+                            ) from exc
+                        logger.warning(
+                            "[m3u8] segment %d/%d attempt %d failed (%s), retrying",
+                            idx + 1, total, attempt, exc,
+                        )
+                        await asyncio.sleep(_SEGMENT_RETRY_BACKOFF * attempt)
 
-                    if on_progress:
-                        frac = (idx + 1) / len(segments)
-                        on_progress(EngineProgress(
-                            fraction=frac,
-                            message=f"下载分片 {idx + 1}/{len(segments)}",
-                        ))
+            done += 1
+            if on_progress:
+                # done 按「完成顺序」递增而非分片下标，因此进度条始终单调。
+                on_progress(EngineProgress(
+                    fraction=done / total,
+                    message=f"下载分片 {done}/{total}",
+                ))
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=None, sock_connect=15, sock_read=30)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                tasks = [
+                    asyncio.create_task(fetch_one(session, idx, seg_url))
+                    for idx, seg_url in enumerate(segments)
+                ]
+                try:
+                    await asyncio.gather(*tasks)
+                except BaseException:
+                    # 必须显式取消并等待兄弟任务收敛：否则 session 会在它们
+                    # 还在飞的时候被 __aexit__ 关掉，抛出一堆掩盖真实原因的
+                    # "Session is closed" 噪声。
+                    for task in tasks:
+                        task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    raise
 
             with open(output_path, "wb") as out_f:
-                for idx in range(len(segments)):
+                for idx in range(total):
                     seg_path = tmp_dir / f"seg_{idx:05d}.ts"
                     out_f.write(seg_path.read_bytes())
         finally:

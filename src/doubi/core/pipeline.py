@@ -730,10 +730,12 @@ class DownloadPipeline:
         "yt-dlp reported",
         "m3u8 download failed:",
         "m3u8 download error:",
+        "m3u8 engine error:",
         "direct_http error:",
         "neither ffmpeg nor aiohttp",
         "aiohttp is required",
         "nm3u8dl",
+        "无法创建输出目录",
     )
 
     @classmethod

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -364,6 +365,409 @@ class TestEngineErrorRecognition:
 
     def test_nm3u8dl_error_detected(self):
         assert DownloadPipeline._is_engine_error("nm3u8dl failed to download") is True
+
+    def test_m3u8_engine_error_detected(self):
+        """M6.20: m3u8.py 的 ffmpeg 失败走的是 'm3u8 engine error:' 前缀。
+
+        此前该前缀未注册，导致 pipeline 捕获不到真实原因，
+        用户看到的是无意义的 "engine returned False"。
+        """
+        assert DownloadPipeline._is_engine_error(
+            "m3u8 engine error: Protocol not found"
+        ) is True
+
+    def test_output_dir_error_detected(self):
+        """M6.20: 输出目录创建失败也必须透传，而非退化为通用文案。"""
+        assert DownloadPipeline._is_engine_error(
+            "无法创建输出目录 D:\\x: [WinError 5] Access is denied"
+        ) is True
+
+    def test_all_m3u8_emitted_prefixes_registered(self):
+        """守护「引擎发出的消息」与「pipeline 识别的前缀」不再脱节。
+
+        这是根因C的本质：两处清单靠人工同步。逐条断言 m3u8 引擎
+        实际会发出的每种错误消息都能被识别。
+        """
+        emitted = (
+            "m3u8 engine error: output file empty or missing",
+            "m3u8 download error: no segments found in playlist",
+            "Neither ffmpeg nor aiohttp is available for m3u8 download",
+        )
+        for message in emitted:
+            assert DownloadPipeline._is_engine_error(message) is True, message
+
+
+# ===========================================================================
+# M6.20 修复A：ffmpeg https 能力检测
+# ===========================================================================
+
+
+class TestFfmpegHttpsCapability:
+    """捆绑的 ffmpeg 是 N_m3u8DL-CLI 的 2019 定制构建，编译时未启用任何
+    TLS 后端。喂给它 https 播放列表会立刻 exit 1（Protocol not found），
+    一个字节都写不出。而此前只在 ffmpeg **缺失**时才回退 aiohttp，
+    ffmpeg **无能力**这一情形没有覆盖，于是 https HLS 必然失败。
+    """
+
+    def _probe(self, stdout: bytes):
+        from doubi.engines import m3u8 as m3u8_mod
+
+        m3u8_mod._ffmpeg_supports_https.cache_clear()
+        completed = MagicMock()
+        completed.stdout = stdout
+        completed.stderr = b""
+        with patch.object(m3u8_mod.subprocess, "run", return_value=completed) as run:
+            result = m3u8_mod._ffmpeg_supports_https("C:\\fake\\ffmpeg.exe")
+        m3u8_mod._ffmpeg_supports_https.cache_clear()
+        return result, run
+
+    def test_detects_https_support(self):
+        listing = b"Input:\n  file\n  http\n  https\n  tcp\n  tls\n"
+        result, _ = self._probe(listing)
+        assert result is True
+
+    def test_detects_missing_https(self):
+        """这正是捆绑 ffmpeg 的真实输出形态：有 http 但没有 https。"""
+        listing = b"Input:\n  file\n  http\n  tcp\n"
+        result, _ = self._probe(listing)
+        assert result is False
+
+    def test_does_not_match_substring(self):
+        """协议名必须整行精确匹配。
+
+        'httpproxy' 含子串 'http'，若用 in 判断会误判；
+        这里确认没有 https 行时结果为 False。
+        """
+        listing = b"Input:\n  http\n  httpproxy\n"
+        result, _ = self._probe(listing)
+        assert result is False
+
+    def test_probe_failure_degrades_to_false(self):
+        """探测本身失败时宁可回退 aiohttp，也不要启动一个注定失败的子进程。"""
+        from doubi.engines import m3u8 as m3u8_mod
+
+        m3u8_mod._ffmpeg_supports_https.cache_clear()
+        with patch.object(m3u8_mod.subprocess, "run", side_effect=OSError("boom")):
+            assert m3u8_mod._ffmpeg_supports_https("C:\\fake\\ffmpeg.exe") is False
+        m3u8_mod._ffmpeg_supports_https.cache_clear()
+
+    def test_result_is_cached(self):
+        """同一路径只探测一次——下载每个分片都 spawn 一次进程不可接受。"""
+        listing = b"Input:\n  https\n"
+        from doubi.engines import m3u8 as m3u8_mod
+
+        m3u8_mod._ffmpeg_supports_https.cache_clear()
+        completed = MagicMock()
+        completed.stdout = listing
+        completed.stderr = b""
+        with patch.object(m3u8_mod.subprocess, "run", return_value=completed) as run:
+            m3u8_mod._ffmpeg_supports_https("C:\\cached\\ffmpeg.exe")
+            m3u8_mod._ffmpeg_supports_https("C:\\cached\\ffmpeg.exe")
+            assert run.call_count == 1
+        m3u8_mod._ffmpeg_supports_https.cache_clear()
+
+    def test_can_fetch_http_without_probing(self):
+        """明文 http 不需要 TLS，不该浪费一次探测。"""
+        engine = M3u8Engine(ffmpeg_path="C:\\fake\\ffmpeg.exe")
+        from doubi.engines import m3u8 as m3u8_mod
+
+        with patch.object(m3u8_mod, "_ffmpeg_supports_https") as probe:
+            assert engine._can_ffmpeg_fetch("http://example.com/a.m3u8") is True
+            probe.assert_not_called()
+
+    def test_can_fetch_https_requires_tls(self):
+        engine = M3u8Engine(ffmpeg_path="C:\\fake\\ffmpeg.exe")
+        from doubi.engines import m3u8 as m3u8_mod
+
+        with patch.object(m3u8_mod, "_ffmpeg_supports_https", return_value=False):
+            assert engine._can_ffmpeg_fetch("https://example.com/a.m3u8") is False
+        with patch.object(m3u8_mod, "_ffmpeg_supports_https", return_value=True):
+            assert engine._can_ffmpeg_fetch("https://example.com/a.m3u8") is True
+
+    @pytest.mark.asyncio
+    async def test_download_falls_back_when_ffmpeg_lacks_tls(self, tmp_path):
+        """端到端路由断言：ffmpeg 存在但不支持 https 时走 aiohttp 分支。"""
+        engine = M3u8Engine(ffmpeg_path="C:\\fake\\ffmpeg.exe")
+        item = _make_item(source_url="https://example.com/index.m3u8", is_hls=True)
+        from doubi.engines import m3u8 as m3u8_mod
+
+        with patch.object(m3u8_mod, "_ffmpeg_supports_https", return_value=False), \
+                patch.object(engine, "_download_via_ffmpeg", new_callable=AsyncMock) as via_ff, \
+                patch.object(engine, "_download_via_aiohttp", new_callable=AsyncMock) as via_ai:
+            via_ai.return_value = True
+            ok = await engine.download(item, DownloadOptions(output_root=tmp_path))
+
+        assert ok is True
+        via_ff.assert_not_called()
+        via_ai.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_download_uses_ffmpeg_when_tls_available(self, tmp_path):
+        engine = M3u8Engine(ffmpeg_path="C:\\fake\\ffmpeg.exe")
+        item = _make_item(source_url="https://example.com/index.m3u8", is_hls=True)
+        from doubi.engines import m3u8 as m3u8_mod
+
+        with patch.object(m3u8_mod, "_ffmpeg_supports_https", return_value=True), \
+                patch.object(engine, "_download_via_ffmpeg", new_callable=AsyncMock) as via_ff, \
+                patch.object(engine, "_download_via_aiohttp", new_callable=AsyncMock) as via_ai:
+            via_ff.return_value = True
+            ok = await engine.download(item, DownloadOptions(output_root=tmp_path))
+
+        assert ok is True
+        via_ff.assert_awaited_once()
+        via_ai.assert_not_called()
+
+
+# ===========================================================================
+# M6.20 修复B：分片 URL 用 urljoin 解析
+# ===========================================================================
+
+
+class TestSegmentUrlResolution:
+    """播放列表里三种 URI 形态必须都能解析对。
+
+    真实案例：silidm.com 的 2835 分片播放列表里混入了 18 个根相对的
+    广告分片 /video/adjump/time/*.ts。旧代码 base + line 拼出
+    ".../bfc23af8d1b2//video/adjump/..."（双斜杠）→ 404，
+    下载在第 284 个分片处整体崩掉。
+    """
+
+    PLAYLIST_URL = "https://v.example.com/video/show/bfc23af8d1b2/index.m3u8"
+
+    def _resolve(self, playlist_text: str) -> list[str]:
+        engine = M3u8Engine(ffmpeg_path="C:\\fake\\ffmpeg.exe")
+
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.text = AsyncMock(return_value=playlist_text)
+
+        resp_ctx = MagicMock()
+        resp_ctx.__aenter__ = AsyncMock(return_value=resp)
+        resp_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        session = MagicMock()
+        session.get = MagicMock(return_value=resp_ctx)
+
+        session_ctx = MagicMock()
+        session_ctx.__aenter__ = AsyncMock(return_value=session)
+        session_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        fake_aiohttp = MagicMock()
+        fake_aiohttp.ClientSession = MagicMock(return_value=session_ctx)
+
+        return asyncio.run(
+            engine._fetch_segments(
+                fake_aiohttp,
+                self.PLAYLIST_URL,
+                DownloadOptions(),
+            )
+        )
+
+    def test_relative_segment(self):
+        segments = self._resolve("#EXTINF:1.0,\nseg-1.ts\n")
+        assert segments == [
+            "https://v.example.com/video/show/bfc23af8d1b2/seg-1.ts"
+        ]
+
+    def test_root_relative_segment_has_no_double_slash(self):
+        """回归根因B：根相对分片必须挂到站点根，而不是拼在目录后面。"""
+        segments = self._resolve("#EXTINF:1.0,\n/video/adjump/time/17873200.ts\n")
+        assert segments == ["https://v.example.com/video/adjump/time/17873200.ts"]
+        assert "//video" not in segments[0].removeprefix("https://")
+
+    def test_absolute_segment_preserved(self):
+        segments = self._resolve("#EXTINF:1.0,\nhttps://cdn.other.com/x.ts\n")
+        assert segments == ["https://cdn.other.com/x.ts"]
+
+    def test_comments_and_blank_lines_skipped(self):
+        playlist = (
+            "#EXTM3U\n"
+            "#EXT-X-VERSION:3\n"
+            "#EXT-X-PLAYLIST-TYPE:VOD\n"
+            "\n"
+            "#EXTINF:1.0,\n"
+            "seg-1.ts\n"
+            "#EXTINF:1.0,\n"
+            "seg-2.ts\n"
+            "#EXT-X-ENDLIST\n"
+        )
+        segments = self._resolve(playlist)
+        assert len(segments) == 2
+        assert segments[1].endswith("/bfc23af8d1b2/seg-2.ts")
+
+    def test_mixed_playlist_like_real_case(self):
+        """混合形态：普通分片 + 根相对广告分片，顺序与数量都要对。"""
+        playlist = (
+            "#EXTM3U\n"
+            "#EXTINF:1.0,\nseg-1.ts\n"
+            "#EXTINF:1.0,\n/video/adjump/time/1.ts\n"
+            "#EXTINF:1.0,\nseg-2.ts\n"
+        )
+        segments = self._resolve(playlist)
+        assert segments == [
+            "https://v.example.com/video/show/bfc23af8d1b2/seg-1.ts",
+            "https://v.example.com/video/adjump/time/1.ts",
+            "https://v.example.com/video/show/bfc23af8d1b2/seg-2.ts",
+        ]
+
+
+# ===========================================================================
+# M6.20 分片下载器：并发 + 分片级重试
+# ===========================================================================
+
+
+class _FakeSegmentServer:
+    """可编排的假分片服务器。
+
+    ``failures`` 形如 {分片下标: 连续失败次数}，用来精确制造「前 N 次失败、
+    第 N+1 次成功」的抖动；``inflight_peak`` 记录同时在飞的请求数上限，
+    用于断言并发确实发生、且被 concurrent_fragments 正确限流。
+    """
+
+    def __init__(self, failures: dict[int, int] | None = None):
+        self.failures = dict(failures or {})
+        self.attempts: dict[int, int] = {}
+        self.inflight = 0
+        self.inflight_peak = 0
+        self.order: list[int] = []
+
+    def _index_of(self, url: str) -> int:
+        return int(url.rsplit("-", 1)[1].split(".")[0])
+
+    def get(self, url, **kwargs):
+        idx = self._index_of(url)
+        server = self
+
+        class _Ctx:
+            async def __aenter__(self):
+                server.inflight += 1
+                server.inflight_peak = max(server.inflight_peak, server.inflight)
+                server.attempts[idx] = server.attempts.get(idx, 0) + 1
+                # 让出控制权，否则协程会一路跑到底、永远观察不到并发。
+                await asyncio.sleep(0.01)
+
+                remaining = server.failures.get(idx, 0)
+                if remaining > 0:
+                    server.failures[idx] = remaining - 1
+                    server.inflight -= 1
+                    raise OSError(f"boom on segment {idx}")
+
+                resp = MagicMock()
+                resp.raise_for_status = MagicMock()
+                resp.read = AsyncMock(return_value=f"DATA{idx}".encode())
+                return resp
+
+            async def __aexit__(self, *exc):
+                if server.inflight > 0:
+                    server.inflight -= 1
+                server.order.append(idx)
+                return False
+
+        return _Ctx()
+
+
+def _run_concat(server: _FakeSegmentServer, count: int, output_path, **opt_kwargs):
+    """驱动 _download_and_concat，返回 (progress 事件列表)。"""
+    engine = M3u8Engine(ffmpeg_path="C:\\fake\\ffmpeg.exe")
+    segments = [f"https://cdn.example.com/seg-{i}.ts" for i in range(count)]
+
+    session_ctx = MagicMock()
+    session_ctx.__aenter__ = AsyncMock(return_value=server)
+    session_ctx.__aexit__ = AsyncMock(return_value=False)
+
+    fake_aiohttp = MagicMock()
+    fake_aiohttp.ClientSession = MagicMock(return_value=session_ctx)
+    fake_aiohttp.ClientTimeout = MagicMock(return_value=object())
+
+    events: list = []
+    asyncio.run(
+        engine._download_and_concat(
+            fake_aiohttp,
+            segments,
+            output_path,
+            DownloadOptions(**opt_kwargs),
+            events.append,
+        )
+    )
+    return events
+
+
+class TestSegmentDownloadConcurrency:
+    def test_segments_are_downloaded_concurrently(self, tmp_path):
+        """旧实现是严格顺序 for 循环，峰值并发恒为 1。"""
+        server = _FakeSegmentServer()
+        out = tmp_path / "out.mp4"
+        _run_concat(server, 12, out, concurrent_fragments=4)
+        assert server.inflight_peak > 1
+        assert server.inflight_peak <= 4
+
+    def test_concurrency_respects_concurrent_fragments(self, tmp_path):
+        """复用 yt-dlp / aria2 已有的旋钮，而不是新造一个。"""
+        server = _FakeSegmentServer()
+        _run_concat(server, 12, tmp_path / "out.mp4", concurrent_fragments=2)
+        assert server.inflight_peak <= 2
+
+    def test_output_is_concatenated_in_playlist_order(self, tmp_path):
+        """并发只影响下载顺序，落盘必须严格按播放列表顺序拼接。"""
+        server = _FakeSegmentServer(failures={0: 2})
+        out = tmp_path / "out.mp4"
+        _run_concat(server, 5, out, concurrent_fragments=5)
+        assert out.read_bytes() == b"".join(f"DATA{i}".encode() for i in range(5))
+
+    def test_transient_failure_is_retried(self, tmp_path):
+        """单个分片抖动一次不应让整场下载失败。"""
+        server = _FakeSegmentServer(failures={3: 1})
+        out = tmp_path / "out.mp4"
+        _run_concat(server, 6, out, concurrent_fragments=3)
+        assert server.attempts[3] == 2
+        assert out.exists()
+
+    def test_permanent_failure_raises_with_segment_number(self, tmp_path):
+        from doubi.engines import m3u8 as m3u8_mod
+
+        server = _FakeSegmentServer(failures={2: 99})
+        with pytest.raises(RuntimeError) as excinfo:
+            _run_concat(server, 4, tmp_path / "out.mp4", concurrent_fragments=2)
+        assert "segment 3/4" in str(excinfo.value)
+        assert server.attempts[2] == m3u8_mod._SEGMENT_MAX_ATTEMPTS
+
+    def test_progress_is_monotonic_under_concurrency(self, tmp_path):
+        """乱序完成时进度条不能回退。"""
+        server = _FakeSegmentServer(failures={0: 1, 5: 1})
+        events = _run_concat(server, 8, tmp_path / "out.mp4", concurrent_fragments=4)
+        fractions = [ev.fraction for ev in events]
+        assert fractions == sorted(fractions)
+        assert fractions[-1] == pytest.approx(1.0)
+        assert len(events) == 8
+
+    def test_temp_dir_is_cleaned_up_on_failure(self, tmp_path):
+        server = _FakeSegmentServer(failures={1: 99})
+        before = set(Path(tempfile.gettempdir()).glob("doubi_m3u8_*"))
+        with pytest.raises(RuntimeError):
+            _run_concat(server, 3, tmp_path / "out.mp4", concurrent_fragments=2)
+        after = set(Path(tempfile.gettempdir()).glob("doubi_m3u8_*"))
+        assert after <= before
+
+    def test_cancellation_stops_download(self, tmp_path):
+        engine = M3u8Engine(ffmpeg_path="C:\\fake\\ffmpeg.exe")
+        server = _FakeSegmentServer()
+        segments = [f"https://cdn.example.com/seg-{i}.ts" for i in range(20)]
+
+        session_ctx = MagicMock()
+        session_ctx.__aenter__ = AsyncMock(return_value=server)
+        session_ctx.__aexit__ = AsyncMock(return_value=False)
+        fake_aiohttp = MagicMock()
+        fake_aiohttp.ClientSession = MagicMock(return_value=session_ctx)
+        fake_aiohttp.ClientTimeout = MagicMock(return_value=object())
+
+        options = DownloadOptions(concurrent_fragments=2, cancel_check=lambda: True)
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(
+                engine._download_and_concat(
+                    fake_aiohttp, segments, tmp_path / "out.mp4", options, None
+                )
+            )
+        assert not (tmp_path / "out.mp4").exists()
 
 
 # ===========================================================================
