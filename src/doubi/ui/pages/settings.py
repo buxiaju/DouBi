@@ -77,24 +77,30 @@ def _find_settings_page(widget):
 
 
 def build_settings_widgets():
-    from PySide6.QtCore import Qt, QTimer, Signal as pyqtSignal
+    from PySide6.QtCore import Qt, QTimer
+    from PySide6.QtCore import Signal as pyqtSignal
     from PySide6.QtWidgets import (
-        QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QFileDialog, QLabel,
-        QScrollArea, QSizePolicy,
+        QFileDialog,
+        QFormLayout,
+        QHBoxLayout,
+        QLabel,
+        QScrollArea,
+        QSizePolicy,
+        QVBoxLayout,
+        QWidget,
     )
     from qfluentwidgets import (
-        LineEdit, ComboBox, SwitchButton, PushButton, StrongBodyLabel,
-        InfoBar, InfoBarPosition, CardWidget,
+        CardWidget,
+        ComboBox,
+        InfoBar,
+        InfoBarPosition,
+        LineEdit,
+        PushButton,
+        StrongBodyLabel,
+        SwitchButton,
     )
 
     from ...core.config import DEFAULT_CONFIG_PATH, load_config
-    from ..theme import (
-        FONT_FAMILY, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS,
-        TYPE_CAPTION, RADIUS_CARD,
-        current_theme_name, heading_qss, muted_qss, resolve_theme, set_theme,
-        subscribe_theme, theme_labels, theme_names, token, body_qss, card_qss,
-    )
-    from ..widgets import build_page_header, build_section_divider
     from ...ui.auth_actions import (
         LoginStatus,
         bilibili_status,
@@ -103,6 +109,21 @@ def build_settings_widgets():
         import_douyin_cookies,
         import_douyin_legacy_json,
     )
+    from ..theme import (
+        SPACE_LG,
+        SPACE_MD,
+        SPACE_SM,
+        SPACE_XL,
+        current_theme_name,
+        heading_qss,
+        muted_qss,
+        resolve_theme,
+        set_theme,
+        subscribe_theme,
+        theme_labels,
+        theme_names,
+    )
+    from ..widgets import build_page_header, build_section_divider
 
     class SettingsPage(QWidget):
         # 保存后通知主窗口把 prompt_before_download 推到 parse_page，
@@ -292,7 +313,10 @@ def build_settings_widgets():
             # 语言：切换后需重启生效（已渲染的控件不会自动重译），
             # 所以这里只写配置、不实时切——和 theme 的「实时预览」不同档。
             from ..i18n import (
-                available_languages, current_language, language_labels, tr,
+                available_languages,
+                current_language,
+                language_labels,
+                tr,
             )
             self.language = ComboBox(self._appearance_card["body"])
             self.language.addItems(language_labels())
@@ -308,6 +332,24 @@ def build_settings_widgets():
             # 默认 False——「点一下就走」是绝大多数用户的心智模型。
             self.prompt_before_download = SwitchButton(self._appearance_card["body"])
             appearance_form.addRow("下载前询问选项", self.prompt_before_download)
+
+            # 下载完成通知：控制 Windows toast 的触发场景。
+            # 三个档位映射到 AppConfig.notify_on_completion：
+            #   "成功完成"     → "success"  (推荐；失败有 GUI 弹窗)
+            #   "成功 + 失败"  → "all"
+            #   "全部完成后弹一次" → "summary"
+            # tray.py 用同一份配置来决定要不要 showMessage。
+            self.notify_on_completion = ComboBox(self._appearance_card["body"])
+            self._NOTIFY_LABELS = (
+                "成功完成",
+                "成功 + 失败",
+                "全部完成后弹一次",
+            )
+            self._NOTIFY_VALUES = ("success", "all", "summary")
+            self.notify_on_completion.addItems(list(self._NOTIFY_LABELS))
+            self._notify_combo_set(self._cfg.notify_on_completion)
+            appearance_form.addRow("下载完成通知", self.notify_on_completion)
+
             body_layout.addWidget(self._appearance_card["widget"])
 
             # ---- Cookie 与存储 ----
@@ -348,7 +390,7 @@ def build_settings_widgets():
             放表单行的容器，widget 是外层整个 Card。
             """
             SectionDivider = build_section_divider()
-            from qfluentwidgets import CardWidget, StrongBodyLabel
+            from qfluentwidgets import CardWidget
 
             card = CardWidget(self)
             card.setObjectName("settingsCard")
@@ -389,7 +431,6 @@ def build_settings_widgets():
             layout.setSpacing(SPACE_MD)
 
             # 标题 + 副标题
-            from qfluentwidgets import StrongBodyLabel
             header = QHBoxLayout()
             header.setContentsMargins(0, 0, 0, 0)
             text_col = QVBoxLayout()
@@ -477,6 +518,7 @@ def build_settings_widgets():
             self.rate_limit.setText(self._cfg.rate_limit or "")
             self.database.setChecked(self._cfg.database)
             self.prompt_before_download.setChecked(self._cfg.prompt_before_download)
+            self._notify_combo_set(self._cfg.notify_on_completion)
             self.sniff_enabled.setChecked(self._cfg.sniff_enabled)
             self.sniff_duration.setText(str(self._cfg.sniff_duration_sec))
             self.sniff_headless.setChecked(self._cfg.sniff_headless)
@@ -531,6 +573,28 @@ def build_settings_widgets():
             idx = combo.findText(value)
             if idx >= 0:
                 combo.setCurrentIndex(idx)
+
+        def _notify_combo_set(self, value: str) -> None:
+            """Map the config value to a combo index without round-tripping text.
+
+            The combo shows Chinese labels (``"成功完成"`` etc.) so we
+            can't reuse :meth:`_set_combo`'s text lookup — we go by the
+            *index* into :attr:`_NOTIFY_LABELS` derived from the value.
+            Anything outside the known set falls through to the first
+            option (``"success"``), matching the AppConfig default.
+            """
+            try:
+                idx = self._NOTIFY_VALUES.index(value)
+            except ValueError:
+                idx = 0
+            self.notify_on_completion.setCurrentIndex(idx)
+
+        def _notify_combo_value(self) -> str:
+            """Read the combo selection back as a config value."""
+            idx = self.notify_on_completion.currentIndex()
+            if 0 <= idx < len(self._NOTIFY_VALUES):
+                return self._NOTIFY_VALUES[idx]
+            return "success"
 
         # ---------------------------------------------------- 账号
 
@@ -655,6 +719,7 @@ def build_settings_widgets():
             data["rate_limit"] = self.rate_limit.text().strip() or None
             data["database"] = self.database.isChecked()
             data["prompt_before_download"] = self.prompt_before_download.isChecked()
+            data["notify_on_completion"] = self._notify_combo_value()
 
             # 通用嗅探。时长夹到 5–60：低于 5 秒基本抓不到 m3u8（页面还没起播），
             # 高于 60 秒用户会以为程序卡死。非法输入回落到默认 15。

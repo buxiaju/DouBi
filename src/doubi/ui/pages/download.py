@@ -22,12 +22,64 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger("doubi.ui.pages.download")
+
+# Strips ``N%`` style fragments from engine messages so the message
+# column doesn't double-print the percentage that ``info.fraction``
+# already renders in its own column. Pattern: ``<digit>%`` optionally
+# separated from the preceding token by a single space.
+_PERCENT_RE = re.compile(r"\s*\d{1,3}\s*%")
+
+
+def friendly_phase(message: str) -> str:
+    """Translate raw engine chatter into a compact Chinese phase.
+
+    yt-dlp emits things like ``Starting https://...`` or
+    ``download finished, post-processing`` — dumping those into a
+    narrow column looked noisy, so we map them to short labels
+    and keep the original text in the tooltip.
+
+    The progress percentage is rendered separately from
+    ``info.fraction``; if the message text already contains a
+    ``N%`` token (e.g. an older engine / a wrapper that didn't
+    read the dedup note), we strip it here so the message
+    column doesn't double-print the percentage. This is the
+    belt-and-suspenders layer on top of the engines that have
+    already been taught not to include the percent (see
+    ``engines.nm3u8dl`` watchdog).
+
+    Public module-level function (not a method) so unit tests can
+    import and exercise it without booting QApplication.
+    """
+    if not message:
+        return "排队中"
+    low = message.lower()
+    if low.startswith("starting"):
+        return "准备中"
+    if "post-processing" in low or "merging" in low:
+        return "合并音视频"
+    if "downloading" in low or "下载" in message:
+        return "下载中"
+    if "extracting" in low or "metadata" in low:
+        return "读取信息"
+    if "writing" in low or "thumbnail" in low or "subtitle" in low:
+        return "写入附件"
+    # Strip any ``N%`` fragments before length-trim, so the
+    # result isn't accidentally truncated mid-number.
+    cleaned = _PERCENT_RE.sub("", message).strip()
+    if not cleaned:
+        # Message was nothing but a percentage — fall back to
+        # the generic "下载中" so the row never looks empty.
+        return "下载中"
+    if len(cleaned) <= 12:
+        return cleaned
+    return cleaned[:11] + "…"
 
 
 def build_download_widgets():
@@ -291,29 +343,13 @@ def build_download_widgets():
 
         @staticmethod
         def _friendly_phase(message: str) -> str:
-            """Translate raw engine chatter into a compact Chinese phase.
-
-            yt-dlp emits things like ``Starting https://...`` or
-            ``download finished, post-processing`` — dumping those into a
-            narrow column looked noisy, so we map them to short labels
-            and keep the original text in the tooltip.
-            """
-            if not message:
-                return "排队中"
-            low = message.lower()
-            if low.startswith("starting"):
-                return "准备中"
-            if "post-processing" in low or "merging" in low:
-                return "合并音视频"
-            if "downloading" in low:
-                return "下载中"
-            if "extracting" in low or "metadata" in low:
-                return "读取信息"
-            if "writing" in low or "thumbnail" in low or "subtitle" in low:
-                return "写入附件"
-            if len(message) <= 12:
-                return message
-            return message[:11] + "…"
+            # Thin wrapper — the real logic lives in the module-level
+            # :func:`friendly_phase` so unit tests can hit it without
+            # the QApplication round-trip a TaskRow construction would
+            # require. Keeping a static method on TaskRow too means
+            # the per-row refresh path (``_status_message``) doesn't
+            # need to change.
+            return friendly_phase(message)
 
         def _elide(self, label: QLabel, text: str) -> None:
             metrics = QFontMetrics(label.font())
@@ -475,6 +511,13 @@ def build_download_widgets():
             self._manager: Optional[TaskManager] = None
             # task_id -> row widget
             self._rows: dict[str, TaskRow] = {}
+            # ``notify_on_completion == "summary"`` 模式的累计器。
+            # 任务完成/失败时累加，等队列空（500ms 内）一次性弹。
+            self._succeeded_pending: int = 0
+            self._failed_pending: int = 0
+            # 等待中的 summary 触发定时器（None = 没在等）。
+            # 命名带下划线前缀，与 _rows 等内部状态一致。
+            self._summary_timer = None
             self._build_ui()
             # 行底色、状态胶囊、进度条颜色都被烘进了 stylesheet，
             # 运行时换主题必须重刷一遍。统一走 subscribe_theme，
@@ -801,10 +844,118 @@ def build_download_widgets():
         def _on_task_finished(self, task_id: str, title: str) -> None:
             self._move_to_completed(task_id)
             self._toast(InfoBar.success, "下载完成", title or task_id)
+            self._maybe_notify_completion(success=True, title=title, error="")
 
         def _on_task_failed(self, task_id: str, message: str) -> None:
             self._move_to_completed(task_id)
             self._toast(InfoBar.error, "下载失败", message or task_id)
+            # task_failed 的 message 直接喂给通知 — 错误原因比 title 更有用。
+            self._maybe_notify_completion(
+                success=False, title=message or task_id, error=message or "",
+            )
+
+        def _maybe_notify_completion(
+            self, *, success: bool, title: str, error: str,
+        ) -> None:
+            """Forward task terminal events to the system tray for toasts.
+
+            Settings page owns the "when to notify" decision (see
+            :attr:`AppConfig.notify_on_completion`), and it also owns
+            the live ``AppConfig`` instance — ``settings_interface._cfg``
+            is the single copy main_window reads when it pushes config
+            into the other pages, so reading it here means we always
+            see the value the user just saved without wiring another
+            signal. The ``summary`` mode deliberately doesn't fire
+            per-task — ``_flush_summary_if_drained`` handles that branch.
+            """
+            window = self.window()
+            tray = getattr(window, "tray", None)
+            if tray is None:
+                return
+            settings = getattr(window, "settings_interface", None)
+            cfg = getattr(settings, "_cfg", None)
+            if cfg is None:
+                return
+            mode = getattr(cfg, "notify_on_completion", "success")
+            if mode == "summary":
+                # Accumulate for the eventual drain summary.
+                if success:
+                    self._succeeded_pending += 1
+                else:
+                    self._failed_pending += 1
+                self._schedule_summary_check()
+                return
+            tray.notify_completion(
+                mode=mode,
+                success=success,
+                title=title,
+                error=error,
+            )
+
+        # ---- summary-mode helpers ----------------------------------
+
+        # Why these exist: ``"summary"`` mode is "fire ONE toast when
+        # the queue drains". We can't observe "drained" directly from
+        # the existing signals (a single ``task_finished`` doesn't
+        # mean the queue is empty — another download could be in
+        # flight). So we accumulate the running count of completed
+        # tasks and re-check after a short delay; if everything is
+        # still idle by then, we fire the summary. The 500 ms delay
+        # is short enough to feel instant on the next event loop
+        # tick, long enough to coalesce bursts of ``task_finished``
+        # that arrive within the same millisecond (e.g. batch
+        # downloads from a single playlist).
+        _SUMMARY_DELAY_MS = 500
+
+        def _schedule_summary_check(self) -> None:
+            from PySide6.QtCore import QTimer
+
+            if self._summary_timer is not None:
+                # Already scheduled; the accumulator below will fold
+                # the new event into the in-flight check.
+                return
+            self._summary_timer = QTimer()
+            self._summary_timer.setSingleShot(True)
+            self._summary_timer.timeout.connect(self._flush_summary_if_drained)
+            self._summary_timer.start(self._SUMMARY_DELAY_MS)
+
+        def _flush_summary_if_drained(self) -> None:
+            """Fire the summary toast if no active/paused tasks remain.
+
+            The check is intentionally cheap (``running_count + paused_count``)
+            rather than walking the full task list — we only need to
+            know "is the queue empty of in-flight work?". ``_rows``
+            tracks only the *displayed* subset; the manager is the
+            source of truth for the actual state.
+            """
+            self._summary_timer = None
+            if self._manager is None:
+                self._reset_summary_counters()
+                return
+            in_flight = (
+                self._manager.running_count() + self._manager.paused_count()
+            )
+            if in_flight > 0:
+                # More work pending — re-arm so we check again after
+                # the next completion. Counters stay as-is.
+                self._schedule_summary_check()
+                return
+            succeeded = self._succeeded_pending
+            failed = self._failed_pending
+            self._reset_summary_counters()
+            if succeeded == 0 and failed == 0:
+                # Counter was empty by the time the timer fired (race:
+                # task was added then removed between schedule and
+                # flush). Nothing to announce.
+                return
+            tray = getattr(self.window(), "tray", None)
+            if tray is None:
+                return
+            tray.notify_summary(succeeded=succeeded, failed=failed)
+
+        def _reset_summary_counters(self) -> None:
+            self._succeeded_pending = 0
+            self._failed_pending = 0
 
         def _on_task_removed(self, task_id: str) -> None:
             row = self._rows.pop(task_id, None)

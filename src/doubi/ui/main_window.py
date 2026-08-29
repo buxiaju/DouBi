@@ -183,6 +183,22 @@ def build_main_window():
             # 先画出来，否则对话框会弹在一片空白上。
             QTimer.singleShot(0, self._offer_restore)
 
+            # ---- 系统托盘（关窗最小化到这里） ------------------------
+            # 用户关窗不再等于退出进程：下载在跑的话，让他们最小化到托盘，
+            # 任务完成时再弹 Windows toast 通知。``_install_tray`` 是单独
+            # 方法因为它需要 ``self.setWindowIcon`` 已就位（构造里其他代
+            # 码会 setWindowIcon），并且要分发给 download_interface。
+            self._install_tray()
+
+            # 任务状态变化时同步托盘菜单的可用性（暂停/继续按钮）。
+            # ``task_added`` / ``task_progress`` / ``task_removed`` / 等
+            # 都可能影响 running/paused 计数，这里用一个统一入口
+            # ``_on_task_state_changed`` 收口，避免 N 个信号接 N 个槽。
+            self.task_manager.task_added.connect(self._on_task_state_changed)
+            self.task_manager.task_finished.connect(self._on_task_state_changed)
+            self.task_manager.task_failed.connect(self._on_task_state_changed)
+            self.task_manager.task_removed.connect(self._on_task_state_changed)
+
         # ---- 跨进程断点续传 -------------------------------------------
 
         def _offer_restore(self) -> None:
@@ -251,43 +267,166 @@ def build_main_window():
             )
 
         def closeEvent(self, event) -> None:
-            """关窗前把还在飞的落库写等回来。
+            """关窗行为取决于 ``_truly_quit`` 标志。
 
-            状态变更的写入是故意「发射后不管」的——运行期任何一次暂停都
-            不该卡在磁盘 I/O 上。但关窗时这个取舍要反过来：循环一关，
-            还排在队里的写就静静丢了，而丢掉的恰恰是用户临走前那几次
-            操作，也正是下次启动要靠它来提供恢复的那批记录。
+            0.3.0 起的语义：点 X **不退出**进程，只把窗口藏到托盘。
+            任务还在跑、用户想走开，关窗是放后台——他们从托盘可以再
+            把窗口调出来。真正的退出走托盘菜单的「退出」。
 
-            这里**不能**用 ``run_until_complete``：``closeEvent`` 是同步的
-            Qt 回调，而此刻 qasync 的循环正在跑，往运行中的循环上再调一次
-            run 只会抛 ``RuntimeError``——被兜住之后 flush 就成了看不见的
-            空操作。改成起一个嵌套的 Qt 事件循环来等：qasync 的 asyncio
+            真正的退出（``_truly_quit`` 置 True）才走原本的落库清理路径：
+            关窗前把还在飞的落库写等回来。状态变更的写入是故意「发射后
+            不管」的——运行期任何一次暂停都不该卡在磁盘 I/O 上。但关窗
+            时这个取舍要反过来：循环一关，还排在队里的写就静静丢了，
+            而丢掉的恰恰是用户临走前那几次操作，也正是下次启动要靠
+            它来提供恢复的那批记录。
+
+            ``closeEvent`` 不能用 ``run_until_complete``：它是同步的 Qt
+            回调，而此刻 qasync 的循环正在跑，往运行中的循环上再调一次
+            run 只会抛 ``RuntimeError``——被兜住之后 flush 就成了看不见
+            的空操作。改成起一个嵌套的 Qt 事件循环来等：qasync 的 asyncio
             回调本来就是靠 Qt 事件派发的，spin 住 Qt 就等于让 flush 继续
             推进，同时又没有第二次「run 循环」。
 
             两道上限：``flush_pending_writes`` 自带超时，外面再挂一个
-            定时器兜住嵌套循环，任何一边卡住都不会把窗口关不掉。
+            定时器兜住嵌套循环，任何一边卡住都不会让窗口关不掉。
             """
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                # 没有跑着的循环，也就没有在飞的写。
+            # 走「真退出」路径：托盘「退出」/ 任务管理器「结束进程」/
+            # 其他非用户-X 触发的关窗。
+            if getattr(self, "_truly_quit", False):
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    # 没有跑着的循环，也就没有在飞的写。
+                    super().closeEvent(event)
+                    return
+
+                task = loop.create_task(self.task_manager.flush_pending_writes())
+                spin = QtEventLoop()
+                task.add_done_callback(lambda _t: spin.quit())
+                QTimer.singleShot(CLOSE_FLUSH_TIMEOUT_MS, spin.quit)
+                # done_callback 是 call_soon 派发的，回到事件循环才会跑，
+                # 理论上不会早于 exec()。仍然先查一次：quit() 落在
+                # exec() 之前会被丢弃，那样这里就会永久挂住。
+                if not task.done():
+                    spin.exec()
+                if not task.done():
+                    logger.debug("退出前落库超时，剩余写入放弃")
+                    task.cancel()
+                # 真退出时把托盘图标也收掉，否则 Windows 通知区会留
+                # 一个不响应的孤儿图标直到用户手动清理。
+                if getattr(self, "tray", None) is not None:
+                    self.tray.shutdown()
                 super().closeEvent(event)
                 return
 
-            task = loop.create_task(self.task_manager.flush_pending_writes())
-            spin = QtEventLoop()
-            task.add_done_callback(lambda _t: spin.quit())
-            QTimer.singleShot(CLOSE_FLUSH_TIMEOUT_MS, spin.quit)
-            # done_callback 是 call_soon 派发的，回到事件循环才会跑，理论上
-            # 不会早于 exec()。仍然先查一次：quit() 落在 exec() 之前会被丢弃，
-            # 那样这里就会永久挂住。
-            if not task.done():
-                spin.exec()
-            if not task.done():
-                logger.debug("退出前落库超时，剩余写入放弃")
-                task.cancel()
-            super().closeEvent(event)
+            # 用户点 X：把窗口藏到托盘，不退出。第一次藏的时候弹一个
+            # 一次性通知，告诉用户「程序还在跑」。后续关窗就只藏不
+            # 通知了——再弹就刷屏了。
+            event.ignore()
+            self.hide()
+            if getattr(self, "tray", None) is not None:
+                # 用一个内存型标志而不是 config 字段——这是「这次会话
+                # 是否已经通知过」的临时状态，不该跨进程持续。
+                if not getattr(self, "_tray_hide_announced", False):
+                    self._tray_hide_announced = True
+                    self.tray.show_message(
+                        "DouBi 在后台运行",
+                        "下载完成后会从这里弹出通知。"
+                        "右键托盘图标可以显示主窗口或退出。",
+                        icon_kind="info",
+                        msec=4000,
+                    )
+                # 注意：这里**不能**动 ``show_window_requested`` 的连接。
+                # 曾经有一行 ``disconnect()`` 号称「防止重复连」，但连接
+                # 只在 ``_install_tray`` 里做一次，本来就没有重复。它的
+                # 实际效果是：用户第一次点 X（正好就是进托盘的那一刻）
+                # 把所有槽全断掉，之后托盘菜单「显示主窗口」emit 出去
+                # 没人接，窗口再也唤不回来。M6.18.2 修复。
+            else:
+                # 兜底：没托盘（headless 测试 / 平台不支持）就老老实实退出。
+                # 没有托盘的「后台」对用户毫无意义——他们会以为程序崩了。
+                self._truly_quit = True
+                super().closeEvent(event)
+
+        def quit(self) -> None:
+            """公共退出入口，供托盘「退出」菜单触发。
+
+            不会真的关窗口——只翻标志，让 ``closeEvent`` 走「真退出」分支。
+            """
+            self._truly_quit = True
+            self.close()
+
+        # ---- 托盘集成 --------------------------------------------
+
+        def _install_tray(self) -> None:
+            """构造 :class:`TrayController` 并把它的信号接进应用。
+
+            三件事：
+            1. 托盘双击 / 菜单「显示主窗口」→ 唤出主窗口。
+            2. 托盘菜单「退出」→ ``quit()`` 走真退出路径。
+            3. 托盘菜单「全部暂停 / 全部继续」→ 转给 task_manager。
+
+            通知弹窗（``task_finished`` / ``task_failed``）不在这里接，
+            而是在 ``DownloadPage`` 里接——它已经监听这些信号，附加
+            一个 ``tray.notify_completion`` 转发即可，不必让 main_window
+            再订阅一次。
+            """
+            from .tray import TrayController
+
+            self.tray = TrayController(parent=self)
+            self.tray.show_window_requested.connect(self._show_from_tray)
+            self.tray.quit_requested.connect(self.quit)
+            self.tray.pause_all_requested.connect(self.task_manager.pause_all)
+            self.tray.resume_all_requested.connect(self.task_manager.resume_all)
+            logger.debug("托盘已安装，信号已接线")
+            # 初始可用性
+            self._on_task_state_changed()
+
+        def _show_from_tray(self) -> None:
+            """托盘「显示主窗口」/ 双击托盘：把窗口呼回来。
+
+            几个细节是**必要的**，缺一个都不行：
+            1. ``setVisible(True)`` 而非 ``show()``：qfluentwidgets 的
+               ``MSFluentWindow`` 重写了 ``hideEvent`` 关掉 Mica 等原生
+               效果后，单纯 ``show()`` 不会把 HWND 重新挂回屏幕——
+               ``setVisible(True)`` 走的是更底层的 ``setVisible`` 路径，
+               能让 Qt 把 native window 重新 map。
+            2. ``showNormal()`` 而非 ``showMaximized()``：用户关窗时是
+               普通窗口，再开也应该是普通窗口。如果最大化关又最大化开，
+               第二次的位置会漂到「记住的最大化位置」和「原始位置」之间。
+            3. ``raise_() + activateWindow()``：从托盘唤回时 Windows 默认
+               不会自动把焦点交给后台窗口，必须显式拉。
+            4. 延迟 50ms 再 ``activateWindow``：HWND 刚 setVisible 时，Windows
+               还在做 Z-order 计算，立刻 activate 会丢。``QTimer.singleShot``
+               把 activate 推到下一轮事件循环，焦点就稳了。
+            """
+            logger.debug(
+                "托盘唤出主窗口；当前 visible=%s minimized=%s",
+                self.isVisible(),
+                self.isMinimized(),
+            )
+            self.setVisible(True)
+            self.showNormal()
+            self.raise_()
+            QTimer.singleShot(
+                50,
+                lambda: self.activateWindow() if not self.isMinimized() else None,
+            )
+
+        def _on_task_state_changed(self, *_args) -> None:
+            """任务状态变化 → 同步托盘菜单「全部暂停 / 全部继续」可用性。
+
+            接了 ``task_added`` / ``task_finished`` / ``task_failed`` /
+            ``task_removed`` 四个信号，全部走这里，避免 N 个槽重复
+            计算。``*_args`` 是为了吞下信号带的 task_id 等参数——
+            我们要的是「刷新当前快照」，不关心具体是哪个任务变了。
+            """
+            if not hasattr(self, "tray") or self.tray is None:
+                return
+            self.tray.update_running_state(
+                running=self.task_manager.running_count(),
+                paused=self.task_manager.paused_count(),
+            )
 
         def _enlarge_titlebar_icon(self, size: int = TITLEBAR_ICON_SIZE) -> None:
             """放大自绘标题栏里的应用图标。

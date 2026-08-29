@@ -17,6 +17,7 @@ falling back to yt-dlp).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -106,6 +107,245 @@ def _find_ffmpeg() -> Optional[str]:
 _PROGRESS_RE = re.compile(r"\[#(\d+)/(\d+)\]")
 _COMPLETE_RE = re.compile(r"completed", re.IGNORECASE)
 _ERROR_RE = re.compile(r"\[ERROR\]", re.IGNORECASE)
+# N_m3u8DL-CLI v3.0.2 输出：``总分片：9425, 已选择分片：9425``。
+# 旧版用 ``[#150/150]`` 格式，v3.0.2 改成了「时间戳 + 速度」的清爽格式
+# ——所以这里正则匹配永远命中不了，watchdog 才是真进度源。
+_TOTAL_SEG_RE = re.compile(r"总分片[：:]\s*(\d+)")
+
+
+def _find_meta_json(out_dir: Path) -> Optional[Path]:
+    """Locate N_m3u8DL-CLI's ``meta.json`` anywhere under ``out_dir``.
+
+    N_m3u8DL-CLI writes ``meta.json`` *inside* the directory it
+    actually streamed segments to. Because the engine passes
+    ``--saveName`` as a *path* (it includes the per-item dir the
+    pipeline already computed for ``final_output``), N_m3u8DL-CLI
+    creates an extra subdirectory layer that our ``out_dir`` doesn't
+    directly contain. The real data lives one or two levels deeper:
+
+        out_dir/                                  ← what we get
+        └── <saveName_tail>/                     ← N_m3u8DL-CLI adds this
+            ├── meta.json
+            └── Part_0/0000.ts, 0001.ts, ...
+
+    We scan up to 3 levels deep under ``out_dir`` for the meta.json
+    that N_m3u8DL-CLI actually wrote. Beyond that no layout we've
+    seen (live streams or VOD) puts meta.json; the 3-level cap keeps
+    the scan bounded on weird filesystems.
+
+    Returns the first meta.json path found, or None if none exists.
+    """
+    return _find_first_named(out_dir, "meta.json", max_depth=3)
+
+
+def _count_completed_segments(out_dir: Path) -> int:
+    """Count downloaded .ts files anywhere under ``out_dir``.
+
+    Same recursion as :func:`_find_meta_json`: N_m3u8DL-CLI puts
+    segments under ``out_dir/<saveName_tail>/Part_*/`` and the count
+    has to walk that path. We do this in a single ``scandir`` pass
+    per directory level rather than ``Path.rglob`` so we don't stat
+    every file — at 9425 segments on Windows, ``rglob`` would issue
+    ~10000 stat calls; this version does a few hundred and the rest
+    are pure string ``endswith`` checks.
+
+    Returns 0 if ``out_dir`` is missing / unreadable / has no
+    segments yet.
+    """
+    return _count_files_named(out_dir, ".ts", max_depth=3)
+
+
+def _find_first_named(root: Path, name: str, *, max_depth: int) -> Optional[Path]:
+    """Return the first descendant ``root/<...>/<name>`` found by BFS.
+
+    Bounded by ``max_depth`` levels beyond ``root`` — when 0, only
+    ``root/<name>`` counts. Returns ``None`` if no match.
+
+    BFS (rather than recursive descent) keeps the call stack flat:
+    a 3-level search is 3 explicit loops, not 27 indentation levels,
+    and never triggers Python's recursion limit. We tolerate
+    individual subdirectory unreadability by catching ``OSError`` and
+    just skipping the entry — N_m3u8DL-CLI rotates Part_*/ dirs mid-
+    download so transient ``FileNotFoundError`` is the norm.
+    """
+    current: list[Path] = [root]
+    for _ in range(max_depth + 1):
+        next_level: list[Path] = []
+        for directory in current:
+            try:
+                with os.scandir(directory) as it:
+                    for entry in it:
+                        if entry.name == name:
+                            return Path(entry.path)
+                        try:
+                            is_dir = entry.is_dir()
+                        except OSError:
+                            continue
+                        if is_dir:
+                            next_level.append(Path(entry.path))
+            except OSError:
+                continue
+        if not next_level:
+            return None
+        current = next_level
+    return None
+
+
+def _count_files_named(root: Path, suffix: str, *, max_depth: int) -> int:
+    """Count files ending with ``suffix`` under ``root`` within ``max_depth`` levels.
+
+    Same BFS shape as :func:`_find_first_named`. Hidden entries
+    (``.tmp``, ``.part``) are skipped because they aren't real
+    completed segments; this matches the watcher's contract that the
+    bar only moves on real, written segments.
+    """
+    count = 0
+    current: list[Path] = [root]
+    for _ in range(max_depth + 1):
+        next_level: list[Path] = []
+        for directory in current:
+            try:
+                with os.scandir(directory) as it:
+                    for entry in it:
+                        if (
+                            entry.name.endswith(suffix)
+                            and not entry.name.startswith(".")
+                        ):
+                            count += 1
+                            continue
+                        try:
+                            is_dir = entry.is_dir()
+                        except OSError:
+                            continue
+                        if is_dir:
+                            next_level.append(Path(entry.path))
+            except OSError:
+                continue
+        if not next_level:
+            break
+        current = next_level
+    return count
+
+
+def _discover_total_segments(out_dir: Path, save_name: Path) -> int:
+    """Try to read the total segment count from N_m3u8DL-CLI's ``meta.json``.
+
+    N_m3u8DL-CLI writes ``{real_workdir}/meta.json`` shortly after
+    parse completes; ``real_workdir`` is *not* the ``out_dir`` we hand
+    to ``--workDir`` because the engine passes a path-bearing
+    ``--saveName`` (see :func:`_find_meta_json` for the full picture).
+    We therefore search a few levels deep under ``out_dir`` for the
+    file, instead of assuming a fixed layout.
+
+    Returns 0 if no parseable meta.json is found yet — the watchdog
+    will retry. 0 is the right failure mode here: ``count=0`` would
+    mean a live stream with no known denominator, and the watchdog
+    explicitly skips emit when ``total <= 0``.
+    """
+    meta_path = _find_meta_json(out_dir)
+    if meta_path is None:
+        return 0
+    try:
+        with open(meta_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return 0
+    info = data.get("m3u8Info") if isinstance(data, dict) else None
+    if not isinstance(info, dict):
+        return 0
+    count = info.get("count")
+    try:
+        return int(count) if count else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def _count_completed_segments(out_dir: Path) -> int:
+    """Count downloaded .ts files anywhere under ``out_dir``.
+
+    Same recursion as :func:`_find_meta_json`: N_m3u8DL-CLI puts
+    segments under ``out_dir/<saveName_tail>/Part_*/`` and the count
+    has to walk that path. We do this in a single ``scandir`` pass
+    per directory level rather than ``Path.rglob`` so we don't stat
+    every file — at 9425 segments on Windows, ``rglob`` would issue
+    ~10000 stat calls; this version does a few hundred and the rest
+    are pure string ``endswith`` checks.
+
+    Returns 0 if ``out_dir`` is missing / unreadable / has no
+    segments yet.
+    """
+    count = 0
+    try:
+        with os.scandir(out_dir) as it:
+            for entry in it:
+                if entry.name.endswith(".ts") and not entry.name.startswith("."):
+                    count += 1
+                    continue
+                try:
+                    is_dir = entry.is_dir()
+                except OSError:
+                    continue
+                if not is_dir:
+                    continue
+                # Subdir of out_dir — N_m3u8DL-CLI's data dir.
+                try:
+                    with os.scandir(entry.path) as sub:
+                        for sub_entry in sub:
+                            if (
+                                sub_entry.name.endswith(".ts")
+                                and not sub_entry.name.startswith(".")
+                            ):
+                                count += 1
+                                continue
+                            try:
+                                sub_is_dir = sub_entry.is_dir()
+                            except OSError:
+                                continue
+                            if not sub_is_dir:
+                                continue
+                            # Inside sub: either a Part_*/ bucket of
+                            # .ts files, or yet another subdir layer
+                            # (N_m3u8DL-CLI v3.0.2 wraps the
+                            # user-supplied --saveName as a subdir).
+                            try:
+                                with os.scandir(sub_entry.path) as sub2:
+                                    for sub2_entry in sub2:
+                                        if (
+                                            sub2_entry.name.endswith(".ts")
+                                            and not sub2_entry.name.startswith(".")
+                                        ):
+                                            count += 1
+                                            continue
+                                        try:
+                                            sub2_is_dir = sub2_entry.is_dir()
+                                        except OSError:
+                                            continue
+                                        if not sub2_is_dir:
+                                            continue
+                                        # Part_*/ bucket — segments live
+                                        # here, three levels beyond out_dir.
+                                        try:
+                                            with os.scandir(sub2_entry.path) as sub3:
+                                                for sub3_entry in sub3:
+                                                    if (
+                                                        sub3_entry.name.endswith(".ts")
+                                                        and not sub3_entry.name.startswith(".")
+                                                    ):
+                                                        count += 1
+                                        except OSError:
+                                            # The Part_*/ directory vanished
+                                            # mid-scan (N_m3u8DL-CLI rotates
+                                            # during long downloads). Skip;
+                                            # next tick will catch the new state.
+                                            continue
+                            except OSError:
+                                continue
+                except OSError:
+                    continue
+    except OSError:
+        # out_dir itself not yet created / accessible — watchdog will retry.
+        pass
+    return count
 
 
 class Nm3u8dlEngine(Engine):
@@ -205,6 +445,12 @@ class Nm3u8dlEngine(Engine):
         last_frac = -1.0
         fatal_error = ""
         parse_buf = bytearray()
+        # Shared mutable bag — see _TOTAL_SEG_RE for the source line.
+        # Both the stdout parser and the watchdog write here; whichever
+        # discovers the count first wins. A plain ``int`` local would not
+        # work because the lambda captures by reference but rebinds
+        # on assignment, so the watchdog would never see the value.
+        total_segments_box: dict[str, int] = {"count": 0}
 
         def _parse_and_emit(decoded: str) -> None:
             nonlocal last_frac, fatal_error
@@ -215,6 +461,12 @@ class Nm3u8dlEngine(Engine):
                 logger.error("[nm3u8dl] error: %s", decoded)
             if _COMPLETE_RE.search(decoded) and on_progress:
                 on_progress(EngineProgress(fraction=1.0, message="m3u8 下载完成"))
+            # ``总分片：9425, 已选择分片：9425`` is the v3.0.2 way of
+            # telling us the denominator. Capture it so the watchdog
+            # doesn't have to wait for meta.json to appear on disk.
+            m_total = _TOTAL_SEG_RE.search(decoded)
+            if m_total and not total_segments_box["count"]:
+                total_segments_box["count"] = int(m_total.group(1))
             if "总分片" in decoded and on_progress:
                 on_progress(EngineProgress(
                     fraction=0.0, message="m3u8 解析完成，准备下载..."
@@ -254,6 +506,76 @@ class Nm3u8dlEngine(Engine):
 
         cancel_flag = getattr(options, "cancel_check", None)
 
+        # ------------------------------------------------------------------
+        # Filesystem watchdog: N_m3u8DL-CLI v3.0.2 dropped the
+        # ``[#current/total]`` progress format, so the stdout parser
+        # above can only flip us from "准备中" to "下载中" — it has no
+        # numbers to report. To get an actually-moving bar we sample
+        # the output directory on a 1-second tick: count ``.ts`` files
+        # under out_dir (and any ``Part_*/`` subdirs N_m3u8DL-CLI
+        # creates for chunked downloads) and divide by the total
+        # segment count we discovered from the ``总分片：N`` line.
+        #
+        # This is decoupled from stdout buffering / N_m3u8DL-CLI version
+        # — if the binary ever changes its log format again, the
+        # watchdog keeps working because it only depends on the file
+        # layout, which the binary's stable contract.
+        # ------------------------------------------------------------------
+        watchdog_stop = asyncio.Event()
+
+        async def _watchdog() -> None:
+            last_pct = -1
+            # 1 Hz is the sweet spot on Windows: listdir is ~30-50 ms
+            # for 9425 segments, so a 1 s tick keeps the bar smooth
+            # without burning a CPU on tight loops. Don't go below 500
+            # ms without measuring first.
+            while not watchdog_stop.is_set():
+                try:
+                    await asyncio.wait_for(watchdog_stop.wait(), timeout=1.0)
+                    break  # event set -> exit
+                except asyncio.TimeoutError:
+                    pass
+                # Cancel propagates fastest this way; the user already
+                # pressed pause/cancel and we should stop moving the bar.
+                if cancel_flag is not None and getattr(cancel_flag, "stopped", False):
+                    return
+                if not total_segments_box["count"]:
+                    discovered = _discover_total_segments(out_dir, save_name)
+                    if discovered:
+                        total_segments_box["count"] = discovered
+                total = total_segments_box["count"]
+                if total <= 0:
+                    # No denominator yet — keep waiting for the parse
+                    # line / meta.json. Don't emit 0% here, the stdout
+                    # parser already did that on "开始下载".
+                    continue
+                done = _count_completed_segments(out_dir)
+                # Cap at 1.0: a stray .ts that survived ``--enableDelAfterDone``
+                # (e.g. on error paths) shouldn't push the bar past 100%.
+                frac = min(1.0, done / total)
+                pct = int(frac * 100)
+                if pct == last_pct:
+                    continue
+                last_pct = pct
+                if on_progress:
+                    try:
+                        on_progress(EngineProgress(
+                            fraction=frac,
+                            # Message is intentionally free of any ``N%``
+                            # — the percentage already lives in
+                            # ``EngineProgress.fraction`` and the UI
+                            # renders it as a separate column. Including
+                            # it here too would print ``60% m3u8 下载中
+                            # 60%`` in the message column.
+                            message="m3u8 下载中",
+                        ))
+                    except Exception:
+                        # A buggy on_progress must not crash the
+                        # watchdog — the stdout parser is still alive.
+                        logger.exception("[nm3u8dl] watchdog on_progress raised")
+
+        watchdog_task = asyncio.create_task(_watchdog())
+
         try:
             rc, _ = await run_supervised_subprocess(
                 cmd,
@@ -268,7 +590,30 @@ class Nm3u8dlEngine(Engine):
             fatal_error = str(e)
         except asyncio.CancelledError:
             # Propagate up; supervisor already killed the subprocess.
+            watchdog_stop.set()
+            watchdog_task.cancel()
+            try:
+                await watchdog_task
+            except (asyncio.CancelledError, Exception):
+                pass
             raise
+        finally:
+            # Normal completion + error paths: stop the watchdog. We
+            # use an event (not cancel) so the coroutine can drain its
+            # last tick cleanly instead of raising CancelledError into
+            # an in-flight on_progress call.
+            watchdog_stop.set()
+            if not watchdog_task.done():
+                try:
+                    await asyncio.wait_for(watchdog_task, timeout=2.0)
+                except asyncio.TimeoutError:
+                    watchdog_task.cancel()
+                    try:
+                        await watchdog_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                except (asyncio.CancelledError, Exception):
+                    pass
 
         # Drain whatever remained in the parse buffer (trailing line
         # with no terminator on EOF — unlikely here but cheap).

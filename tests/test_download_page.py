@@ -241,3 +241,167 @@ async def test_download_page_pause_btn_hidden_when_terminal(qapp, tmp_path):
     assert row.info.status == "completed"
     assert row.pause_btn.isVisible() is False
     assert row.pause_slot.width() == 52
+
+
+# ----------------------------------------------------------------------
+# M6.18: _friendly_phase dedup (no double-printing of percentage)
+# ----------------------------------------------------------------------
+
+
+class TestFriendlyPhaseDedup:
+    """The percentage lives in ``info.fraction`` and is rendered as its
+    own column. The message column must never echo the same number back
+    — otherwise the user sees ``60%  m3u8 下载中 60%`` side by side.
+    These tests pin the deduplication contract: any ``N%`` fragment in
+    the engine-supplied message must be stripped before the message
+    column is rendered.
+    """
+
+    @staticmethod
+    def _friendly_phase(message: str) -> str:
+        # Module-level function — no QApplication needed. See
+        # ``TaskRow._friendly_phase`` for the wrapper that preserves
+        # the per-row code path.
+        from doubi.ui.pages.download import friendly_phase
+        return friendly_phase(message)
+
+    def test_strips_full_width_colon_chinese_phase_with_pct(self):
+        """nm3u8dl watchdog used to emit ``m3u8 下载中 60%``. After
+        the M6.17 fix it no longer carries the percentage, but a
+        stale engine / third-party wrapper might. The friendly phase
+        must strip the ``60%`` and return just ``下载中``.
+        """
+        out = self._friendly_phase("m3u8 下载中 60%")
+        assert "60" not in out
+        assert "%" not in out
+        assert "下载" in out
+
+    def test_strips_pct_only_message(self):
+        """A message of nothing-but-a-percentage falls back to ``下载中``
+        — the column should never render blank.
+        """
+        out = self._friendly_phase("60%")
+        assert out  # non-empty
+
+    def test_chinese_download_phrase_alone(self):
+        out = self._friendly_phase("m3u8 下载中")
+        assert "下载" in out
+
+    def test_english_downloading_phrase_still_works(self):
+        out = self._friendly_phase("downloading video")
+        assert "下载中" in out
+
+    def test_empty_message_returns_queued(self):
+        assert self._friendly_phase("") == "排队中"
+
+
+# ----------------------------------------------------------------------
+# M6.18: completion notifications forwarded to the tray
+# ----------------------------------------------------------------------
+
+
+class _FakeTray:
+    def __init__(self):
+        self.completions = []
+        self.summaries = []
+
+    def notify_completion(self, *, mode, success, title, error=""):
+        self.completions.append(
+            {"mode": mode, "success": success, "title": title, "error": error},
+        )
+
+    def notify_summary(self, *, succeeded, failed):
+        self.summaries.append({"succeeded": succeeded, "failed": failed})
+
+
+class _FakeCfg:
+    def __init__(self, mode):
+        self.notify_on_completion = mode
+
+
+class _FakeSettingsPage:
+    def __init__(self, mode):
+        self._cfg = _FakeCfg(mode)
+
+
+class TestMaybeNotifyCompletion:
+    """``DownloadPage`` forwards terminal task events to the tray.
+
+    The first cut of this method read ``self.parse_interface._cfg`` —
+    but ``parse_interface`` is a ``MainWindow`` attribute, not a
+    ``DownloadPage`` one, so *every* completed download raised
+    ``AttributeError``. The live config actually hangs off
+    ``settings_interface._cfg`` (that's the copy main_window reads when
+    it pushes settings into the other pages).
+
+    A parentless ``QWidget.window()`` returns the widget itself, so we
+    can stand in for MainWindow by hanging the two attributes directly
+    on the page.
+    """
+
+    @staticmethod
+    def _page(qapp, mode):
+        from doubi.ui.pages.download import build_download_widgets
+        DownloadPage, _ = build_download_widgets()
+        page = DownloadPage()
+        tray = _FakeTray()
+        # ``page.window()`` is ``page`` (no parent), so these stand in
+        # for the MainWindow attributes the real code reads.
+        page.tray = tray
+        page.settings_interface = _FakeSettingsPage(mode)
+        return page, tray
+
+    def test_success_mode_forwards_success(self, qapp):
+        page, tray = self._page(qapp, "success")
+        page._maybe_notify_completion(success=True, title="video A", error="")
+        assert tray.completions == [
+            {"mode": "success", "success": True, "title": "video A", "error": ""},
+        ]
+
+    def test_all_mode_forwards_failure(self, qapp):
+        page, tray = self._page(qapp, "all")
+        page._maybe_notify_completion(
+            success=False, title="video A", error="HTTP 403",
+        )
+        assert len(tray.completions) == 1
+        assert tray.completions[0]["mode"] == "all"
+        assert tray.completions[0]["success"] is False
+        assert tray.completions[0]["error"] == "HTTP 403"
+
+    def test_summary_mode_accumulates_instead_of_forwarding(self, qapp):
+        page, tray = self._page(qapp, "summary")
+        page._maybe_notify_completion(success=True, title="a", error="")
+        page._maybe_notify_completion(success=True, title="b", error="")
+        page._maybe_notify_completion(success=False, title="c", error="x")
+        # Nothing fired per-task; the counters hold the tally.
+        assert tray.completions == []
+        assert page._succeeded_pending == 2
+        assert page._failed_pending == 1
+
+    def test_no_tray_is_a_silent_noop(self, qapp):
+        from doubi.ui.pages.download import build_download_widgets
+        DownloadPage, _ = build_download_widgets()
+        page = DownloadPage()
+        # No tray attribute at all (headless / tray-less desktop).
+        page._maybe_notify_completion(success=True, title="a", error="")
+
+    def test_missing_settings_page_is_a_silent_noop(self, qapp):
+        from doubi.ui.pages.download import build_download_widgets
+        DownloadPage, _ = build_download_widgets()
+        page = DownloadPage()
+        tray = _FakeTray()
+        page.tray = tray
+        # settings_interface absent → no config to read → no toast, but
+        # crucially no AttributeError either.
+        page._maybe_notify_completion(success=True, title="a", error="")
+        assert tray.completions == []
+
+    def test_flush_summary_fires_once_when_drained(self, qapp):
+        page, tray = self._page(qapp, "summary")
+        page._succeeded_pending = 2
+        page._failed_pending = 1
+        # No manager attached → counters reset, nothing announced.
+        page._flush_summary_if_drained()
+        assert page._succeeded_pending == 0
+        assert page._failed_pending == 0
+

@@ -106,6 +106,68 @@ def test_theme_survives_yaml_round_trip(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# notify_on_completion 字段（M6.18 下载完成通知）
+# ---------------------------------------------------------------------------
+#
+# 这组测试覆盖三个层面：
+# 1. ``AppConfig`` 默认值是 ``"success"``（最小噪音的推荐档）
+# 2. ``to_dict`` 把字段带出来
+# 3. ``load_config`` 读回后字段恢复正确值，非法值回退到默认
+#
+# 不依赖 PySide6：纯数据 → yaml 往返 → 重新读。tray 行为在
+# :class:`doubi.ui.tray.TrayController` 的下游测试里覆盖（如果以后补的话）；
+# 这里只锁「配置文件持久化」这一段。
+
+
+def test_notify_on_completion_default_is_success():
+    """新装应用不应默认「弹所有通知」——刷屏体验最差。"""
+    assert AppConfig().notify_on_completion == "success"
+
+
+def test_notify_on_completion_round_trip(tmp_path, monkeypatch):
+    cfg_file = tmp_path / "config.yml"
+    monkeypatch.setattr(config_mod, "DEFAULT_CONFIG_PATH", cfg_file)
+
+    data = AppConfig().to_dict()
+    data["notify_on_completion"] = "summary"
+    cfg_file.write_text(
+        yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    cfg = load_config(None)
+    assert cfg.notify_on_completion == "summary"
+
+
+@pytest.mark.parametrize("mode", ["success", "all", "summary"])
+def test_notify_on_completion_accepts_known_modes(tmp_path, monkeypatch, mode):
+    cfg_file = tmp_path / "config.yml"
+    monkeypatch.setattr(config_mod, "DEFAULT_CONFIG_PATH", cfg_file)
+    cfg_file.write_text(
+        yaml.safe_dump({"notify_on_completion": mode}, allow_unicode=True),
+        encoding="utf-8",
+    )
+    assert load_config(None).notify_on_completion == mode
+
+
+@pytest.mark.parametrize("bad", ["", "garbage", "SUCCESS", "Success", "always"])
+def test_notify_on_completion_falls_back_on_unknown_mode(tmp_path, monkeypatch, bad):
+    """手改 config.yml 写错模式名时，load 不抛异常、回到默认 success。"""
+    cfg_file = tmp_path / "config.yml"
+    monkeypatch.setattr(config_mod, "DEFAULT_CONFIG_PATH", cfg_file)
+    cfg_file.write_text(
+        yaml.safe_dump({"notify_on_completion": bad}, allow_unicode=True),
+        encoding="utf-8",
+    )
+    assert load_config(None).notify_on_completion == "success"
+
+
+def test_notify_on_completion_in_to_dict():
+    """to_dict() 必须包含该字段——settings.py 的 _on_save 依赖这一点。"""
+    assert "notify_on_completion" in AppConfig().to_dict()
+
+
+# ---------------------------------------------------------------------------
 # 主题解析
 # ---------------------------------------------------------------------------
 

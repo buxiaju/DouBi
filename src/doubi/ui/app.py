@@ -188,6 +188,14 @@ def main(argv: list[str] | None = None) -> int:
     from .theme import set_theme
 
     app = QApplication(sys.argv)
+    # 关窗 ≠ 退出进程：默认 Qt 在「最后一个窗口 close」时退出 app，这
+    # 与我们 0.3.0 起的「关到托盘」语义直接冲突——主窗口关时 app 会
+    # 立即结束，托盘根本来不及跑任何信号，整个 M6.18 的「后台运行 +
+    # 通知 + 唤回」链路就废了。这里把 quitOnLastWindowClosed 显式关掉，
+    # 让 app 跟着 ``MainWindow.quit()``（托盘「退出」菜单触发）走。
+    # 兜底：万一所有窗口都没正常退出（比如用户用任务管理器结束主窗口），
+    # 托盘也能让用户「退出」按钮收尾。
+    app.setQuitOnLastWindowClosed(False)
     _apply_app_branding(app)
 
     # Install hooks after logger + QApplication both exist (we need

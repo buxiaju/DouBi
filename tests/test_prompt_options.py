@@ -75,11 +75,55 @@ def test_dialog_prefills_from_seed(host):
         # 是漏改 i18n，不是漏改弹窗。
         assert dlg.yesButton.text() == "下载"
         assert dlg.cancelButton.text() == "取消"
+        # M6.16：标题修改默认是「不勾选 + 输入框禁用」，避免「我以为我
+        # 用默认」的事故——强制用户先勾再编辑。
+        assert dlg.modify_title_check.isChecked() is False
+        assert dlg.title_input.isEnabled() is False
+        # 输入框预填 "{title}" 是个让用户立刻看见「模板可写」的占位提示。
+        assert dlg.title_input.text() == "{title}"
     finally:
         dlg.deleteLater()
 
 
-def test_collect_prompt_overrides_returns_exactly_four_fields(host):
+def test_dialog_modify_title_check_toggles_input_enabled(host):
+    """勾上复选框后输入框必须可用——这是「先勾再编辑」契约。"""
+    from doubi.ui.pages.parse import PromptOptionsDialog
+    from doubi.core.models import DownloadOptions
+
+    dlg = PromptOptionsDialog(host, DownloadOptions())
+    try:
+        assert dlg.title_input.isEnabled() is False
+        dlg.modify_title_check.setChecked(True)
+        assert dlg.title_input.isEnabled() is True
+        dlg.modify_title_check.setChecked(False)
+        assert dlg.title_input.isEnabled() is False
+    finally:
+        dlg.deleteLater()
+
+
+def test_dialog_summary_label_reflects_item_count(host):
+    """摘要行的措辞随 item_count 切换——单条/多条要明确。"""
+    from doubi.ui.pages.parse import PromptOptionsDialog
+    from doubi.core.models import DownloadOptions
+
+    single = PromptOptionsDialog(host, DownloadOptions(), item_count=1)
+    try:
+        assert "1 个视频" in single.summary.text()
+    finally:
+        single.deleteLater()
+
+    batch = PromptOptionsDialog(host, DownloadOptions(), item_count=5)
+    try:
+        text = batch.summary.text()
+        assert "5 个视频" in text
+        # 批量时必须把「模板逐个应用」这层语义写进摘要——否则用户会
+        # 误以为「5 个文件都改成同一个标题」。
+        assert "模板" in text or "逐个" in text
+    finally:
+        batch.deleteLater()
+
+
+def test_collect_prompt_overrides_returns_exactly_five_fields(host):
     from doubi.ui.pages.parse import PromptOptionsDialog, collect_prompt_overrides
     from doubi.core.models import DownloadOptions
 
@@ -87,9 +131,13 @@ def test_collect_prompt_overrides_returns_exactly_four_fields(host):
     dlg = PromptOptionsDialog(host, seed)
     try:
         out = collect_prompt_overrides(dlg)
+        # M6.16：多了一个 title_template（默认 None = 不改）。
         assert set(out) == {
             "max_quality", "container", "write_thumbnail", "write_metadata_json",
-        }, f"overrides 只能暴露 4 个字段，实际 {set(out)}"
+            "title_template",
+        }, f"overrides 只能暴露 5 个字段，实际 {set(out)}"
+        # 默认未勾选 → title_template 必须是 None（区别于空字符串 ""）。
+        assert out["title_template"] is None
     finally:
         dlg.deleteLater()
 
@@ -106,13 +154,50 @@ def test_collect_prompt_overrides_reflects_user_edits(host):
         dlg.container.setCurrentText("mkv")
         dlg.thumb.setChecked(True)
         dlg.metadata_json.setChecked(True)
+        dlg.modify_title_check.setChecked(True)
+        dlg.title_input.setText("番外-{title}")
         out = collect_prompt_overrides(dlg)
         assert out == {
             "max_quality": "4k",
             "container": "mkv",
             "write_thumbnail": True,
             "write_metadata_json": True,
+            "title_template": "番外-{title}",
         }
+    finally:
+        dlg.deleteLater()
+
+
+def test_collect_prompt_overrides_title_unchecked_strips_template(host):
+    """复选框未勾选时即使输入框里有文字，也必须返回 None——"勾选才生效"。
+
+    这是弹窗的「显式 opt-in」契约：残留文字不能自动生效。回归到这条
+    任何一处都会让「我以为我没改标题」的事故重新出现。
+    """
+    from doubi.ui.pages.parse import PromptOptionsDialog, collect_prompt_overrides
+    from doubi.core.models import DownloadOptions
+
+    dlg = PromptOptionsDialog(host, DownloadOptions())
+    try:
+        # 模拟用户曾在输入框里打过字、但最后没勾复选框就关了弹窗。
+        dlg.title_input.setText("番外-{title}")
+        out = collect_prompt_overrides(dlg)
+        assert out["title_template"] is None
+    finally:
+        dlg.deleteLater()
+
+
+def test_collect_prompt_overrides_empty_input_falls_back_to_token(host):
+    """勾了但输入框留空 → 模板用 {title}（不修改），不是空串。"""
+    from doubi.ui.pages.parse import PromptOptionsDialog, collect_prompt_overrides
+    from doubi.core.models import DownloadOptions
+
+    dlg = PromptOptionsDialog(host, DownloadOptions())
+    try:
+        dlg.modify_title_check.setChecked(True)
+        dlg.title_input.setText("")
+        out = collect_prompt_overrides(dlg)
+        assert out["title_template"] == "{title}"
     finally:
         dlg.deleteLater()
 
@@ -144,6 +229,100 @@ def test_overrides_unknown_keys_are_dropped(host):
     assert out.database == opts.database, "unknown key 必须被过滤，不能影响 database"
     assert out.max_quality == "8k"
     assert out.container == "mp4"
+
+
+# ---- 1b. apply_title_template 纯函数（不依赖 PySide6）---------------------
+#
+# 这组用例不依赖 Qt——只验证「标题模板」这个 per-item 操作的渲染逻辑。
+# 模板可能在弹窗外被复用（比如未来从 REST 入口接收 rename_rule），所以
+# 把核心规则锁在纯函数上、不与 QLineEdit 强耦合。
+
+
+def _make_item(title: str, item_id: str = "x1"):
+    """构造一个最小可用的 MediaItem 供纯函数测试用。"""
+    from doubi.core.models import MediaItem, Platform
+    return MediaItem(platform=Platform.BILIBILI, item_id=item_id, title=title)
+
+
+def test_apply_title_template_none_is_noop():
+    """None / 空串 → 一律不动 — 这是「未勾选复选框」对应的语义。"""
+    from doubi.ui.pages.parse import apply_title_template
+
+    items = [_make_item("原标题 A"), _make_item("原标题 B")]
+    apply_title_template(items, None)
+    apply_title_template(items, "")
+    assert [i.title for i in items] == ["原标题 A", "原标题 B"]
+
+
+def test_apply_title_template_token_passthrough():
+    """{title} 单独作为模板 → 等价于不改。"""
+    from doubi.ui.pages.parse import apply_title_template
+
+    items = [_make_item("原标题 A"), _make_item("原标题 B")]
+    apply_title_template(items, "{title}")
+    assert [i.title for i in items] == ["原标题 A", "原标题 B"]
+
+
+def test_apply_title_template_prefix_per_item():
+    """「番外-{title}」→ 每个 item 各自加前缀，互不影响。"""
+    from doubi.ui.pages.parse import apply_title_template
+
+    items = [_make_item("第一集"), _make_item("第二集"), _make_item("第三集")]
+    apply_title_template(items, "番外-{title}")
+    assert [i.title for i in items] == [
+        "番外-第一集", "番外-第二集", "番外-第三集",
+    ]
+
+
+def test_apply_title_template_suffix_per_item():
+    """「{title}_4K」→ 追加后缀。"""
+    from doubi.ui.pages.parse import apply_title_template
+
+    items = [_make_item("高清测试")]
+    apply_title_template(items, "{title}_4K")
+    assert items[0].title == "高清测试_4K"
+
+
+def test_apply_title_template_literal_string_renames_all():
+    """模板里没有 {title} → 全部用同一字符串（用户明确选择）。"""
+    from doubi.ui.pages.parse import apply_title_template
+
+    items = [_make_item("A"), _make_item("B"), _make_item("C")]
+    apply_title_template(items, "我的合集")
+    assert [i.title for i in items] == ["我的合集", "我的合集", "我的合集"]
+
+
+def test_apply_title_template_sanitizes_illegal_chars():
+    """注入文件系统非法字符必须被净化——这是「不污染文件系统」承诺。
+
+    复用 naming._sanitize 的规则，把 Windows 保留字（<>:"/\\|?*）替换
+    成下划线。任何「我注入特殊字符想覆盖其他文件」的攻击在这里都会
+    变成「和正常文件路径一样」的下划线，没机会逃逸。
+    """
+    from doubi.ui.pages.parse import apply_title_template
+
+    items = [_make_item("原始")]
+    apply_title_template(items, '邪恶<:"|?*>{title}')
+    # 注意：原始的「原始」仍然出现在结果里（template 末尾是 {title}），
+    # 非法字符全部变下划线。
+    assert "<" not in items[0].title
+    assert ">" not in items[0].title
+    assert '"' not in items[0].title
+    assert ":" not in items[0].title
+    assert "|" not in items[0].title
+    assert "?" not in items[0].title
+    assert "*" not in items[0].title
+    assert "原始" in items[0].title
+
+
+def test_apply_title_template_multiple_tokens_replaced():
+    """模板里出现多次 {title} 也只取当前 item 的 title——不会出现串号。"""
+    from doubi.ui.pages.parse import apply_title_template
+
+    items = [_make_item("苹果"), _make_item("香蕉")]
+    apply_title_template(items, "{title}的{title}相册")
+    assert items[0].title == "苹果的苹果相册"
+    assert items[1].title == "香蕉的香蕉相册"
 
 
 # ---- 2. ParsePage 集成：默认行为不被破坏 --------------------------------
@@ -230,6 +409,10 @@ def test_options_for_overrides_keeps_other_fields_intact(qapp, tmp_path):
             "container": "mkv",
             "write_thumbnail": True,
             "write_metadata_json": True,
+            # M6.16：title_template 不在 DownloadOptions 里，必须被
+            # _options_for_overrides 的白名单过滤掉——否则 dataclasses.replace
+            # 会因为 unknown kwarg 抛 TypeError，弹窗 5 字段契约被破坏。
+            "title_template": "番外-{title}",
         })
         # overrides 里给的 4 个字段必须确实被改。
         assert out.max_quality == "4k"

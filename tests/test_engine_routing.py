@@ -849,6 +849,194 @@ class TestNm3u8dlEngineProgressParsing:
         from doubi.engines.nm3u8dl import _ERROR_RE
         assert _ERROR_RE.search("[ERROR] something went wrong") is not None
 
+    def test_total_seg_regex_full_width_colon(self):
+        """N_m3u8DL-CLI v3.0.2 输出的是「总分片：9425」（全角冒号）。
+
+        这是 watchdog 用的关键信号：发现 total_segments 的最早期
+        来源（比 meta.json 落盘更早）。如果哪天 N_m3u8DL-CLI 切回
+        半角冒号，正则也要兼容——所以下面那一条专门测半角。
+        """
+        from doubi.engines.nm3u8dl import _TOTAL_SEG_RE
+        m = _TOTAL_SEG_RE.search("19:10:29.780 总分片：9425, 已选择分片：9425")
+        assert m is not None and m.group(1) == "9425"
+
+    def test_total_seg_regex_half_width_colon(self):
+        """半角冒号是 fallback——任何切换都不应让 watchdog 失明。"""
+        from doubi.engines.nm3u8dl import _TOTAL_SEG_RE
+        m = _TOTAL_SEG_RE.search("total segments: 1234")
+        # 我们的正则只匹配「总分片」+ 冒号，不会误匹配「total segments」。
+        # 这是有意的：避免把英文日志当成信号源。
+        assert m is None
+
+    def test_total_seg_regex_handles_varying_whitespace(self):
+        """冒号后允许任意空白——v3.0.2 实测是「：9425」无空格，但仍容错。"""
+        from doubi.engines.nm3u8dl import _TOTAL_SEG_RE
+        m = _TOTAL_SEG_RE.search("总分片：    100")
+        assert m is not None and m.group(1) == "100"
+
+
+class TestNm3u8dlWatchdog:
+    """v3.0.2 的进度修复：N_m3u8DL-CLI 不再输出 ``[#N/M]`` 格式，watchdog
+    转去采样输出目录下的 ``.ts`` 文件算分片级 fraction。
+
+    这组用例只测 watchdog 用到的两个纯函数（``_discover_total_segments``、
+    ``_count_completed_segments``）——1Hz 协程本身的循环 / cancel 退出
+    行为是 asyncio 标准模式，由 ``_watchdog`` 内部套用，不需要单测。
+    """
+
+    def test_discover_total_segments_reads_meta_json(self, tmp_path):
+        """meta.json 存在 + 结构正常 → 返回 m3u8Info.count。"""
+        from doubi.engines.nm3u8dl import _discover_total_segments
+
+        save_dir = tmp_path / "video123"
+        save_dir.mkdir()
+        meta = {
+            "m3u8": "https://example.com/index.m3u8",
+            "m3u8Info": {
+                "originalCount": 9425,
+                "count": 9425,
+                "vod": True,
+            },
+        }
+        (save_dir / "meta.json").write_text(
+            __import__("json").dumps(meta, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        # save_name 是 Path（来自 .with_suffix("")）
+        assert _discover_total_segments(tmp_path, tmp_path / "video123") == 9425
+
+    def test_discover_total_segments_missing_returns_zero(self, tmp_path):
+        """meta.json 不存在 → 返回 0（watchdog 会下次重试）。"""
+        from doubi.engines.nm3u8dl import _discover_total_segments
+
+        # tmp_path 存在但 save_dir 子目录不在
+        save_name = tmp_path / "nope"
+        assert _discover_total_segments(tmp_path, save_name) == 0
+
+    def test_discover_total_segments_malformed_json_returns_zero(self, tmp_path):
+        """JSON 损坏 → 不抛异常，返回 0。"""
+        from doubi.engines.nm3u8dl import _discover_total_segments
+
+        save_dir = tmp_path / "video123"
+        save_dir.mkdir()
+        (save_dir / "meta.json").write_text("{not valid json", encoding="utf-8")
+        assert _discover_total_segments(tmp_path, save_dir) == 0
+
+    def test_discover_total_segments_missing_m3u8info_returns_zero(self, tmp_path):
+        """meta.json 是合法 JSON 但没有 m3u8Info → 0。"""
+        from doubi.engines.nm3u8dl import _discover_total_segments
+
+        save_dir = tmp_path / "video123"
+        save_dir.mkdir()
+        (save_dir / "meta.json").write_text('{"foo": "bar"}', encoding="utf-8")
+        assert _discover_total_segments(tmp_path, save_dir) == 0
+
+    def test_discover_total_segments_count_zero_returns_zero(self, tmp_path):
+        """m3u8Info.count 为 0（直播流）→ 视为未知，回 0 避免除零。"""
+        from doubi.engines.nm3u8dl import _discover_total_segments
+        import json
+
+        save_dir = tmp_path / "video123"
+        save_dir.mkdir()
+        (save_dir / "meta.json").write_text(
+            json.dumps({"m3u8Info": {"count": 0, "vod": False}}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        assert _discover_total_segments(tmp_path, save_dir) == 0
+
+    def test_count_completed_segments_empty_dir(self, tmp_path):
+        from doubi.engines.nm3u8dl import _count_completed_segments
+        assert _count_completed_segments(tmp_path) == 0
+
+    def test_count_completed_segments_flat_layout(self, tmp_path):
+        """flat 布局：所有 .ts 直接在 out_dir 下。"""
+        from doubi.engines.nm3u8dl import _count_completed_segments
+
+        for i in range(5):
+            (tmp_path / f"{i:07d}.ts").touch()
+        # 混入一些「不是分片」的文件，确认它们被忽略
+        (tmp_path / "meta.json").touch()
+        (tmp_path / "raw.m3u8").touch()
+        (tmp_path / "video.mp4").touch()
+        (tmp_path / "info.txt").touch()
+        assert _count_completed_segments(tmp_path) == 5
+
+    def test_count_completed_segments_part_subdir_layout(self, tmp_path):
+        """Part_N/ 子目录布局：v3.0.2 大文件会拆成 Part_0/ Part_1/ ...。"""
+        from doubi.engines.nm3u8dl import _count_completed_segments
+
+        for part in (0, 1, 2):
+            part_dir = tmp_path / f"Part_{part}"
+            part_dir.mkdir()
+            for i in range(3):
+                (part_dir / f"{i:07d}.ts").touch()
+        assert _count_completed_segments(tmp_path) == 9
+
+    def test_count_completed_segments_mixed_layout(self, tmp_path):
+        """混合：flat + Part_* 同时存在 → 总数相加。"""
+        from doubi.engines.nm3u8dl import _count_completed_segments
+
+        for i in range(2):
+            (tmp_path / f"{i:07d}.ts").touch()
+        part_dir = tmp_path / "Part_0"
+        part_dir.mkdir()
+        for i in range(3):
+            (part_dir / f"{i:07d}.ts").touch()
+        assert _count_completed_segments(tmp_path) == 5
+
+    def test_count_completed_segments_ignores_dotfiles(self, tmp_path):
+        """.tmp / .part / 其他隐藏文件不计入。"""
+        from doubi.engines.nm3u8dl import _count_completed_segments
+
+        (tmp_path / "0000.ts").touch()
+        (tmp_path / ".tmp").touch()  # 隐藏文件
+        (tmp_path / "001.partial").touch()  # 不是 .ts
+        assert _count_completed_segments(tmp_path) == 1
+
+    def test_count_completed_segments_oserror_returns_zero(self, tmp_path):
+        """out_dir 不存在 / 不可访问 → 0 而不是抛异常（watchdog 会下次重试）。"""
+        from doubi.engines.nm3u8dl import _count_completed_segments
+
+        missing = tmp_path / "no_such_dir"
+        assert _count_completed_segments(missing) == 0
+
+    def test_discover_total_segments_deep_layout(self, tmp_path):
+        """真实的 N_m3u8DL-CLI 目录结构是 out_dir/<saveName 子目录>/meta.json。
+
+        这条测试是 M6.17 进度条 bug 修复的回归守卫：watchdog 之前
+        只扫 out_dir 一层，看不到 N_m3u8DL-CLI 自己创建的子目录，导
+        致 total_segments 永远 0、进度条永远 0%。修法是递归 3 层。
+        """
+        from doubi.engines.nm3u8dl import _discover_total_segments
+        import json
+
+        # out_dir/<saveName_tail>/meta.json
+        nested = tmp_path / "Downloaded.generic.unknown_author.video.silidm.com.天下_335f422619e63d5a"
+        nested.mkdir()
+        (nested / "meta.json").write_text(
+            json.dumps({"m3u8Info": {"count": 9425, "vod": True}}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        # save_name.name 是「天下_335f422619e63d5a」——不包含 out_dir 路径
+        # 部分，正是这个错位让早期版本读不到 meta.json。
+        assert _discover_total_segments(tmp_path, tmp_path / "天下_335f422619e63d5a") == 9425
+
+    def test_count_completed_segments_deep_layout(self, tmp_path):
+        """out_dir/<saveName_tail>/Part_0/*.ts 三层目录结构的 .ts 计数。"""
+        from doubi.engines.nm3u8dl import _count_completed_segments
+
+        # out_dir/<saveName_tail>/Part_0/{0000..}.ts
+        nested = tmp_path / "video_xyz"
+        nested.mkdir()
+        part_dir = nested / "Part_0"
+        part_dir.mkdir()
+        for i in range(50):
+            (part_dir / f"{i:07d}.ts").touch()
+        # 混入「非分片」文件确认它们被忽略
+        (nested / "meta.json").touch()
+        (nested / "raw.m3u8").touch()
+        assert _count_completed_segments(tmp_path) == 50
+
 
 class TestPipelineEngineRoutingWithNm3u8dl:
     def test_nm3u8dl_takes_priority_over_m3u8(self):

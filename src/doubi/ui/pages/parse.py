@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -54,7 +55,12 @@ def _build_prompt_dialog_class():
     PySide6 — the rest of ``parse.py`` is unrelated to the dialog.
     """
     from PySide6.QtWidgets import (
-        QCheckBox, QComboBox, QFormLayout, QWidget,
+        QCheckBox,
+        QComboBox,
+        QFormLayout,
+        QLabel,
+        QLineEdit,
+        QWidget,
     )
     from qfluentwidgets import MessageBoxBase
 
@@ -63,14 +69,37 @@ def _build_prompt_dialog_class():
 
         Pre-fills from ``seed``: typically the current ``DownloadOptions``
         so the user only tweaks what they want to change.
+
+        ``item_count`` controls the batch summary line at the top and
+        the placeholder hint for the title template input.  When
+        ``item_count == 1`` the title template applies to a single
+        item; when ``> 1`` the same template is applied to every item
+        with each item's own ``{title}`` token replaced — this matches
+        the user expectation that "modifying title" means "rules for
+        how the filename title is rendered", not "one shared title".
         """
 
-        def __init__(self, parent: QWidget, seed):
+        def __init__(self, parent: QWidget, seed, item_count: int = 1):
             super().__init__(parent)
             # 默认按钮文案是 'OK' / 'Cancel'——这个版本的 qfluentwidgets
             # 没有提供 label 自带的 setTitle 之外的文案入口，直接改。
             self.yesButton.setText("下载")
             self.cancelButton.setText("取消")
+
+            self._item_count = max(1, int(item_count))
+
+            # ---- 摘要行：明确告诉用户这一批有几个 ----
+            # 挂成实例属性 self.summary——单元测试要直接读它的 text()。
+            self.summary = QLabel(self)
+            if self._item_count == 1:
+                self.summary.setText("将下载 1 个视频。")
+            else:
+                self.summary.setText(
+                    f"将下载 {self._item_count} 个视频，"
+                    "标题模板会逐个应用到每个视频。"
+                )
+            self.summary.setWordWrap(True)
+            self.viewLayout.addWidget(self.summary)
 
             self.quality = QComboBox(self)
             self.quality.addItems(_QUALITY_CHOICES)
@@ -78,6 +107,22 @@ def _build_prompt_dialog_class():
             self.container.addItems(_CONTAINER_CHOICES)
             self.thumb = QCheckBox("生成缩略图 (.jpg)", self)
             self.metadata_json = QCheckBox("写入 metadata.json", self)
+
+            # ---- 标题修改区：只读 + 复选框（默认不修改）----
+            # 见 CHANGELOG M6.16：勾选才编辑，规避「我想用默认结果但忘了清空
+            # 输入框」导致的整批重命名事故。批量时模板用 {title} 占位，单条
+            # 时也是 {title} —— 一致语义。
+            self.modify_title_check = QCheckBox("修改视频标题", self)
+            self.title_input = QLineEdit(self)
+            self.title_input.setText("{title}")
+            self.title_input.setPlaceholderText(
+                "留空用 {title}；可用 {title} 表示原标题，"
+                "如：番外-{title}、{title}_4K"
+            )
+            # 默认未勾选 → 输入框禁用，提示「先勾选再编辑」语义。
+            self.title_input.setEnabled(False)
+            self.modify_title_check.setChecked(False)
+            self.modify_title_check.toggled.connect(self.title_input.setEnabled)
 
             # seed -> 控件当前值
             self.quality.setCurrentText(str(seed.max_quality))
@@ -91,6 +136,7 @@ def _build_prompt_dialog_class():
             form.addRow("容器格式", self.container)
             form.addRow("附加产物", self.thumb)
             form.addRow("", self.metadata_json)
+            form.addRow(self.modify_title_check, self.title_input)
             self.viewLayout.addLayout(form)
 
     return PromptOptionsDialog
@@ -101,15 +147,83 @@ def collect_prompt_overrides(dialog) -> dict:
 
     Kept module-level so unit tests can verify field collection without
     ``exec()`` (which would block in offscreen tests). Returns a dict
-    that can be passed straight into ``dataclasses.replace(options, **x)``.
-    Only the four fields the dialog exposes are ever set — no spillover.
+    that can be passed straight into ``dataclasses.replace(options, **x)``
+    for the four option fields, plus ``title_template`` for the per-item
+    title override. ``title_template`` is ``None`` when the user did not
+    tick the "修改视频标题" checkbox, so downstream code can distinguish
+    "leave alone" from "use this exact text" — both look like a non-empty
+    string from the input box's point of view.
     """
+    # 复选框未勾选 → 一律视为不改；即使输入框里残留文字也不生效。这把
+    # 「勾选才生效」的承诺写进 collect 端，避免后续 apply_title_template
+    # 还要再判一次 enable 状态。
+    if not dialog.modify_title_check.isChecked():
+        title_template: Optional[str] = None
+    else:
+        text = dialog.title_input.text().strip()
+        title_template = text or "{title}"
     return {
         "max_quality": dialog.quality.currentText(),
         "container": dialog.container.currentText(),
         "write_thumbnail": dialog.thumb.isChecked(),
         "write_metadata_json": dialog.metadata_json.isChecked(),
+        "title_template": title_template,
     }
+
+
+# ---------------------------------------------------------------------------
+# Per-item title template application (M6.16)
+# ---------------------------------------------------------------------------
+#
+# The dialog lets the user opt-in to a *title template* (default ``{title}``)
+# which is applied to every MediaItem in the batch right before it is enqueued.
+# The same template works for both single-item and multi-item cases:
+#
+# * ``"{title}"``               — no-op, original title preserved (also the
+#                                 value we substitute when the user clears
+#                                 the input box).
+# * ``"番外-{title}"``           — every file gets a 「番外-」 prefix.
+# * ``"{title}_4K"``             — every file gets a 「_4K」 suffix.
+# * ``"我的合集"``                — every file renamed to a shared string
+#                                 (user explicitly chose this — batch semantics).
+#
+# The output is sanitised via the same ``naming._sanitize`` used by the
+# filename template pipeline, so an injected ``<>:"/\\|?*`` cannot survive
+# into the filesystem layer.  The sanitiser is reused rather than re-
+# implemented here so the "what is a safe basename" rule stays in one
+# place; if it ever changes, this path picks it up for free.
+#
+# This function is module-level and pure: no Qt, no ``self`` — unit tests
+# cover the rendering logic directly.
+
+_TITLE_TOKEN_RE = re.compile(r"\{title\}")
+
+
+def apply_title_template(items, template: Optional[str]):
+    """Mutate each item's ``title`` in place according to ``template``.
+
+    ``None`` (or an empty string) is a no-op — the checkbox was not
+    ticked, so the caller wants the original title preserved.
+
+    The token ``{title}`` is substituted with the item's current title
+    (already sanitised at this point, since it was sanitised on the way
+    in via ``MediaItem.title``).  Templates without the token rename
+    every file to the same string, which is the documented batch
+    behaviour.
+    """
+    if not template:
+        return
+    # Lazy import keeps this module importable without naming's optional
+    # dependency footprint (naming has no optional deps itself today, but
+    # the boundary lets us swap implementations later).
+    from doubi.core.naming import _sanitize
+
+    for it in items:
+        if _TITLE_TOKEN_RE.search(template):
+            rendered = _TITLE_TOKEN_RE.sub(it.title or "", template)
+        else:
+            rendered = template
+        it.title = _sanitize(rendered) or (it.title or "")
 
 
 # 模块顶层的轻量引用，仅当 Qt 可用时才被解析；测试在没装 Qt 的环境下
@@ -219,7 +333,7 @@ def build_parse_widgets():
                 self.url_input.setPlainText(current + "\n" + text)
             else:
                 self.url_input.setPlainText(text)
-            self._toast(InfoBar.information, "检测到链接",
+            self._toast(InfoBar.info, "检测到链接",
                         f"已从剪贴板填入：{text[:60]}")
 
         # ---- public API ----------------------------------------------
@@ -242,12 +356,20 @@ def build_parse_widgets():
             self._cfg.sniff_enabled = enabled
             self._cfg.sniff_duration_sec = duration_sec
 
-        def _ask_prompt_overrides(self) -> Optional[dict]:
+        def _ask_prompt_overrides(
+            self,
+            targets: Optional[list] = None,
+        ) -> Optional[dict]:
             """弹「下载选项」对话框。返回 None 表示用户取消。
 
             默认行为是「点一下就走」：``self._prompt_before_download`` 未
             开启时直接返回空 dict，让 ``_options_for_overrides`` 走默认
             配置——这条路径在测试里也大量存在，不能被破坏。
+
+            ``targets`` 是本批待下载的 MediaItem 列表，仅用于让弹窗
+            显示「将下载 N 个视频」摘要行。允许为 None（旧调用方 +
+            单元测试路径），此时按 N=1 处理；这是历史契约，不能因
+            新增参数而让旧测试报 TypeError。
             """
             if not getattr(self, "_prompt_before_download", False):
                 return {}
@@ -255,7 +377,8 @@ def build_parse_widgets():
             # 成 None——这是理论兜底，正常 GUI 环境总是可用。
             if PromptOptionsDialog is None:
                 return {}
-            dlg = PromptOptionsDialog(self, self._build_options())
+            item_count = len(targets) if targets else 1
+            dlg = PromptOptionsDialog(self, self._build_options(), item_count=item_count)
             if not dlg.exec():
                 return None
             return collect_prompt_overrides(dlg)
@@ -480,10 +603,13 @@ def build_parse_widgets():
                     return
                 # 弹「下载选项」对话框：用户取消 = 整批不入队；用户确认 = 用
                 # 弹窗里的覆盖项拼出 options。没启用提示时直接走默认配置。
-                overrides = self._ask_prompt_overrides()
+                overrides = self._ask_prompt_overrides(targets)
                 if overrides is None:
                     return
                 opts = self._options_for_overrides(overrides)
+                # 标题模板是 per-item 的，不能走 dataclasses.replace(options, ...)
+                # ——直接改 MediaItem.title，naming.render_filename 会拿到新值。
+                apply_title_template(targets, overrides.get("title_template"))
                 for it in targets:
                     self._task_manager.add(it, opts)
                 self._toast(InfoBar.success, "已加入下载队列",
@@ -1240,10 +1366,13 @@ def build_parse_widgets():
                     return
                 # 弹「下载选项」对话框：用户取消 = 整批不入队；用户确认 = 用
                 # 弹窗里的覆盖项拼出 options。没启用提示时直接走默认配置。
-                overrides = self._ask_prompt_overrides()
+                overrides = self._ask_prompt_overrides(targets)
                 if overrides is None:
                     return
                 opts = self._options_for_overrides(overrides)
+                # 标题模板是 per-item 的，不能走 dataclasses.replace(options, ...)
+                # ——直接改 MediaItem.title，naming.render_filename 会拿到新值。
+                apply_title_template(targets, overrides.get("title_template"))
                 for it in targets:
                     self._task_manager.add(it, opts)
                 self._toast(InfoBar.success, "已加入下载队列", f"共 {len(targets)} 项。")

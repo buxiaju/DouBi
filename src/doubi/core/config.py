@@ -70,6 +70,12 @@ DEFAULTS: dict[str, Any] = {
         "application/vnd.apple.mpegurl",
         "application/dash+xml",
     ),
+    # ---- 系统通知（Windows toast via QSystemTrayIcon） ----
+    # 下载完成后是否弹通知。三个值：
+    #   "success"  — 只在「成功」时弹（推荐：失败有 GUI 弹窗，不重）
+    #   "all"      — 成功 + 失败都弹（多任务并发走完一眼看结果）
+    #   "summary"  — 单个任务静默；队列全部跑完时弹一次汇总（N 项完成 / M 项失败）
+    "notify_on_completion": "success",
 }
 
 
@@ -108,6 +114,8 @@ class AppConfig:
     sniff_user_agent: str = DEFAULTS["sniff_user_agent"]
     sniff_auto_play: bool = DEFAULTS["sniff_auto_play"]
     sniff_capture_types: tuple[str, ...] = DEFAULTS["sniff_capture_types"]
+    # 系统通知范围。允许值见 ``DEFAULTS["notify_on_completion"]`` 注释。
+    notify_on_completion: str = DEFAULTS["notify_on_completion"]
     extra: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -116,6 +124,19 @@ class AppConfig:
         d["database_path"] = str(self.database_path)
         d["manifest_path"] = str(self.manifest_path)
         return d
+
+
+def _validate_notify_mode(value: Any) -> str:
+    """Whitelist the ``notify_on_completion`` setting.
+
+    Anything outside ``{"success", "all", "summary"}`` falls back to
+    the default (``"success"``). A bad value in ``config.yml`` should
+    never break the app boot path — the worst case is "user doesn't
+    get notifications", which is recoverable on the settings page.
+    """
+    if isinstance(value, str) and value in {"success", "all", "summary"}:
+        return value
+    return DEFAULTS["notify_on_completion"]
 
 
 def _coerce(value: Any, default: Any) -> Any:
@@ -226,5 +247,8 @@ def load_config(path: Optional[Path] = None, *, env_prefix: str = "DOUBI_") -> A
             DEFAULTS["sniff_auto_play"],
         ),
         sniff_capture_types=tuple(data.get("sniff_capture_types", DEFAULTS["sniff_capture_types"])),
+        notify_on_completion=_validate_notify_mode(
+            data.get("notify_on_completion", DEFAULTS["notify_on_completion"]),
+        ),
     )
     return cfg

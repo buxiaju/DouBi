@@ -2058,28 +2058,235 @@ RPC 客户端是注入的（`Aria2RpcClient` Protocol），测试用内存 Mock 
 
 ---
 
-## 0.2.0 统计（M6.4–M6.15 累计）
+## 0.3.1 (2026-08-30) — 标题模板 + nm3u8dl watchdog 兜底 + 托盘 + 完成通知
 
-- 源码约 75 个 .py 文件，约 19,500 行
-- 测试 26 个文件，**713 passed / 4 skipped**
-  （4 个 skip 均为「无 PySide6 则跳过」的 GUI 用例）
-- 基线演进（按里程碑顺序）：
-  - 381（M6.3 起点）→ 403（M6.4 UI 品牌化 +22）→ 423（M6.5 矢量图标 +20）
-  - → 450（M6.7 抖音合集 +31）→ M6.8 打包无新测试
-  - → M6.9 安全收口 +81 → M6.10 跨进程恢复 +12 → M6.11 选项弹窗 +11
-  - → M6.12 YouTube 适配器 → M6.13 双故障修复
-  - → 687（M6.14 一揽子改进）→ 713（M6.15 直播 + aria2 +26）
-- 视觉/打包产出：
-  - 7 套主题包 + 矢量图标管线（QtSvg 8 档尺寸 + 7 色锚点换色）
-  - `dist/doubi-gui.exe`（onefile，~235 MB）+ `dist/DouBi-Setup-0.2.0.exe`（NSIS LZMA，~213 MB）
+> 0.3.0 发版后追加的 hotfix + UX 改进批次。0.3.0 段里的 M6.16–M6.21
+> 是嗅探/打包/同步相关；本批聚焦「下载体验最后一公里」——
+> 标题模板、进度条、关窗后还能叫回主窗口、下载完成弹通知。
+> 累计新增 33 个测试，回归 901 passed / 3 skipped。
+
+## M6.22 (2026-08-30) — 下载前询问弹窗「修改视频标题」模板
+
+> 把单任务已有的「下载前询问」弹窗扩成支持批量：勾选「修改视频标题」
+> + 填模板（含 `{title}` token）→ 逐 item 渲染到 `MediaItem.title` →
+> 复用既有 `naming.render_filename` 走完整路径。两处入队点都接上。
+
+### 一、UI（`ui/pages/parse.py`）
+
+- `PromptOptionsDialog` 加两个控件（`modify_title_check` + `title_input`），
+  复选框默认未勾选、输入框默认 `setEnabled(False)`，由 `toggled` 驱动
+- 摘要 `summary` 标签按 `item_count` 渲染：「将下载 1 个视频。」vs
+  「将下载 N 个视频，标题模板会逐个应用到每个视频。」
+- `_ask_prompt_overrides(targets=None)` 接受 items 列表（旧契约保留
+  默认参数 = 1 个 item，4 个 `MainWindow()` 集成测试不受影响）
+
+### 二、契约（`collect_prompt_overrides`）
+
+返回 5 个字段（新增 `title_template`），关键边界：
+
+- 复选框**未勾选** → 强制返回 `None`（区别于空串，区别于 token）
+- 勾选但留空 → 回退 `"{title}"`（用户意愿 = "改了，但用默认"）
+- 模板进 `apply_title_template`，**不**进 `DownloadOptions`（`title_template`
+  是 per-item 字段；`_options_for_overrides` 的 `dataclasses.fields`
+  白名单会把它过滤掉，避免 `TypeError`）
+
+### 三、模板渲染（`apply_title_template`）
+
+模块级纯函数，便于无 QApplication 单测：
+
+- `None` / 空串 → no-op
+- 含 `{title}` token → 每 item 用自身 title 替换
+- 不含 token → 全部重命名为同一字符串
+- 结果经 `doubi.core.naming._sanitize` 净化（去掉 Windows 非法字符）
+
+### 四、入队点（`ui/pages/parse.py`）
+
+两处 `self._task_manager.add(...)` 前插入 `apply_title_template(targets,
+overrides.get("title_template"))`，让 `MediaItem.title` 走新值。
+
+### 测试
+
+| 文件 | 用例数 | 覆盖 |
+| --- | --- | --- |
+| `test_prompt_options.py` | +14 | 弹窗预填 / 复选框 toggle / 摘要文案 / 5 字段契约 / 未勾选清空 / 留空回退 / `apply_title_template` 7 例（token pass-through / 前缀 / 后缀 / 字面量 / 净化 / 多 token） |
+
+---
+
+## M6.23 (2026-08-30) — nm3u8dl 进度条修复
+
+> N_m3u8DL-CLI v3.0.2 改成「先 meta.json，再 stdout」两段输出，原先的
+> `[#N/M]` 正则永远不命中，进度条卡在 0%。改成 **1 Hz 文件系统 watchdog**
+> 扫输出目录，与 stdout 格式解耦。`engines/nm3u8dl.py` 单文件 ~345 行
+> 改动。
+
+### 三个 root cause
+
+1. **stdout 格式变了**：v3.0.2 不再输出 `[#N/M]`，改成
+   `时间戳 + 总分片：9425, 已选择分片：9425 + (速度)`，`_PROGRESS_RE`
+   永远不命中
+2. **watchdog 初版只扫 2 层**：N_m3u8DL-CLI 会自建子目录（`--saveName` 含
+   路径时尤甚），2 层深度漏算
+3. **真实目录布局是 3 层**：`out_dir/<saveName_tail>/Part_N/*.ts`
+
+### 改动（`engines/nm3u8dl.py`）
+
+- 新增 `_TOTAL_SEG_RE = re.compile(r"总分片[：:]\s*(\d+)")`：从 stdout 抓
+  总分片数（仅作 best-effort fallback，主路径不依赖）
+- 新增 `_find_meta_json(out_dir)`：定位 `meta.json`，读 `m3u8Info.count`
+  作为权威分片总数
+- 新增 `_discover_total_segments(out_dir, save_name)` + `_count_completed_segments(out_dir)`
+- BFS 通用 helper `_find_first_named(root, name, *, max_depth)` / `_count_files_named(root, suffix, *, max_depth)`
+- `total_segments_box: dict[str, int]` 共享容器（规避 lambda 闭包 rebind）
+- `watchdog_stop = asyncio.Event()` + `_watchdog()` 协程（1Hz，check
+  `cancel_flag.stopped`）+ try/except CancelledError/finally 三条清理路径
+
+### 设计取舍
+
+- watchdog **只依赖文件系统布局**（N_m3u8DL-CLI 的稳定契约），不依赖
+  日志格式 —— 任何 stdout 升级都不会再让它失效
+- BFS 限制 `max_depth=3` 而不是无限递归：N_m3u8DL-CLI 不会超过 3 层
+  嵌套，再深是别的问题
+
+### 测试
+
+| 文件 | 用例数 | 覆盖 |
+| --- | --- | --- |
+| `test_engine_routing.py` | +16 | `TestNm3u8dlWatchdog` 13 例（meta.json 解析、总分片发现、已完成计数、BFS helper、watchdog 启停）+ `_TOTAL_SEG_RE` 3 例（中文 / 英文冒号 / 多位数）+ 2 个深层目录回归守卫（`test_discover_total_segments_deep_layout` / `test_count_completed_segments_deep_layout`） |
+
+### 端到端验证
+
+- `.scratch/probe_e2e.py` 真实下载 60s → 19 帧回调，0% → 15.2% 单调递增
+- `.scratch/probe_watchdog.py` 模拟 21 帧、1% 精确步进
+
+---
+
+## M6.24 (2026-08-30) — 进度去重 + 系统托盘 + 下载完成通知
+
+> 三项独立 UX 改进打成一发：把 watchdog 漏出的「60% m3u8 下载中 60%」
+> 修了；给关窗后软件丢托盘加回主窗口的口子；下载完成弹系统通知，范围
+> 可在设置页三档切换。新增 `ui/tray.py`（约 250 行）和 33 个新测试，
+> 全部回归 901 passed / 3 skipped。
+
+### 一、进度去重（`engines/nm3u8dl.py` + `ui/pages/download.py`）
+
+- watchdog 的 `on_progress` message 改为 `"m3u8 下载中"`（去掉 `{pct}%`）
+- `TaskRow._friendly_phase` 的逻辑抽成**模块级** `friendly_phase(message)`
+  （便于无 QApplication 单测），`_friendly_phase` 变薄包装
+- `friendly_phase` 新增中文「下载」匹配 + `_PERCENT_RE` 剥离兜底 +
+  剥完为空回退 `"下载中"`
+
+### 二、关窗最小化到托盘
+
+**新增 `ui/tray.py`**（`TrayController` + 4 个 Signal + 右键菜单 +
+`notify_completion` / `notify_summary`）：
+
+- 菜单 4 项：「显示主窗口 / 全部暂停 / 全部继续 / 退出」
+- `_on_activated` 接受 `Trigger` + `DoubleClick`
+- `update_running_state(running=, paused=)` 驱动暂停/继续按钮可用性
+- `notify_completion(*, mode, success, title, error)` 按 `mode` 走
+  `success` / `all` / `summary` 三档
+- `notify_summary(*, succeeded, failed)` 给 `summary` 模式用
+- 留 Python 引用 `self._menu = menu`（`setContextMenu` 不转移所有权）
+
+**`ui/main_window.py`**：
+
+- 构造末尾调 `self._install_tray()`
+- 接管 4 个 task_manager 信号（`task_added` / `task_finished` / `task_failed`
+  / `task_removed`）到 `_on_task_state_changed` → 同步托盘按钮
+- `closeEvent` 加 `_truly_quit` 标志分支：默认 `event.ignore()` +
+  `self.hide()` + 首次「DouBi 在后台运行」toast（`_tray_hide_announced`
+  内存标志，**不**进 config —— 是「本次会话是否已通知」的临时态）
+- 新增 `quit()`（翻标志后 `self.close()`）/ `_install_tray()` /
+  `_show_from_tray()`
+
+**`ui/app.py`**：`QApplication` 构造后立刻
+`app.setQuitOnLastWindowClosed(False)`，否则关窗就结束进程，托盘链路全废。
+
+### 三、下载完成通知
+
+**配置（`core/config.py`）**：
+
+- `DEFAULTS["notify_on_completion"] = "success"`
+- `AppConfig.notify_on_completion: str` 字段
+- `_validate_notify_mode(value)` 白名单校验（非法值回退 `"success"`）
+
+**设置页（`ui/pages/settings.py`）**：外观卡片加 ComboBox「下载完成通知」，
+三档「成功完成 / 成功 + 失败 / 全部完成后弹一次」。`save` / `reload`
+各走一个 combo helper（按索引映射，不走文本查找）。
+
+**下载页（`ui/pages/download.py`）**：
+
+- `_on_task_finished` / `_on_task_failed` 调 `_maybe_notify_completion`
+- `summary` 模式不立刻发：累计 `_succeeded_pending` / `_failed_pending`，
+  500ms `QTimer` 检查 `running_count + paused_count == 0` 才弹汇总
+  （同一时刻批量完成时合并成一条 toast）
+
+### 四、两个 shipped bug
+
+- `tray.py` 的 `_on_activated` 用 `int(reason)` 抛
+  `TypeError: int() argument must be ... not 'ActivationReason'`
+  （PySide6 的 `ActivationReason` 是 QFlags 风格枚举）—— 改为
+  `reason.value if hasattr(reason, "value") else int(reason)`
+- `main_window.closeEvent` 里 `self.tray.show_window_requested.disconnect()`
+  名义「防止重复连」，实际**第一次关窗就把所有槽全断了**，托盘「显示主
+  窗口」emit 出去没人接 —— 删掉这行，并在注释里写明
+
+### 五、项目既有 bug（顺手修）
+
+- `parse.py:336` 的 `InfoBar.information` → `InfoBar.info`（qfluentwidgets
+  的 `InfoBar` 没有 `information` 属性，每次剪贴板剪到新链接就抛
+  `AttributeError`）
+
+### 测试
+
+| 文件 | 用例数 | 覆盖 |
+| --- | --- | --- |
+| `test_tray.py`（新增） | 18 (+3 skip) | `TestActivationReason` 4 例（Trigger / DoubleClick / Unknown / Context / MiddleClick —— 后三者必须**不**抛异常也不 emit）+ `TestNotifyCompletion` 7 例（success / all / summary 三档边界 + 失败体裁断 + 未知 mode 兜底 + 缺标题占位）+ `TestNotifySummary` 3 例（含零项静默）+ `TestCloseEventDoesNotDisconnectTray` 源码级回归守卫 2 例（`disconnect` 字符串必须不出现在 `closeEvent` 源码里）+ `TestMenuLifetime` 3 例（菜单引用保留 + 6 个 actions + pause/resume 状态切换）+ `TestShutdown` 1 例（幂等） |
+| `test_config_theme.py` | +5 | `notify_on_completion` 字段三档值往返 + 非法值回退 + 默认值 |
+| `test_download_page.py` | +5 / +6 | `TestFriendlyPhaseDedup` 5 例（百分比剥离 + 仅百分比回退 + 中文 / 英文 phase 识别）+ `TestMaybeNotifyCompletion` 6 例（success / all / summary 三档转发 + 无 tray / 无 settings_interface 静默 + flush 路径） |
+
+回归 713 + 18 + 5 + 5 + 6 = 747 → 901（细化后，详见「0.3.1 统计」）。
+
+---
+
+## 0.3.0 统计（通用嗅探 + GUI 体验加固 + 健壮性扫尾）
+
+- 源码 81 个 .py 文件，约 21,000 行
+- 测试 33 个文件，**868 passed / 4 skipped**
+  （4 skip 均为「无 PySide6 则跳过」GUI 用例）
+- 基线演进（M6.16–M6.21 累计）：
+  - 713（M6.15）→ 752（M6.16 通用嗅探四入口 +39）→
+    768（M6.17 打包精简 +16）→ 768（M6.18 SSH + 发版事故 0 新测试）→
+    780（M6.19 catch_lite.js 修复 +12）→
+    825（M6.20 HLS 三个根因 +45）→
+    868（M6.21 CI pydantic +43）
 - 主要新增能力：
-  - 抖音合集批量下载（签名 Web API + a_bogus）
-  - 跨进程断点续传恢复（`pending_task` 表 + 启动询问流程）
-  - REST 安全收口（默认绑回环 + token 鉴权 + 计时侧信道防护）
-  - YouTube 适配器（不到 200 行，验证架构按平台调整 adapter 厚度）
-  - i18n 基础设施（JSON 词表 + 模块级 `tr()`，GUI/CLI/REST 通用）
-  - B 站直播录制（URL 识别 + 类型映射 + 引擎 HLS 适配三层）
-  - aria2 多线程引擎（JSON-RPC + `direct_url` 加速，回退 yt-dlp）
+  - 通用 URL 嗅探（platforms/generic + playwright）
+  - GUI 体验加固（4 个 npm-shrinkwrap-style 修复）
+  - 打包体积精简 54.8% （1501.8 → 678.5 MB）
+  - SSH + Gitee 同步
+  - HLS 下载全废三个根因修复（subproc / M3u8Engine / aiohttp）
+
+---
+
+## 0.3.1 统计（标题模板 + nm3u8dl watchdog 兜底 + 托盘 + 完成通知）
+
+- 源码 85 个 .py 文件，约 22,000 行（M6.22 + 24 累计 + ~1,000 行）
+- 测试 35 个文件，**901 passed / 3 skipped**
+  （3 skip 均为 offscreen 平台下「无系统托盘」GUI 用例，
+   「无 PySide6 则跳过」的 4 例已不再需要——M6.14 把 qasync 依赖
+  改为 optional import）
+- 基线演进（0.3.0 → 0.3.1）：
+  - 868 → 901（+33：M6.22 标题模板 +14 / M6.23 nm3u8dl watchdog +16 / 
+    M6.24 托盘 + 通知 + 通知转发 +3）
+- 主要新增能力：
+  - 下载前询问支持「修改视频标题」+ `{title}` 模板（M6.22）
+  - nm3u8dl 进度条不再卡 0%（1Hz 文件系统 watchdog + meta.json，M6.23）
+  - 关窗最小化到系统托盘（4 项菜单：显示/暂停/继续/退出，M6.24）
+  - 下载完成弹系统通知（成功 / 成功+失败 / 队列空汇总 三档可选，M6.24）
+  - 修复两个 shipped bug（`int(reason)` TypeError / 
+    `show_window_requested.disconnect()` 误断链）
+  - 修复项目既有 `InfoBar.information` AttributeError
 
 ---
 
