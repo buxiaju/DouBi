@@ -36,39 +36,59 @@ python scripts/build_installer.py
 
 正式分发有**两种一键运行形态**（不用装 Python，不用 Playwright install）：
 
-| 形态 | 文件 | 体积（0.3.0） | 说明 |
+| 形态 | 文件 | 体积（0.3.1 实测） | 说明 |
 |---|---|---|---|
-| **NSIS 安装包**（推荐给普通用户） | `dist/DouBi-Setup-0.3.0.exe` | **441.31 MB** | 双击安装到 `%LOCALAPPDATA%\DouBi`，**无 UAC 弹窗**；开始菜单 + 桌面快捷方式；控制面板正常卸载；卸载零残留，`~/.doubi` 配置默认保留 |
-| **Onefile 便携版**（推荐给 U 盘/网盘） | `dist/doubi-gui.exe` | **615.17 MB** | 单文件即跑，启动时自解压到 `%TEMP%/_MEIxxxxx`；免安装；机器之间直接拷 |
-| Onedir 绿色目录（CI/内网分发） | `dist/doubi-gui/` | ~1.5 GB / 4003 文件 | **启动最快**；直接 zip 打包即可发布"绿色版" |
+| **NSIS 安装包**（推荐给普通用户） | `dist/DouBi-Setup-0.3.1.exe` | **219.45 MB**（230,110,981 字节） | 双击安装到 `%LOCALAPPDATA%\DouBi`，**无 UAC 弹窗**；开始菜单 + 桌面快捷方式；控制面板正常卸载；卸载后仅剩一个 `doubi.db`（约 57 KB，见下），`~/.doubi` 配置默认保留 |
+| **Onefile 便携版**（推荐给 U 盘/网盘） | `dist/doubi-gui.exe` | 体积精简后未重新量化 | 单文件即跑，启动时自解压到 `%TEMP%/_MEIxxxxx`；免安装；机器之间直接拷。**onefile 更容易被 Windows Defender 误报**（见 BUILD §5.5），对外分发优先用安装包 |
+| Onedir 绿色目录（内网分发） | `dist/doubi-gui/` | **688.0 MB / 1003 文件** | **启动最快**；直接 zip 打包即可发布「绿色版」 |
 
-> 体积为什么这么大？**安装包里已经带上了 Playwright Chromium 浏览器目录**
-> （通用视频站嗅探的核心依赖）+ PySide6/Fluent 完整样式资源。如果只
-> 用 B 站 / YouTube 内置 yt-dlp 解析、不需要通用 Playwright 嗅探，可以在
-> `scripts/build_exe.py` 里去掉 ms-playwright 的 `--add-data`，体积大约砍 60%。
+> **体积为什么这么大**：安装包里带了 Playwright Chromium 浏览器目录（通用
+> 视频站嗅探的核心依赖）+ PySide6/Fluent 完整样式资源。0.3.0 已经做过一轮
+> 精简——onedir 从 1501.8 MB 砍到 678.5 MB（−54.8%：剔掉 QtWebEngine、Qt
+> 多语言翻译、测试与文档目录等，判据见 [BUILD §4.5](docs/BUILD.md)），现在
+> 这个 219 MB 的安装包就是精简后的结果。如果完全不需要通用 Playwright 嗅探
+> （只走 B 站 / 抖音 / YouTube 的 yt-dlp 路径），可以在
+> `scripts/build_exe.py` 里去掉 ms-playwright 的 `--add-data`，还能再砍一大块。
+>
+> **卸载残留一处（0.3.1 已知，良性）**：卸载后安装目录、注册表、快捷方式都清干净，
+> 但会剩一个约 57 KB 的 `doubi.db`——数据库默认路径是相对路径，程序从安装目录
+> 启动时就写在那儿，NSIS 删不掉运行期生成的文件。里面只有下载历史，手动删除
+> 即可；下一版会把默认位置挪到 `~/.doubi/`。
 
 #### 下载后的 SHA256 校验（推荐做）
 
-每次发布 `dist/` 目录里都会生成三份侧签文件：`SHA256SUMS.txt`、
-`doubi-gui.exe.sha256`、`DouBi-Setup-0.3.0.exe.sha256`。Windows PowerShell
-一键对比（无需安装任何软件）：
+每次发布 `dist/` 目录里都会生成侧签文件：`SHA256SUMS.txt` 和
+`DouBi-Setup-0.3.1.exe.sha256`（打了 onefile 便携版时另有
+`doubi-gui.exe.sha256`）。内容是标准 `sha256sum` 格式——**哈希后面还跟着
+一个空格 + `*文件名`**：
+
+```
+c1ecd13392c3eb1aa84ac9ebe9c79c5025fde1049054ddb50a2b629945636b8f *DouBi-Setup-0.3.1.exe
+```
+
+0.3.1 安装包的官方哈希就是上面这串。Windows PowerShell 一键对比
+（无需安装任何软件）：
 
 ```powershell
 # 方式 1：Get-FileHash（推荐）
-$expected = (Get-Content dist\DouBi-Setup-0.3.0.exe.sha256).Trim()
-$actual   = (Get-FileHash dist\DouBi-Setup-0.3.0.exe -Algorithm SHA256).Hash.ToLower()
+# 注意 .Split(' ')[0]：侧签行尾带着 " *文件名"，不切开就拿去比必然得到 False
+$expected = (Get-Content dist\DouBi-Setup-0.3.1.exe.sha256).Split(' ')[0].Trim().ToLower()
+$actual   = (Get-FileHash dist\DouBi-Setup-0.3.1.exe -Algorithm SHA256).Hash.ToLower()
 $expected -eq $actual    # $true = 通过
 
-# 方式 2：certutil（老 Win 机器也有）
-certutil -hashfile dist\doubi-gui.exe SHA256
+# 方式 2：certutil（老 Win 机器也有），输出的哈希跟上面那串肉眼对一下
+certutil -hashfile dist\DouBi-Setup-0.3.1.exe SHA256
 ```
+
+> 装了 Git for Windows / WSL 的话最省事：`sha256sum -c DouBi-Setup-0.3.1.exe.sha256`
+> 直接输出 `OK`（侧签就是为它准备的格式）。
 
 #### 首次运行「翻译正常」自检 2 条（10 秒确认包是好的）
 
 0.3.0 曾出现过「打包漏加 i18n JSON 导致 GUI 显示英文 key」的 bug（见
 CHANGELOG G7），新包到手后跑两条就能确认没回归：
 
-1. **标题栏**：应为「**豆比下载 0.3.0 · 多平台视频下载器**」。如果末尾是
+1. **标题栏**：应为「**豆比下载 0.3.1 · 多平台视频下载器**」。如果末尾是
    `app.title_suffix` 这种英文 key → 包坏了，换一个新的。
 2. **左侧导航**：从上到下应为「**解析 / 下载 / 历史 / 设置**」。如果看到
    `nav.parse` / `av.downloads` / `nav.history` / `nav.settings` → 同样是
@@ -78,8 +98,13 @@ CHANGELOG G7），新包到手后跑两条就能确认没回归：
 两条硬规则（DatablockOptimize off + wait_stable 10s）、发布期验证清单
 见 [docs/BUILD.md](docs/BUILD.md)。
 
-> 推 tag `v*` 后 GitHub Actions 会自动跑测试 + 打包 + 上传安装包并附 SHA256 校验到
-> GitHub Release（draft），见 [`.github/workflows/build.yml`](.github/workflows/build.yml)。
+> `.github/workflows/build.yml` **配置上**会在推 `v*` tag 后自动跑测试 + 打包 +
+> 上传安装包并附 SHA256、建一个 draft Release。**但实际情况是：从 0.2.0 到
+> 0.3.1 的 5 次运行全部失败，从未跑到打包段**——runner 只装 `pip install .` 的
+> 基础依赖，GUI / REST 测试要的可选包全缺。所以目前每个 Release 都是本地打包 +
+> 手工发布的。另外测试段一红，建 Release 那步会被整段跳过（它没有
+> `if: always()`），**推了 tag 也不会有 draft Release**，详见
+> [BUILD §8.6](docs/BUILD.md)。
 
 ### 开发者：从源码装
 
@@ -162,8 +187,19 @@ GUI 自带 7 套主题包，每套都有自己的底色、文字色与语义色�
 
 ## GUI 体验提示
 
-几个值得专门提的 0.3.0 行为：
+几个值得专门提的行为（★ = 0.3.1 新增）：
 
+- ★ **关窗不退出，最小化到系统托盘**：点右上角 × 之后程序仍在后台跑（下载不中断），
+  首次关窗会弹一次提示说明这件事。托盘图标右键四项：显示主窗口 / 全部暂停 /
+  全部继续 / 退出——真要退出程序走这里
+- ★ **下载完成弹系统通知**：设置页「下载完成通知」三档可选，默认是**只在成功时弹**
+  （`success`）；另两档为成功与失败都弹（`all`）、单任务静默、整个队列跑完时弹一次
+  汇总（`summary`）
+- ★ **下载前询问支持批量改标题**：勾上「修改视频标题」再填模板，模板里的 `{title}`
+  会被每个视频自己的标题替换；不写 `{title}` 则所有视频重命名成同一个名字。结果会
+  自动去掉 Windows 非法字符
+- ★ **HLS 站点的进度条不再卡在 0%**：走 nm3u8dl 的站点原先整段没有进度反馈，现在有
+  1Hz 的文件系统 watchdog 兜底，外部工具不吐进度也能看到进度推进
 - **窗口默认居中**：启动时落在主屏可用区域的中心（已扣掉任务栏），不会缩在左上角
 - **解析列表只显示真视频**：`.m3u8 / .mp4 / .mkv / .flv / .webm / .mov / .avi / .m4v`
   才进解析表，HLS 分片（`.ts / .aac / .m4s / .mpd`）全部过滤掉，避免一个视频站
@@ -181,8 +217,8 @@ GUI 自带 7 套主题包，每套都有自己的底色、文字色与语义色�
 |---|---|---|
 | 配置文件 | `~/.doubi/config.yml` | GUI 设置页「保存设置」与 CLI 读的是同一份 |
 | 登录 Cookie | `~/.doubi/cookies/*.txt` | Netscape 格式，直接喂给 yt-dlp |
-| 下载记录库 | `doubi.db` | SQLite，去重 + 历史 |
-| 下载清单 | `download_manifest.jsonl` | 每行一条 JSON，便于外部工具消费 |
+| 下载记录库 | `doubi.db` | SQLite，去重 + 历史。**注意这是相对路径**：库落在程序启动时的当前工作目录，不在 `~/.doubi`——从开始菜单启动 GUI 就落在安装目录里。要固定位置就在 `config.yml` 里把 `database_path` 写成绝对路径（下一版会把默认值改到 `~/.doubi/`） |
+| 下载清单 | `download_manifest.jsonl` | 每行一条 JSON，便于外部工具消费。同样是相对路径，规则与 `doubi.db` 一致 |
 
 > `doubi.db` 与 `download_manifest.jsonl` 默认是**相对路径**，落在当前工作目录，
 > 不在 `~/.doubi` 里。想固定位置就在 `config.yml` 写绝对路径
@@ -235,7 +271,7 @@ DouBi/
 │   ├── build_exe.py               # PyInstaller onedir 打包
 │   └── build_installer.py         # 调 NSIS 生成安装程序
 ├── installer/
-│   └── doubi.nsi                  # NSIS 安装脚本（免 UAC / 中文界面 / 零残留卸载）
+│   └── doubi.nsi                  # NSIS 安装脚本（免 UAC / 中文界面 / 卸载清理，仅剩 doubi.db）
 ├── tools/nsis/                    # 内置便携版 NSIS，clone 下来即可打包
 ├── screenshots/                   # 文档用截图
 ├── docs/                          # 见下方「文档」表

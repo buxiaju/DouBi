@@ -1141,7 +1141,7 @@ Qt 只实现 SVG Tiny 1.2，**任何**新贡献的 SVG 都可能踩 filter 坑�
 - **发给最终用户走安装包**：`python scripts/build_installer.py` 先出
   onedir 产物，再用仓库内置的便携版 NSIS（`tools/nsis/`）压成
   `dist/DouBi-Setup-<version>.exe`（约 213 MB）。免 UAC 装到
-  `%LOCALAPPDATA%\DouBi`，注册表只写 HKCU，卸载零残留而 `~/.doubi` 保留。
+  `%LOCALAPPDATA%\DouBi`，注册表只写 HKCU，卸载后除运行期生成的 `doubi.db` 外零残留，`~/.doubi` 保留（见 §18 已知限制第 9 条）。
 - **版本号只有一处真源**：`pyproject.toml` 的 `version` 被
   `build_installer.py` 读走并 `/D` 注入 NSIS；UI 侧是
   `src/doubi/ui/resources/__init__.py` 的 `APP_VERSION`。改版本要同时动这两处，
@@ -1301,9 +1301,22 @@ collection URL 均落到 generic fallback），只能走签名 Web API。
 
 ## 15. 测试体系
 
-27 个测试文件，676 个测试收集，M6.12 实测 **672 passed / 4 skipped**（`python -m pytest -q`，`QT_QPA_PLATFORM=offscreen`，耗时 ~25 分钟）。pytest-asyncio `mode=auto`。skip 全是「无 PySide6 则跳过」的 GUI 用例。
+**35 个测试文件，948 个用例收集**（0.3.1 实测）。pytest-asyncio `mode=auto`。
+发版基准回归是 **913 passed / 7 skipped**（排除 `test_theme_apply_gui.py` 的
+28 例，`QT_QPA_PLATFORM=offscreen`，**约 3 分钟**），跑法见 §15.2。
+（历史记录：M6.12 时是 27 文件 / 676 收集 / 672 passed。）
 
-> 全量跑一次接近半小时，主要成本在真实 `asyncio.sleep` 的退避与超时用例上。日常改动请按 §15 表格挑相关文件跑；**只有在动了 `pipeline.py` / `engine_loader.py` / `models.py` 这类被四个界面共享的文件后，才有必要付全量的代价**。
+> **「全量跑一次接近半小时」这个旧结论已被推翻（0.3.1）**：慢的不是「真实
+> `asyncio.sleep` 的退避与超时用例」，而是**一个文件**——
+> `test_theme_apply_gui.py`（28 例，`gui` + `slow`）带真 PySide6 会起 Qt 事件
+> 循环反复切主题，单跑就足以把整轮挂死。把它排除掉，剩下 920 条 165 秒跑完。
+> 所以「付全量的代价」现在很便宜：`python scripts/run_full_tests.py` 一条命令。
+> 按 §15 表格挑文件跑仍然更快，但不再是唯一可行的选择。
+>
+> 这个误判还有个更贵的后果：因为长期以为全量跑不动，回归数字改成了「按里程碑
+> 新增数往上一版累加」，0.3.1 因此在 CHANGELOG 里写下过一个从未存在的
+> 「901 passed / 3 skipped」（真值 913 / 7，差 12 passed + 4 skipped）。
+> **写进 CHANGELOG / Release 正文的回归数必须来自一次真实的全量跑。**
 
 | 文件 | 用例数 | 覆盖 |
 |---|---|---|
@@ -1314,7 +1327,7 @@ collection URL 均落到 generic fallback），只能走签名 Web API。
 | `test_douyin_adapter.py` | 43 | 抖音 URL 分类（modal_id / vid / 分享链）/ parse / expand / `parse_and_expand` / 登录态 cookie 降级判定 |
 | `test_bilibili_auth.py` | 41 | cookie 解析 / 校验 |
 | `test_task_manager.py` | 31 | TaskManager 状态机 / 暂停恢复的双机制与 stale 守卫 / fraction 倒退守卫（坑位 26）/ **跨进程恢复的状态层：`list_restorable` · `restore` · `discard_restorable` · `_reseed_counter`** |
-| `test_theme_apply_gui.py` | 28 | **主题真落到像素上：窗口底色 / 现存控件 / 卡片自绘 / 切换后新建控件**（需 PySide6，offscreen；跑一次 ~3 分钟，全量慢主要慢在这里） |
+| `test_theme_apply_gui.py` | 28 | **主题真落到像素上：窗口底色 / 现存控件 / 卡片自绘 / 切换后新建控件**（需 PySide6，offscreen；**带真 PySide6 单跑就会长时间挂住**——日常和发版回归一律排除它，只在动过 `ui/theme.py` 时手工跑 `--mode gui-slow`，见 §15.2） |
 | `test_pipeline_smoke.py` | 28 | registry / URL 分类 / pipeline 解析 / **引擎 cookie 注入** / CLI 冒烟 |
 | `test_browser_login.py` | 28 | Playwright 登录流程（含 networkidle 陷阱回归） |
 | `test_config_theme.py` | 26 | **配置地基（`to_dict` / env 覆盖 / YAML 往返）+ 主题注册表 / `resolve_theme` 兼容旧值 / token 键一致 / 无 Qt 也能 `set_theme`**（见 §13.4） |
@@ -1396,14 +1409,53 @@ ruff`，**不带任何 extras**。所以：
 | `test_theme_apply_gui.py` | 真起 Qt 事件循环，**极慢甚至挂住** | 无 PySide6 → skip |
 | 耗时参考 | 10 分钟+ | 45.82s |
 
-发版前把关要用**模拟 CI 依赖集**的跑法（写个临时脚本，往 `sys.meta_path`
-插一个 `find_spec` 对 pydantic/fastapi/uvicorn/PySide6/qfluentwidgets/qasync/psutil
-抛 `ModuleNotFoundError` 的 Blocker，并清掉 `sys.modules` 里已导入的同名模块，
-再 `pytest.main(["-q", "--maxfail=5"])`）。M6.21 实测 **629 passed / 146 skipped
-/ 104.79s**，与 CI 的 `628 passed + 1 failed + 146 skipped` 逐项对齐——
-**passed+failed 相等且 skipped 相等**两个条件同时成立，才能说环境等价且没有
-测试被多跳过（只看前者，可能是「少收集了用例而变绿」；只看后者，可能是
-「把报错掩盖成 skip」）。
+发版前把关要用**模拟 CI 依赖集**的跑法。0.3.1 起它固化成了正式脚本，
+不用再写临时脚本：
+
+```powershell
+python scripts/run_full_tests.py --mode ci
+```
+
+内部做的事没变：往 `sys.meta_path` 插一个 Blocker（`find_spec` 对 9 个可选依赖
+直接抛 `ModuleNotFoundError`，并先清掉 `sys.modules` 里已导入的同名模块），
+再跑 `pytest -q --maxfail=5`。
+
+基线：M6.21 实测 **629 passed / 146 skipped / 104.79s**，与当时 CI 的
+`628 passed + 1 failed + 146 skipped` 逐项对齐；**0.3.1 实测 670 passed /
+175 skipped / 0 failed / 102.06s**。判绿要求 **passed+failed 相等且 skipped
+相等**两个条件同时成立，才能说环境等价且没有测试被多跳过（只看前者，可能是
+「少收集了用例而变绿」；只看后者，可能是「把报错掩盖成 skip」）。
+
+> 屏蔽依赖后的报告总数会**小于**装齐 extras 的口径（0.3.1：845 vs 920）。
+> 这不是丢用例——模块级 `pytest.importorskip` 失败会把整份测试文件折叠成
+> **1 条 skip**。所以别拿两个口径的总数互相校对，只在同口径内跟 CI 对齐。
+
+### 15.2 一次跑完全量：`scripts/run_full_tests.py`（0.3.1 新增）
+
+三个口径一个脚本，退出码即 pytest 退出码：
+
+| 命令 | 做什么 | 0.3.1 基线 |
+| --- | --- | --- |
+| `python scripts/run_full_tests.py` | 默认 `local` 口径：装齐 extras，排除 `test_theme_apply_gui.py` | **913 passed / 7 skipped**，164.67s / 181.81s（两次实测） |
+| `python scripts/run_full_tests.py --mode ci` | 屏蔽 9 个可选依赖，复刻 CI 的 `pytest -q --maxfail=5` | **670 passed / 175 skipped / 102.06s** |
+| `python scripts/run_full_tests.py --mode gui-slow` | 只跑 `test_theme_apply_gui.py` | 已知会挂住，只在动过 `ui/theme.py` 时手工付代价 |
+
+未识别的参数原样透传给 pytest，所以 `python scripts/run_full_tests.py -k tray`
+这种日常用法也成立。脚本自己 `chdir` 到仓库根、把 `src` 插进 `sys.path`、
+设好 `QT_QPA_PLATFORM=offscreen`，在任意目录下调用都一样。
+
+**什么时候跑哪个**：
+
+- 日常改动 → 按 §15 表格挑相关文件，或用 `-k` 过滤
+- 动了 `pipeline.py` / `engine_loader.py` / `models.py` 这类四端共享的文件
+  → `--mode local`
+- **发版前 → 先 `--mode local` 拿回归数字写进 CHANGELOG / Release 正文，
+  再 `--mode ci` 确认 CI 依赖集下同样 0 failed**（对应 BUILD §7 前两条）
+- **CI 红了 → 先跑 `--mode ci`**。本地这一口径 0 failed 就说明红的是环境不是
+  代码（0.3.1 正是如此，见 BUILD §8.6），别急着动代码
+
+> 想边跑边看输出：`2>&1 | Tee-Object .scratch\run.log`——`Select-Object -Last N`
+> 会缓冲到进程退出，长任务时屏幕一直空白，看着像挂了（同 §15 末尾那条坑）。
 
 ---
 
@@ -1645,13 +1697,26 @@ return YtDlpEngine()
 7. **CI 自动化但本地打包仍需手动**：「手动 dispatch 跑 build.yml」可发现
    「现在的 master 分支能不能成功打包」，但日常 dev 迭代还是要本地跑
    ``scripts/build_installer.py``——CI 不是 dev loop 的替代品，只是不
-   再依赖人记得跑。
+   再依赖人记得跑。**0.3.1 核对到的实况比这更糟：这条 workflow 从 0.2.0 起
+   5 次运行全部 failed，从未跑到过打包段**，仓库里每个 Release 都是手工发的。
+   红的原因是 runner 只装基础依赖（见 §15.1），不是代码回归；而且测试段一红，
+   建 Release 那步（条件里没有 `if: always()`）会被整段跳过——所以**推了 tag
+   也不会有 draft Release**，手工发版是「新建」而不是「编辑草稿」（BUILD §8.6）。
 8. **发布流程仍是手工序列**：推 commit → 打 tag → 填 Release 正文 → 传资产
    全靠人按顺序执行，没有守卫。0.3.0 因此踩了两个坑（tag 建在 release
    commit 之前导致源码包错版本；Release 正文粘贴截断丢了 SHA256 校验段）。
    补救靠 `docs/BUILD.md` §8.3 的固定顺序和 §7 的「发布后线上核对」清单，
    **不是代码层面的保证**。另外强推 `v*` tag 会触发 CI 重建并可能覆盖
    已验证的安装包资产（§8.4）。
+9. **数据库和清单默认落在 cwd，不在 `~/.doubi`**：`core/config.py:45-46` 的
+   `database_path` / `manifest_path` 默认值是相对路径 `"doubi.db"` /
+   `"download_manifest.jsonl"`。配置和 Cookie 都规规矩矩在 `~/.doubi`，只有
+   这两个跟着当前工作目录跑——从安装目录启动 GUI 就写在安装目录里，卸载时
+   NSIS 删不掉（运行期生成的文件不在卸载清单里）。后果是「卸载零残留」的准确
+   说法变成「除 `doubi.db`（约 57 KB）外零残留」，0.3.1 是知情发布的
+   （BUILD §6.5）。修法是默认值改成 `~/.doubi/doubi.db`，但**不能直接改**：
+   老用户的库还在旧位置，一改就等于「历史记录全消失」，需要配合启动时探测
+   旧路径或走 `storage/migrate.py` 那套迁移。
 
 ### 对齐 Bili23 的路线图（已识别未做）
 

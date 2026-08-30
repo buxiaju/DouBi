@@ -724,6 +724,43 @@ multidict / yarl / propcache / frozenlist 各 1 个），这是 https 分片下�
 后安装目录、HKCU 键、开始菜单、桌面快捷方式全部清空，残留进程 0 个，
 而 `~/.doubi` 完好保留。
 
+#### 0.3.1 实测基线（手工打包，CI 未参与）
+
+安装包 `DouBi-Setup-0.3.1.exe` = **230,110,981 字节 / 219.45 MB**，
+SHA256 `c1ecd13392c3eb1aa84ac9ebe9c79c5025fde1049054ddb50a2b629945636b8f`。
+
+| 项 | 0.3.0 | 0.3.1 | 备注 |
+| --- | --- | --- | --- |
+| 安装包体积 | 229,657,135 B / 219.02 MB | **230,110,981 B / 219.45 MB** | +443 KB（托盘 + watchdog 新代码） |
+| onedir 产物 | 1002 文件 / 687.4 MB | **1003 文件 / 688.0 MB** | 多出来的一个是 `ui/tray.py` |
+| 静默装后落盘 | 1003 文件 / 687.4 MB | **1004 文件 / 688.1 MB** | onedir + `uninstall.exe` |
+| 静默安装耗时 | 未记 | **37.4s** | `/S /D=` 起到进程退出 |
+| 静默卸载耗时 | 未记 | **10.2s** | 故意开着程序，检验 `EnsureAppClosed` |
+| CRC footer | 有 | **有** | `CRC (0x5632C824): 4 / 4 bytes` + `Total size: 230110981 / 721759958 bytes (31.8%)` |
+| WebEngine 残留 | 0 | **0** | `headless_shell` / `Qt6WebEngineCore.dll` / `qtwebengine_resources*.pak` 逐项按文件计为 0 |
+| 注册表 | 正确 | **正确** | 「豆比下载 0.3.1」/ `DisplayVersion 0.3.1` / `EstimatedSize 704584` / Publisher DouBi |
+| 标题栏 i18n | PASS | **PASS** | `豆比下载 0.3.1 · 多平台视频下载器 - DouBi` |
+| 托盘回归（M6.24） | — | **PASS** | `PostMessage(WM_CLOSE)` 后进程存活 `True`、窗口可见 `False` |
+
+> **卸载会剩一个 `doubi.db`（0.3.1 新发现，良性，但「零残留」措辞要改口）**：
+> 卸载后安装目录、HKCU 键、开始菜单、桌面快捷方式、残留进程全部干净，
+> `~/.doubi` 按设计保留——但**安装目录里会剩一个 `doubi.db`（约 57 KB）**。
+> NSIS 卸载段删不掉它，因为它不是安装时写进去的文件，而是程序运行时创建的。
+> 根因在 `core/config.py:45`——`database_path` 默认值是**相对路径**
+> `"doubi.db"`，程序以安装目录为 cwd 启动时数据库就落在那儿。只有 57 KB
+> 用户数据，不阻塞发版，所以 0.3.1 是知情发布的；修法留给下一版（默认值改成
+> `~/.doubi/doubi.db`，见 DEVELOPMENT §18 已知限制第 9 条）。
+>
+> 也就是说，§7 清单里「卸载后零残留」这一条从 0.3.1 起的准确判据是
+> **「除 `doubi.db` 外零残留」**。
+
+> **导航栏 i18n 没法用截图验证（0.3.1 结论，别再浪费时间试）**：主窗口是
+> Qt 无边框 + DWM 合成，`BitBlt` 和 `PrintWindow` 抓出来**全是黑屏**——
+> 这是 GDI 对 DWM 窗口的已知限制，不是程序坏了。所以 §7 那条「左侧导航文字
+> 是解析/下载/历史/设置」只能肉眼看，或者以标题栏 PASS 推定：两者共用同一个
+> translator、同一份 `zh_CN.json`，标题栏不是 `app.title_suffix` 就说明词表
+> 加载成功了。
+
 ### 6.6 编译像卡住了？先确认再等
 
 LZMA solid 压缩 1.57 GB 是单线程的，中途**几分钟没有任何输出**是正常的。
@@ -737,21 +774,33 @@ Get-ChildItem "$env:TEMP\ns*.tmp"                      # 暂存 datablock 会涨
 CPU 在涨、临时文件在涨，就是在压缩。makensis 退出前日志最后一行通常是
 `Compressed data: ...`，真正结束后还会追加「CRC / Total size / OK」三行。
 
-## 7. 验证清单（0.3.0 修订版）
+## 7. 验证清单（0.3.1 修订版）
 
 发版前手动检查（不在单元测试里）：
 
 - [ ] **模拟 CI 依赖集跑一遍全量测试**（0.3.0 CI 红了才补的一条，见
       CHANGELOG M6.21 / DEVELOPMENT §15.1）。本地装齐 extras + 惯用
       `-m "not slow"`，比 CI 的「只有基础依赖 + 无 mark 过滤」**小一圈**，
-      所以「测试里裸导入可选依赖」这类失效模式在本地必然漏过去。做法：临时脚本
-      往 `sys.meta_path` 插一个 Blocker，对 `pydantic` / `fastapi` / `uvicorn` /
-      `PySide6` / `qfluentwidgets` / `qasync` / `psutil` 抛 `ModuleNotFoundError`
-      并清掉 `sys.modules` 里的同名模块，再 `pytest.main(["-q", "--maxfail=5"])`。
-      判绿标准不是「没红」，而是 **passed+failed 与 CI 相等、skipped 也相等**
-      （0.3.0 基线：`629 passed / 146 skipped`）
+      所以「测试里裸导入可选依赖」这类失效模式在本地必然漏过去。
+      **0.3.1 起有正式脚本，不用再写临时脚本**：
+      `python scripts/run_full_tests.py --mode ci`——它往 `sys.meta_path`
+      插 Blocker 屏蔽 9 个可选依赖（`pydantic` / `fastapi` / `uvicorn` /
+      `PySide6` / `qfluentwidgets` / `qasync` / `psutil` / `qrcode` / `mcp`）
+      再跑 `pytest -q --maxfail=5`。判绿标准不是「没红」，而是
+      **passed+failed 与 CI 相等、skipped 也相等**（0.3.0 基线
+      `629 passed / 146 skipped`；**0.3.1 基线 `670 passed / 175 skipped`，
+      两次实测 96.90s / 102.06s**）
+- [ ] **本地全量回归拿准确数字**（0.3.1 新增，CHANGELOG 和 Release 正文里的
+      回归数必须来自这一步）：`python scripts/run_full_tests.py`（默认 local
+      口径）。它带真依赖跑，只排除 `tests/test_theme_apply_gui.py`——那 28 例
+      带真 PySide6 会起 Qt 事件循环反复切主题，是「本地全量跑不动」的**唯一**
+      根因，排掉之后全量约 3 分钟就能跑完。**0.3.1 基线：948 收集 − 28 排除
+      = 920 → `913 passed / 7 skipped`，两次实测 164.67s / 181.81s**。
+      **不要再用 CHANGELOG 分批累加去推算回归数**——0.3.1 就是这么写下了一个
+      不存在的「901 passed / 3 skipped」（真值 913 / 7，差 12 passed + 4 skipped）
 - [ ] `dist/doubi-gui.exe`（onefile 便携版）文件存在（精简后未重新量化，见 §4.5）
-- [ ] onedir `dist/doubi-gui/doubi-gui.exe` 存在，整个目录约 **1002 文件 / 687.4 MB**
+- [ ] onedir `dist/doubi-gui/doubi-gui.exe` 存在，整个目录约 **1003 文件 / 688.0 MB**
+      （0.3.1 基线；0.3.0 是 1002 文件 / 687.4 MB）
 - [ ] **侧签哈希与 exe 实际匹配**：`dist/DouBi-Setup-<v>.exe.sha256` 和
       `SHA256SUMS.txt` **不会**随重打包自动更新，重打后必须重写，否则会留着上一版
       的哈希（0.3.0 就发生过：exe 已是新的，侧签还是 M6.17 的 `e833f155…`，
@@ -779,16 +828,23 @@ CPU 在涨、临时文件在涨，就是在压缩。makensis 退出前日志最�
 - [ ] **双击不弹 integrity check fail**：首次运行安装包，NSIS launcher 自校验通过（正常进入中文安装向导）
 - [ ] **侧签 SHA 校验通过**：PowerShell 执行
   ```powershell
-  $e=(Get-Content dist\DouBi-Setup-0.3.0.exe.sha256).Trim()
-  $a=(Get-FileHash dist\DouBi-Setup-0.3.0.exe -Algorithm SHA256).Hash.ToLower()
+  # .Split(' ')[0] 不能省——侧签是 sha256sum 格式，行尾还带着 " *文件名"
+  $e=(Get-Content dist\DouBi-Setup-0.3.1.exe.sha256).Split(' ')[0].Trim().ToLower()
+  $a=(Get-FileHash dist\DouBi-Setup-0.3.1.exe -Algorithm SHA256).Hash.ToLower()
   $e -eq $a   # 必须 $true
   ```
+  > **0.3.1 修正**：这段命令原先写的是 `(Get-Content ...).Trim()`，少了
+  > `.Split(' ')[0]`——`$e` 拿到的是整行 `<hash> *DouBi-Setup-0.3.1.exe`，
+  > 跟纯哈希比**永远是 `False`**。0.3.1 实测踩到：哈希本身完全正确，照文档
+  > 照做却得出「校验失败」。README 里那段用户可见的校验命令有同样的 bug，
+  > 已一并修掉。装了 Git for Windows / WSL 的话直接
+  > `sha256sum -c DouBi-Setup-0.3.1.exe.sha256` 最省事。
 - [ ] 安装过程无 UAC 弹窗（当前用户安装）
 - [ ] 安装界面中文无乱码
 - [ ] 控制面板「应用和功能」里能看到「豆比下载 <version>」，大小正确
 - [ ] 开始菜单 + 桌面快捷方式可用
 - [ ] 程序开着时卸载 → 提示并自动结束进程，卸载成功
-- [ ] 卸载后目录 / 注册表 / 快捷方式零残留，`~/.doubi` 仍在
+- [ ] 卸载后目录 / 注册表 / 快捷方式**除 `doubi.db` 外**零残留，`~/.doubi` 仍在（残留成因见 §6.5）
 
 发布后线上核对（0.3.0 事故后新增，见 §8.3 / §8.5）：
 
@@ -806,6 +862,12 @@ CPU 在涨、临时文件在涨，就是在压缩。makensis 退出前日志最�
 
 CI 已就位——见 `.github/workflows/build.yml`（`build-installer`）。
 工作流在 `windows-latest` runner 上跑，分两段：
+
+> **先看清现实（0.3.1 核对结果）**：这条 workflow 从 0.2.0 到 0.3.1
+> **5 次运行全部 failed，没有一次跑到过打包段**，本仓库至今每一个 Release
+> 都是手工发的。所以「CI 已就位」的准确含义是**配置就位**，不是「发版可以
+> 依赖它」。0.3.1 索性放弃 CI 打包、全程手工——为什么可以这么判、以及
+> 「推了 tag 却找不到 draft Release」是怎么回事，见 §8.6。
 
 **测试段**——`pip install .` + `pytest --maxfail=5`，`QT_QPA_PLATFORM=offscreen`
 让无头环境也能跑 GUI 类测试（PySide6 缺失时自动 skip）。超 5 个失败
@@ -838,8 +900,9 @@ CI 已就位——见 `.github/workflows/build.yml`（`build-installer`）。
 > **格式分歧（待统一）**：CI 写的是 `<exe>.sha256  <hash>`（`Out-File
 > -Encoding ascii -NoNewline`），本地 `build_installer.py` 写的是标准
 > `sha256sum` 格式 `<hash> *<filename>` + LF。两种格式混进同一个 Release
-> 会让校验方困惑（`sha256sum -c` 只认后者）。§7 清单里的那段
-> `$e -eq $a` 校验脚本假设的是**本地**格式，直接拿去校验 CI 产物会失败。
+> 会让校验方困惑（`sha256sum -c` 只认后者）。§7 清单里那段 `$e -eq $a`
+> 校验脚本是按**本地**格式写的（`.Split(' ')[0]` 取第一段当哈希），直接拿去
+> 校验 CI 产物会失败——CI 格式的第一段是文件名，不是哈希。
 
 **触发**：
 
@@ -1007,6 +1070,64 @@ SHA256SUMS.txt                 88 bytes
 > （215.46 MB / `225,926,086` bytes → **219.02 MB / `229,657,135` bytes**），
 > 换资产必须**先删线上旧文件再上传**，否则同名冲突。换完记得同步改正文里的
 > 体积与 SHA256——正文哈希和资产 `digest` 不一致比体积写错严重得多。
+
+0.3.1 沿用同样的三文件组合（体积见 §6.5 基线表）：
+
+```
+DouBi-Setup-0.3.1.exe          230,110,981 bytes   # 219.45 MB
+DouBi-Setup-0.3.1.exe.sha256   88 bytes
+SHA256SUMS.txt                 88 bytes
+```
+
+两个侧签都是标准 `sha256sum` 格式（`<hash> *<filename>` + LF，可直接
+`sha256sum -c`），内容同为
+`c1ecd13392c3eb1aa84ac9ebe9c79c5025fde1049054ddb50a2b629945636b8f *DouBi-Setup-0.3.1.exe`。
+Gitee 侧如果 219 MB 单文件超限额，退路是只传两个侧签、正文里指向 GitHub
+Release 的 exe 直链。
+
+### 8.6 CI 红了就不会有 draft Release（0.3.1 才搞明白）
+
+推了 `v*` tag、CI 跑完是红的，然后去 Releases 页面找那个 draft——**找不到**。
+不是权限问题，也不是 draft 被藏起来了，而是**根本没建**。
+
+`build.yml` 用的是默认的步骤依赖（前一步失败则后续全部跳过），而
+`Create GitHub Release`（`softprops/action-gh-release@v2`）的条件只有一行：
+
+```yaml
+if: startsWith(github.ref, 'refs/tags/v')
+```
+
+**没有 `if: always()`**。整条 workflow 里带 `always()` 的只有「上传
+pytest.log」那一步。于是测试段一红，后面的 Build installer → Locate
+artifact → Compute SHA256 → Upload artifacts → Create Release **全部跳过**。
+
+0.3.1 实况（Run #5，tag `v0.3.1` / commit `9eb4d0d`）：**Failure，总时长
+1m32s，唯一产物是 290 字节的 `pytest-log`**。1m32s 这个数字本身就是证据——
+打包段光 LZMA 压缩就得 10 分钟以上（§6.6），所以它必然死在测试段。
+
+**两条实用推论**：
+
+1. **CI 红了之后手工发版，是「新建 Release」而不是「编辑 draft」**。线上
+   不存在该 tag 的 Release，也就不存在同名冲突，直接开
+   `https://github.com/buxiaju/DouBi/releases/new?tag=vX.Y.Z` 填即可。
+2. **CI 红反而让手工发版更安全**。§8.4 那个「CI 重建产物覆盖已验证安装包」的
+   最坏情况，前提是 CI 能跑到打包段；测试段红着的时候它连 exe 都生成不出来，
+   覆盖不了任何东西。但这是巧合不是保障——tag 该不重推还是不重推。
+
+**这次为什么红**：CI 只跑 `pip install .`，不带任何 extras，`PySide6` /
+`qfluentwidgets` / `qasync` / `psutil` / `qrcode` / `pydantic` / `fastapi` /
+`uvicorn` / `mcp` 九个包在 runner 上全部缺失（见 §8 开头的提示框、
+DEVELOPMENT §15.1）。用 `python scripts/run_full_tests.py --mode ci` 在本地
+复刻同一依赖集跑全量，得到 **670 passed / 175 skipped / 0 failed（102s）**
+——**代码没有回归，红的是环境**。这就是 0.3.1 判定「CI 失败不阻塞发版」的依据；
+换句话说，遇到 CI 红先跑这条命令，别急着改代码。
+
+想真正修绿它有两条路（0.3.1 都没做，留作待办）：
+
+- 给 CI 装 extras（`pip install .[gui,server,mcp]`）——代价是 runner 变慢、
+  PySide6 wheel 要下几百 MB，而且 `test_theme_apply_gui.py` 会在 CI 上真跑起来
+  （见 §7 第二条：它是本地全量挂死的根因）；
+- 给建 Release 那步加 `if: always()`——**不推荐**，等于把未经验证的产物发出去。
 
 ## 9. 跨平台
 

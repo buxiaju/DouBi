@@ -2063,7 +2063,8 @@ RPC 客户端是注入的（`Aria2RpcClient` Protocol），测试用内存 Mock 
 > 0.3.0 发版后追加的 hotfix + UX 改进批次。0.3.0 段里的 M6.16–M6.21
 > 是嗅探/打包/同步相关；本批聚焦「下载体验最后一公里」——
 > 标题模板、进度条、关窗后还能叫回主窗口、下载完成弹通知。
-> 累计新增 33 个测试，回归 901 passed / 3 skipped。
+> 三个里程碑各自的新增测试见小节末尾的测试表；全量回归 **913 passed /
+> 7 skipped**（实测，口径见「0.3.1 统计」）。
 
 ## M6.22 (2026-08-30) — 下载前询问弹窗「修改视频标题」模板
 
@@ -2165,7 +2166,7 @@ overrides.get("title_template"))`，让 `MediaItem.title` 走新值。
 > 三项独立 UX 改进打成一发：把 watchdog 漏出的「60% m3u8 下载中 60%」
 > 修了；给关窗后软件丢托盘加回主窗口的口子；下载完成弹系统通知，范围
 > 可在设置页三档切换。新增 `ui/tray.py`（约 250 行）和 33 个新测试，
-> 全部回归 901 passed / 3 skipped。
+> 全部回归 **913 passed / 7 skipped**（实测，见「0.3.1 统计」）。
 
 ### 一、进度去重（`engines/nm3u8dl.py` + `ui/pages/download.py`）
 
@@ -2245,7 +2246,9 @@ overrides.get("title_template"))`，让 `MediaItem.title` 走新值。
 | `test_config_theme.py` | +5 | `notify_on_completion` 字段三档值往返 + 非法值回退 + 默认值 |
 | `test_download_page.py` | +5 / +6 | `TestFriendlyPhaseDedup` 5 例（百分比剥离 + 仅百分比回退 + 中文 / 英文 phase 识别）+ `TestMaybeNotifyCompletion` 6 例（success / all / summary 三档转发 + 无 tray / 无 settings_interface 静默 + flush 路径） |
 
-回归 713 + 18 + 5 + 5 + 6 = 747 → 901（细化后，详见「0.3.1 统计」）。
+本批新增 18 + 5 + 5 + 6 = 34 个测试。**注意：不要把这些增量累加到上一版基线
+去推算总数**——0.3.1 一度就是这么算出「901 passed / 3 skipped」的，实测是
+**913 passed / 7 skipped**（口径与工具见「0.3.1 统计」）。
 
 ---
 
@@ -2271,14 +2274,44 @@ overrides.get("title_template"))`，让 `MediaItem.title` 走新值。
 
 ## 0.3.1 统计（标题模板 + nm3u8dl watchdog 兜底 + 托盘 + 完成通知）
 
-- 源码 85 个 .py 文件，约 22,000 行（M6.22 + 24 累计 + ~1,000 行）
-- 测试 35 个文件，**901 passed / 3 skipped**
-  （3 skip 均为 offscreen 平台下「无系统托盘」GUI 用例，
-   「无 PySide6 则跳过」的 4 例已不再需要——M6.14 把 qasync 依赖
-  改为 optional import）
-- 基线演进（0.3.0 → 0.3.1）：
-  - 868 → 901（+33：M6.22 标题模板 +14 / M6.23 nm3u8dl watchdog +16 / 
-    M6.24 托盘 + 通知 + 通知转发 +3）
+- 源码 **85 个 .py 文件 / 22,003 行**（`Get-ChildItem src -Filter *.py -Recurse`
+  实测；0.3.0 是 81 文件 / 约 21,000 行）
+- 测试 **35 个文件 / 948 个用例收集**（`pytest --collect-only -q` 实测，
+  比 0.3.0 多 2 个文件：`test_tray.py` + `test_download_page.py` 扩批）
+- 回归数据三个口径全部实测（命令都是 `python scripts/run_full_tests.py`，
+  说明见 BUILD §7 / DEVELOPMENT §15.2）：
+
+| 口径 | 命令 | 结果 | 耗时 |
+| --- | --- | --- | --- |
+| 装齐 extras，排除 `test_theme_apply_gui.py`（28 例） | `--mode local`（默认） | **913 passed / 7 skipped / 0 failed** | 164.67s / 181.81s（两次实测） |
+| 复刻 CI 依赖集（屏蔽 9 个可选包），无 mark 过滤 | `--mode ci` | **670 passed / 175 skipped / 0 failed** | 102.06s |
+| 只跑 `test_theme_apply_gui.py` | `--mode gui-slow` | 未跑（已知会挂住，见下） | — |
+
+- 三个数字之间的关系，核对过能闭合：
+  - `948 收集 = 920（口径一实跑）+ 28（排除的 test_theme_apply_gui.py）`
+  - 口径二报告总数 `670 + 175 = 845 < 920` **不是丢用例**——模块级
+    `pytest.importorskip` 失败会把整份测试文件折叠成 **1 条 skip**，
+    屏蔽依赖后总数必然变小（判绿看「与 CI 的 passed/skipped 是否相等」，
+    不看总数，见 §15.1）
+  - 7 个 skip 主要是 offscreen 平台下「无系统托盘」的 GUI 用例；
+    「无 PySide6 则跳过」那 4 例自 M6.14 把 qasync 改成 optional import 后已不适用
+- **CI 全程未参与 0.3.1**：`v0.3.1` tag 触发的 Run #5 在测试段就 failed
+  （1m32s，唯一产物 290 B 的 pytest-log），红的原因是 runner 缺 9 个可选依赖
+  而非代码回归——口径二的 `0 failed` 就是证据。安装包为手工打包 + 手工验证，
+  详见 BUILD §8.6
+
+> **「901 passed / 3 skipped」是错的，别再引用**。那个数字是拿各里程碑的新增
+> 测试数往上一版基线上累加推出来的（`713 + 18 + 5 + 5 + 6 …`），**从未一次性
+> 跑全量验证过**。根因是本地裸跑 `pytest` 会被 `test_theme_apply_gui.py`
+> （28 例，带真 PySide6 起 Qt 事件循环反复切主题）挂死，于是「全量跑不动」
+> 被当成了既定事实，只能靠推算。0.3.1 发版收尾时把该文件排除掉重跑，约 3 分钟
+> 就出了真值 **913 / 7**——和推算值差 12 passed + 4 skipped。现在这条路径固化成
+> `scripts/run_full_tests.py`，发版前跑一次就有准确数，不要再累加推算。
+
+- 基线演进（0.3.0 → 0.3.1）：0.3.0 记录的 `868 passed / 4 skipped` 是**旧口径**
+  （当时惯用 `-m "not slow"` 过滤、也没有排除文件的做法），与 0.3.1 的 913 / 7
+  **不可直接相减**；各里程碑的新增测试数见 M6.22 / M6.23 / M6.24 小节末尾的
+  测试表，总数一律以上表实测为准
 - 主要新增能力：
   - 下载前询问支持「修改视频标题」+ `{title}` 模板（M6.22）
   - nm3u8dl 进度条不再卡 0%（1Hz 文件系统 watchdog + meta.json，M6.23）
@@ -2287,6 +2320,15 @@ overrides.get("title_template"))`，让 `MediaItem.title` 走新值。
   - 修复两个 shipped bug（`int(reason)` TypeError / 
     `show_window_requested.disconnect()` 误断链）
   - 修复项目既有 `InfoBar.information` AttributeError
+- 发版时知情的已知限制（不阻塞，留作下一版）：
+  - **卸载后安装目录会剩一个 `doubi.db`（约 57 KB）**：`core/config.py:45` 的
+    `database_path` 默认值是相对路径 `"doubi.db"`，程序以安装目录为 cwd 启动时
+    数据库就落那儿，NSIS 卸载段删不掉运行期生成的文件。修法是默认值改成
+    `~/.doubi/doubi.db`（BUILD §6.5 / DEVELOPMENT §18 已知限制第 9 条）
+  - **导航栏 i18n 无法截图验证**：主窗口是 Qt 无边框 + DWM 合成，
+    `BitBlt` / `PrintWindow` 抓出来全黑（GDI 已知限制），只能靠标题栏 PASS 推定
+  - **CI 依然全红**：build-installer workflow 0.2.0 起 5 次运行全部 failed，
+    从未跑到打包段（BUILD §8.6）
 
 ---
 
