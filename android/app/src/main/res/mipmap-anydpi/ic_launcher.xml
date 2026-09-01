@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- pre-26 fallback：直接用前景 vector（Android 7.0 也能渲染 vector mipmap） -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#6750A4"
+        android:pathData="M0,0h108v108h-108z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M22,22 L86,22 A8,8 0 0 1 94,30 L94,78 A8,8 0 0 1 86,86 L22,86 A8,8 0 0 1 14,78 L14,30 A8,8 0 0 1 22,22 Z" />
+    <path
+        android:fillColor="#6750A4"
+        android:pathData="M44,42 L64,66 L64,78 L56,78 L56,70 L44,58 Z" />
+    <path
+        android:fillColor="#6750A4"
+        android:pathData="M58,32 m-5,0 a5,5 0 1,0 10,0 a5,5 0 1,0 -10,0" />
+</vector>

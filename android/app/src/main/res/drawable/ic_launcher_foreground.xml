@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 阶段 0 占位图标：白底色 + 紫色「豆」字形象化的对角线条。
+     阶段 7 用 Adobe Illustrator / Figma 导出的真品牌图标替换。
+     尺寸按 adaptive icon 标准 108×108 dp、66×66 dp 安全区设计。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 主圆角方块背景 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M22,22 L86,22 A8,8 0 0 1 94,30 L94,78 A8,8 0 0 1 86,86 L22,86 A8,8 0 0 1 14,78 L14,30 A8,8 0 0 1 22,22 Z" />
+    <!-- 中间斜杠（豆比「豆」字的第一笔，象征下载箭头） -->
+    <path
+        android:fillColor="#6750A4"
+        android:pathData="M44,42 L64,66 L64,78 L56,78 L56,70 L44,58 Z" />
+    <!-- 顶部圆点（豆比「豆」字右上点） -->
+    <path
+        android:fillColor="#6750A4"
+        android:pathData="M58,32 m-5,0 a5,5 0 1,0 10,0 a5,5 0 1,0 -10,0" />
+</vector>

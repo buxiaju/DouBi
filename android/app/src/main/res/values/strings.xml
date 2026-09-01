@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 桌面版对照：app.name -->
+    <string name="app_name">豆比下载</string>
+
+    <!-- 主框架 4 页（与桌面版 nav.* 对齐） -->
+    <string name="nav_parse">解析</string>
+    <string name="nav_download">下载</string>
+    <string name="nav_history">历史</string>
+    <string name="nav_settings">设置</string>
+
+    <!-- 阶段 0 占位 HomeScreen -->
+    <string name="home_placeholder_title">DouBi Android</string>
+    <string name="home_placeholder_subtitle">v%1$s 阶段 0 脚手架</string>
+    <string name="home_placeholder_note">工具链通了，下一步：[android/docs/PHASES.md](android/docs/PHASES.md) 阶段 1。</string>
+</resources>

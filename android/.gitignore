@@ -1,0 +1,33 @@
+# Gradle / Android Studio 产物
+.gradle/
+build/
+out/
+*.apk
+*.aab
+*.aar
+*.dex
+*.class
+bin/
+gen/
+
+# Android Studio 临时文件（保留 .idea/ 提交 IDE 元数据，仅忽略运行时缓存）
+.idea/caches/
+.idea/libraries/
+.idea/modules.xml
+.idea/workspace.xml
+.idea/navEditor.xml
+.idea/assetWizardSettings.xml
+*.iml
+local.properties
+
+# 密钥 / 签名（绝对不能进仓库）
+*.jks
+*.keystore
+keystore.properties
+google-services.json
+
+# 平台 / 工具
+.cxx/
+captures/
+.externalNativeBuild/
+.kotlin/
