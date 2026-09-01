@@ -173,11 +173,102 @@ v0.1 schema v1 没历史负担，从 v1 升 v2 时 Room 会清表重建——dev
 - 阶段 2 加 `mockk`（mock `WorkManager` 入口）
 - 阶段 3 加 `espresso`（Compose UI 自动化）
 
+## 下半场（阶段 1.5）：DataStore AppConfig
+
+阶段 1a 提的「下半场」现已完成，阶段 1 整体闭环。
+
+### 完成清单
+
+- [x] `core/config/AppConfig.kt`（data class，30 字段对拍桌面 `core/config.py:AppConfig`）
+- [x] `core/config/ConfigValidator.kt`（8 个白名单 + 2 个 clamp，补齐桌面版未做的项）
+- [x] `data/config/ConfigKeys.kt`（30 个 DataStore Preferences Keys，snake_case 与 YAML 兼容）
+- [x] `data/config/AppConfigDataStore.kt`（read / write / observe / updateField / 校验透传）
+- [x] `data/config/di/DataStoreModule.kt`（Hilt 注入，`preferencesDataStoreFile("doubi_config")`）
+- [x] `core/config/AppConfigTest.kt`（12 个用例：默认值 + 8 个 validator）
+- [x] `data/config/AppConfigDataStoreTest.kt`（10 个用例：roundtrip / null↔空串 / observe / 校验回退 / clamp）
+
+### 关键设计决定
+
+#### 1. DataStore Preferences 而非 Proto DataStore
+
+桌面版是单个 YAML 文件、读一次 → 整个 dict。Android 端用 **Preferences DataStore**（每字段一个 typed key）而非 Proto DataStore——30 个简单标量字段用 Proto 是过度设计。
+
+#### 2. Optional<String> 用空串 sentinel
+
+桌面版 `rate_limit: Optional[str]` 在 YAML 里就是 key 缺失；DataStore Preferences 没有 nullable string。约定：null ↔ 空串。受影响字段：`rate_limit` / `proxy` / `aria2_secret`（3 个）。
+
+#### 3. sniff_capture_types：Set ↔ List 转换
+
+桌面版 `tuple[str, ...]` 有序，DataStore `stringSetPreferencesKey` 无序。约定：写时 `List.toSet()`，读时 `Set.toList().sorted()`。5 项默认值按字母排后顺序会变，**但内容一致**——对嗅探功能无影响（Set 语义本来就无序）。
+
+#### 4. ConfigValidator 全面落地
+
+桌面版只 `_validate_notify_mode`，**其他字段没 clamp**——「bad value in config.yml 应该永远不会让 app 启动崩」（原话），但用户输入疯狂值（`concurrent_jobs=0` 或 `-1`）会让 Worker 池炸掉。Android 端把校验全补上：
+
+| 字段 | 桌面版 | Android 端 |
+|---|---|---|
+| `notify_on_completion` | 白名单 3 项 | 同（白名单） |
+| `engine` | 无校验 | 补白名单 `yt-dlp` / `aria2` |
+| `concurrent_jobs` | 无 clamp | clamp 到 [1, 16] |
+| `sniff_duration_sec` | 无 clamp | clamp 到 [5, 60] |
+| `sniff_capture_types` | 无校验 | null/空 → 回退默认 |
+| `duplicate_policy` | 无校验 | 白名单 `skip` / `redownload` / `ask` |
+| `language` | 无校验 | 白名单 `zh_CN` / `en` |
+| `theme` | resolve 容忍未知 | v0.1 白名单 2 项，阶段 3 扩到 7 项 |
+
+**所有白名单/边界/回退绝不抛异常**——坏值静默回退默认，与桌面版原则一致。
+
+#### 5. updateField 走 switch 而非反射
+
+DataStore 没有 key 字符串到 Preferences.Key 的内省 API（Proto DataStore 才容易做）。30 个 key 写在 `when` 里硬编——是 boilerplate，但读起来直白，加新字段时 `else -> throw IllegalArgumentException` 编译器会逼你更新。
+
+### 与桌面版 100% 行为等价的边界
+
+| 字段类型 | 桌面版 | Android 端 | 等价？ |
+|---|---|---|---|
+| 标量字符串 | `str` | `String` | ✅ |
+| 标量布尔 | `bool` | `Boolean` | ✅ |
+| 标量整数 | `int` | `Int` | ✅ |
+| 可空字符串 | `Optional[str]` | `String?` + 空串 sentinel | ✅ 字段语义对，写盘格式不同 |
+| 元组 | `tuple[str, ...]` | `List<String>` | ✅ 字段语义对，Set 写盘顺序不同 |
+| 路径 | `pathlib.Path` | `String` | ✅ 字段语义对；Android 端所有路径都是绝对 |
+| 字典 | `dict[str, Any]` | 不在 AppConfig（用单独 KV 覆盖） | ⚠️ 桌面版 `extra` 字段 Android 端暂不实现 |
+
+`extra` 字段 v0.1 暂不实现——设置页用不到，Worker 也用不到。阶段 6 扩设置页时再加 `Map<String, String>` 形式的覆盖机制。
+
+### 桌面版测试覆盖
+
+| 桌面版测试 | Android 对拍 |
+|---|---|
+| `test_config_theme.py::TestConfigTheme::test_default_values` | `AppConfigTest::defaults match desktop core config py DEFAULTS` |
+| `test_config_theme.py::TestConfigTheme::test_notify_on_completion_*` (5 例) | `AppConfigTest::notify_on_completion whitelist + rejects unknown` |
+| `test_config_theme.py::TestConfigTheme::test_roundtrip` | `AppConfigDataStoreTest::save then get roundtrips all 30 fields` |
+| `test_config_theme.py::TestConfigTheme::test_yaml_optional_fields` | `AppConfigDataStoreTest::nullable fields roundtrip null correctly` |
+| 桌面版没有的 clamp 测试 | `AppConfigTest + DataStoreTest::updateField concurrent_jobs clamps to 1-16`（Android 端补的） |
+
+**v0.1 阶段 1 测试用例数**：
+- 单元测试：22（`AppConfigTest` 12 + `AppConfigDataStoreTest` 10）
+- 仪器测试：6（`MediaItemDaoTest`）
+- 共 **28 用例**
+
+全部走 JUnit 4 + Truth + runTest，**单测全 JVM 跑**，CI 能直接接。
+
+### 阶段 1 整体收尾
+
+阶段 1 闭环 = **Room 数据层 + DataStore 配置层**。后续所有阶段（Worker / Compose UI / 设置页）都消费这两个底层。
+
+- 阶段 2：Worker 读 `concurrentJobs` / `engine` / `outputRoot` / `outputDirTemplate` / `filenameTemplate`
+- 阶段 6：设置页读/写 `theme` / `language` / `notifyOnCompletion` / `promptBeforeDownload` / `duplicatePolicy` / `write*` / `sniff*`
+- 阶段 4：嗅探读 `sniffEnabled` / `sniffDurationSec` / `sniffCaptureTypes` / `maxQuality` / `container` / `resume`
+
 ## 下一步
 
-按 [PHASES.md §1.1 下半场](../PHASES.md)：
+按 [PHASES.md §2](../PHASES.md)：
 
-1. **`data/datastore/AppConfigSerializer.kt`**：把 `core/config.py:AppConfig` 的 25 个字段搬成 DataStore Preferences
-2. **`core/config/AppConfig.kt`**：Kotlin data class，对拍 Python 版本字段（camelCase）
-3. **`core/config/ConfigRepository.kt`**：Hilt 注入 + 读/写/观察 AppConfig
-4. **`AppConfigTest.kt`**：与 `test_config_theme.py` 对拍（`notify_on_completion` 三档往返、非法值回退、默认值、YAML 字段名一致）
+1. 解锁 `app/build.gradle.kts` 里两行注释掉的 `ytdlp-android` / `ffmpeg-kit` 依赖
+2. 写 `engine/Engine.kt` interface（与桌面版 `engines/__init__.py:Engine` ABC 心智模型一致）
+3. 写 `engine/ytdlp/YtDlpEngine.kt`（包装 yausername/yt-dlp-android）
+4. 写 `download/DownloadWorker.kt`（CoroutineWorker + 前台 Service 通知）
+5. 写 `download/NotificationHelper.kt`（进度通知，三档 follow 桌面版 `notifyOnCompletion`）
+6. 在 `MainActivity` 注入 `AppConfigDataStore` 验证 Hilt 链路通
+7. 端到端：YouTube 链接 → 解析 → Worker 拉起 → 落盘到 app 私有目录
