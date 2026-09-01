@@ -77,12 +77,16 @@ class AppConfigDataStore(
     /**
      * 单字段更新。设置页「保存一项改一项」时用，避免重写整个 config
      * 触发其他字段的写入竞争。
+     *
+     * `value: Any?`——nullable 字段（proxy / rate_limit / aria2_secret）需要传 null
+     * 表示「清空」。非 nullable 字段传 null 会在 cast 阶段抛 CCE（程序员错误），
+     * 不静默吞。
      */
-    suspend fun updateField(key: String, value: Any) {
+    suspend fun updateField(key: String, value: Any?) {
         dataStore.edit { prefs ->
             when (key) {
-                "concurrent_jobs" -> prefs[ConfigKeys.CONCURRENT_JOBS] = (value as Int)
-                    .let { ConfigValidator.validateConcurrentJobs(it) }
+                "concurrent_jobs" -> prefs[ConfigKeys.CONCURRENT_JOBS] =
+                    ConfigValidator.validateConcurrentJobs(value as Int?)
                 "theme" -> prefs[ConfigKeys.THEME] = ConfigValidator.validateTheme(value as String?)
                 "language" -> prefs[ConfigKeys.LANGUAGE] = ConfigValidator.validateLanguage(value as String?)
                 "engine" -> prefs[ConfigKeys.ENGINE] = ConfigValidator.validateEngine(value as String?)
