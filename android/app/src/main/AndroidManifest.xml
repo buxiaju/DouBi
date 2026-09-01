@@ -29,6 +29,20 @@
         android:theme="@style/Theme.DouBi"
         tools:targetApi="35">
 
+        <!-- WorkManager 默认初始化关掉——Hilt Application 自己提供 Configuration.Provider
+             （见 DouBiApplication.workManagerConfiguration），让 @HiltWorker 注解的
+             Worker 拿到 Hilt 注入的依赖。阶段 2 引入 DownloadWorker 后必加。 -->
+        <provider
+            android:name="androidx.startup.InitializationProvider"
+            android:authorities="${applicationId}.androidx-startup"
+            android:exported="false"
+            tools:node="merge">
+            <meta-data
+                android:name="androidx.work.WorkManagerInitializer"
+                android:value="androidx.startup"
+                tools:node="remove" />
+        </provider>
+
         <activity
             android:name=".MainActivity"
             android:exported="true"

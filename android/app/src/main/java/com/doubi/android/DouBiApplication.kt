@@ -1,7 +1,10 @@
 package com.doubi.android
 
 import android.app.Application
+import androidx.hilt.work.HiltWorkerFactory
+import androidx.work.Configuration
 import dagger.hilt.android.HiltAndroidApp
+import javax.inject.Inject
 import timber.log.Timber
 
 /**
@@ -9,12 +12,22 @@ import timber.log.Timber
  *
  * 与桌面版 `ui/app.py:create_app()` 角色一致——Hilt 容器初始化 + 全局配置。
  *
- * 桌面版对照：
- * - `__version__` 来自 `src/doubi/__init__.py`，Android 版用 `BuildConfig.VERSION_NAME`。
- * - 日志初始化对应 `core/logger.py:setup_logging()`，阶段 0 只装 Timber；阶段 1 接 DataStore 后再决定写文件。
+ * 阶段 2 起实现 `Configuration.Provider`——Hilt 集成 WorkManager 需要，
+ * 让 `@HiltWorker` 注解的 Worker（`DownloadWorker` 等）能拿到 Hilt 注入的依赖。
+ * 默认 WorkManager 初始化在 `AndroidManifest.xml` 关闭。
  */
 @HiltAndroidApp
-class DouBiApplication : Application() {
+class DouBiApplication : Application(), Configuration.Provider {
+
+    @Inject
+    lateinit var workerFactory: HiltWorkerFactory
+
+    override val workManagerConfiguration: Configuration
+        get() = Configuration.Builder()
+            .setWorkerFactory(workerFactory)
+            .setMinimumLoggingLevel(if (BuildConfig.DEBUG) android.util.Log.DEBUG else android.util.Log.INFO)
+            .build()
+
     override fun onCreate() {
         super.onCreate()
         if (BuildConfig.DEBUG) {
