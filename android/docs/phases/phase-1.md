@@ -213,6 +213,51 @@ Kotlin 文档里这规则的措辞是「default values for primary constructor p
 ```
 
 **教训**：在 `data class`（或 `class`）的**主构造器默认值参数**里引用**任何**类成员时，包括 `companion object` 里的，都要用全限定名（包括 `this@ClassName.X` 或者顶层 `X`）。只有「直接放在顶层 `object` 旁边」或「在类体内部（不是构造器参数）」用短名才稳。
+
+### 坑 5：智能转型在 `in setOf(...)` / `isNullOrBlank()` 后不生效（0.3.1 修）
+
+**症状**：上一坑修完（`Unresolved reference 'DEFAULTS'` 12 条消失）后，sync 还剩 2 条 `Return type mismatch: expected 'kotlin.String', actual 'kotlin.String?'`，分别指向 `validateDuplicatePolicy` 和 `validateLanguage`。
+
+**根因**：Kotlin 智能转型（smart cast）只在**直接 null 比较**后生效：
+
+```kotlin
+// ✅ value 被 smart-cast 成 String，if 分支返回 String
+if (value != null && value in setOf(...)) value
+
+// ❌ 编译器不 smart-cast——`in` 是函数调用（Set.contains），不保留转型
+if (value in setOf(...)) value
+
+// ❌ isNullOrBlank() 虽然能推出非空，但 Kotlin 编译器不据此 smart-cast
+// （保守——因为 isNullOrBlank 内部有 trim() 等调用，可能有副作用）
+if (!value.isNullOrBlank() && value in setOf(...)) value
+```
+
+不写 `value != null` 时，if 分支里的 `value` 类型还是 `String?`，整条 `if/else` 表达式 LUB 是 `String?`，与函数声明的 `String` 不符。
+
+**修法**：所有走白名单的 validator **都加显式 `value != null` 前缀**。
+
+```diff
+- fun validateDuplicatePolicy(value: String?): String =
+-     if (value in setOf("skip", "redownload", "ask")) value
+-     else DEFAULTS.duplicatePolicy
++ fun validateDuplicatePolicy(value: String?): String =
++     if (value != null && value in setOf("skip", "redownload", "ask")) value
++     else DEFAULTS.duplicatePolicy
+
+- fun validateLanguage(value: String?): String =
+-     if (!value.isNullOrBlank() && value in setOf("zh_CN", "en")) value
+-     else DEFAULTS.language
++ fun validateLanguage(value: String?): String =
++     if (value != null && value in setOf("zh_CN", "en")) value
++     else DEFAULTS.language
+
++ // validateTheme 同样问题（同一个错误模式）
++ fun validateTheme(value: String?): String =
++     if (value != null && value in setOf("default_light", "default_dark")) value
++     else DEFAULTS.theme
+```
+
+**教训**：在 Kotlin 里写 `if (x != null && x in collection)` 是惯用法，**别图省事**用 `isNullOrBlank()` / `isNullOrEmpty()` / `in` 替代 null 检查——编译器的 smart cast 不吃这套，会静默退化为 `String?`，跑到运行期才暴露。**所有 nullable 收窄**都走 `x != null` 或 `x is T` 这条直路。
 - 阶段 2 加 `mockk`（mock `WorkManager` 入口）
 - 阶段 3 加 `espresso`（Compose UI 自动化）
 

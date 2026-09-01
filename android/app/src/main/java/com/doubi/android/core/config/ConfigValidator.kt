@@ -52,7 +52,7 @@ object ConfigValidator {
      * 否则回退 `"skip"`。
      */
     fun validateDuplicatePolicy(value: String?): String =
-        if (value in setOf("skip", "redownload", "ask")) value
+        if (value != null && value in setOf("skip", "redownload", "ask")) value
         else DEFAULTS.duplicatePolicy
 
     /**
@@ -60,7 +60,7 @@ object ConfigValidator {
      * 桌面版：`language: str = "zh_CN"`，未做白名单——这里补上。
      */
     fun validateLanguage(value: String?): String =
-        if (!value.isNullOrBlank() && value in setOf("zh_CN", "en")) value
+        if (value != null && value in setOf("zh_CN", "en")) value
         else DEFAULTS.language
 
     /**
@@ -71,6 +71,6 @@ object ConfigValidator {
      * 选了个不存在的 theme 把 UI 染成空样式。
      */
     fun validateTheme(value: String?): String =
-        if (value in setOf("default_light", "default_dark")) value
+        if (value != null && value in setOf("default_light", "default_dark")) value
         else DEFAULTS.theme
 }
