@@ -44,8 +44,7 @@ coroutines = "1.9.0"
 timber = "5.0.1"
 
 # 测试
-junit = "4.13.2"
-junit5 = "5.11.3"                      # 通过 junit5-vintage-engine 跑 JUnit 4 测试
+junit = "4.13.2"                       # Android 单元测试标准，AS 的 JUnit 模板依赖这个 jar
 mockk = "1.13.13"
 turbine = "1.2.0"
 truth = "1.4.4"
@@ -116,10 +115,8 @@ timber = { module = "com.jakewharton.timber:timber", version.ref = "timber" }
 ytdlp-android = { module = "io.github.yausername.ytdlp-android:core", version.ref = "ytdlp-android" }
 ffmpeg-kit = { module = "com.arthenica:ffmpeg-kit-min", version.ref = "ffmpeg-kit" }
 
-# 测试
+# 测试（只用 JUnit 4，不混 JUnit 5；Jupiter 跟 AS JUnit 模板冲突会出 "No junit.jar"）
 junit = { module = "junit:junit", version.ref = "junit" }
-junit-jupiter-api = { module = "org.junit.jupiter:junit-jupiter-api", version.ref = "junit5" }
-junit-jupiter-engine = { module = "org.junit.jupiter:junit-jupiter-engine", version.ref = "junit5" }
 mockk = { module = "io.mockk:mockk", version.ref = "mockk" }
 turbine = { module = "app.cash.turbine:turbine", version.ref = "turbine" }
 truth = { module = "com.google.truth:truth", version.ref = "truth" }
