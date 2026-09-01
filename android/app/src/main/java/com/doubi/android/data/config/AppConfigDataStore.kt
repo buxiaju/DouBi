@@ -154,7 +154,8 @@ class AppConfigDataStore(
         sniffUserAgent = this[ConfigKeys.SNIFF_USER_AGENT] ?: DEFAULTS.sniffUserAgent,
         sniffAutoPlay = this[ConfigKeys.SNIFF_AUTO_PLAY] ?: DEFAULTS.sniffAutoPlay,
         sniffCaptureTypes = ConfigValidator.validateSniffCaptureTypes(
-            this[ConfigKeys.SNIFF_CAPTURE_TYPES]?.toList()?.sorted(),
+            // LinkedHashSet 保留写入顺序——不 sorted，roundtrip 才能保序
+            this[ConfigKeys.SNIFF_CAPTURE_TYPES]?.toList(),
         ),
         notifyOnCompletion = ConfigValidator.validateNotifyMode(this[ConfigKeys.NOTIFY_ON_COMPLETION]),
     )
