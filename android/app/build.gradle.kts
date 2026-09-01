@@ -23,6 +23,10 @@ android {
         vectorDrawables {
             useSupportLibrary = true
         }
+        // JunkFood02/yt-dlp-android 带的 native lib 限制 ABIs——和 README 写的一致
+        ndk {
+            abiFilters += listOf("x86", "x86_64", "armeabi-v7a", "arm64-v8a")
+        }
     }
 
     buildTypes {
@@ -132,12 +136,10 @@ dependencies {
     // Logging
     implementation(libs.timber)
 
-    // 下载引擎（阶段 2 启用）
-    // ytdlp-android 集成见 phase-2.md「未落地」段——JitPack 401 Unauthorized，
-    // 暂时注释。Engine interface / 数据模型 / Repository / NotificationHelper
-    // 全部保留，缺的是 YtDlpEngine 和 DownloadWorker 两个具体实现。
-    // 替代方案（v0.2 评估）：fork 库 / yt-dlp 子进程 / 自研 OkHttp + M3U8 解析。
-    // implementation(libs.ytdlp.android)
+    // 下载引擎（v0.2 兑底：JunkFood02/yt-dlp-android fork from Maven Central）
+    // 包名 com.yausername.ytdlp.* 跟原 yausername 实现兼容，yt-dlp + Python 3.8 静态打包
+    // 体积约 30MB。ffmpeg-kit（音频提取 / 视频合并）暂不开，v0.2+ 再考虑。
+    implementation(libs.ytdlp.android)
     // implementation(libs.ffmpeg.kit)
 
     // 单元测试

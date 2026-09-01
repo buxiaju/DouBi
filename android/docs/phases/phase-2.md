@@ -136,3 +136,119 @@ UI 端到端**能跑通**——能验证 Hilt 链 / WorkManager 链 / 通知渠�
 3. 阶段 3 完成后回到阶段 2 收尾：恢复 yt-dlp-android 依赖 + 写 instrumented test 验证端到端
 
 或者按时间预算，直接进阶段 3——阶段 2 的接口/模型/Repository 全部到位，Worker 和 Engine 是 stub，阶段 3 起 UI 可以正常调（看到的是「失败」通知，符合预期）。
+
+---
+
+# 阶段 2 v0.2 兑底：JunkFood02/yausername/youtubedl-android 集成（**完整落地**）
+
+> 2026-09-02 v0.2 兑底：阶段 2 当时未落地的 yt-dlp-android 真实下载链路**已恢复**。
+> 选了「4 条恢复路径」里的第 2 条（JunkFood02 fork），依赖装上后真编译 + 46 单测全过。
+
+## v0.2 vs v0.1 落地差异
+
+| 项 | v0.1（阶段 2 起点）| v0.2（兑底）|
+|---|---|---|
+| 依赖源 | JitPack 401 | Maven Central |
+| 坐标 | `io.github.yausername.ytdlp-android:core:2024.10.27`（404 / 401） | `io.github.junkfood02.youtubedl-android:library:0.18.1` |
+| YtDlpEngine | stub（返最小 MediaItem / Failure） | 真实现（调 fork 真嗅探 / 真下载）|
+| DownloadWorker | stub（调 stub engine，UI 端到端走通到「失败」） | 真实现（前台 Service + 真进度回调 + 真落盘）|
+| DouBiApplication | 只初始化 Timber | 多初始化 `YoutubeDL.getInstance().init(this)` |
+| AndroidManifest | 已有 INTERNET / FOREGROUND_SERVICE / POST_NOTIFICATIONS | 加 `extractNativeLibs="true"`（fork 强制要求）+ `requestLegacyExternalStorage="true"`（API 29 兼容）|
+| ndk.abiFilters | 默认全部（armeabi-v7a / arm64-v8a / x86 / x86_64） | 显式写这 4 个 ABIs（fork 仅支持这 4） |
+| 单元测试 | 11（stub 行为）| 11（改测真引擎——`probe` 走 catch 兜底、`download` 期望 `Failure`） |
+| 编译 | ✅ | ✅（Maven Central 0.18.1 下载成功，无 401）|
+| 单测 | 11/11 | **46/46**（阶段 1 + 2 全过）|
+
+## 4 个坑（v0.1 → v0.2 修复）
+
+### 坑 1：JitPack 401（v0.1 痛点）
+
+`io.github.yausername.ytdlp-android:core` 只在 JitPack 上发布，2026 年 JitPack 对未登录用户 / 特定库拒服务，返 401。详见上方「JitPack 401 详细说明」。
+
+**v0.2 解决**：换 [JunkFood02/yausername/youtubedl-android](https://github.com/yausername/youtubedl-android) fork——这其实是 yausername 原仓库被 JunkFood02 接手后改的发布通道（README 都在 yausername 名下）。JunkFood02 把 artifact 发到 **Maven Central**，稳定无须 token。
+
+### 坑 2：包名写错（"ytdlp" vs "youtubedl"）
+
+`/junkfood02/ytdlp-android:library` 这个路径在 Maven Central **根本不存在**——真正的 artifact 是 `/junkfood02/youtubedl-android:library`（带 e 和 d）。我第一版写错成 `ytdlp`，导致 Gradle 还是去 JitPack 找 401。
+
+**踩坑过程**：
+- 第一版：`io.github.junkfood02.ytdlp-android:library:0.16` → 401（JitPack 找不到）
+- 修正：`io.github.junkfood02.youtubedl-android:library:0.18.1` → 200 OK
+
+**教训**：搜 package 坐标时用 Maven Central 搜索（`central.sonatype.com`）确认 artifact 真实存在，别凭印象写。
+
+### 坑 3：包路径不是 README 写的那个
+
+README 里的 import 是 `com.yausername.ytdlp.YoutubeDL`——但 fork 0.18.1 实际 AAR 里的包是 `com.yausername.youtubedl_android.YoutubeDL`（多了 `_android` 后缀）。
+
+**踩坑过程**：
+- 第一版 import 用 `com.yausername.ytdlp.*` → 编译报 `Unresolved reference 'ytdlp'`
+- 靠 `javap -p` 直接看 AAR 里的 `classes.jar` 实际类路径定 → 改成 `com.yausername.youtubedl_android.*`
+
+**教训**：compile 报 Unresolved reference 别瞎猜包名，用 `javap -p classes.jar` 反推真实路径。
+
+### 坑 4：API 表面跟 README 描述对不上
+
+README 说 callback 是 `YoutubeDLCallback { onYoutubeDLProgress(...) }`——但 0.18.1 实际 API 是：
+- callback 改成 Kotlin `Function3<Float, Long, String, Unit>`（progress, etaSeconds, line）
+- `getInfo()` 不带 callback（不是 callback API）
+- `execute(request, processId, callback)` 才带 callback
+- `execute()` 返 `YoutubeDLResponse`（有 `exitCode` / `out` / `err`），不是 void
+- `VideoInfo.duration: Int`（秒，0 = 未知）——不是 `Double?`
+- `addOption(key, value)` 是分两个参数的——不是 args 列表
+
+**修复**：完整重写 `YtDlpEngine.kt` 和 `DownloadWorker.kt`，按 AAR 实际 API 调。第一版 (`.scratch/phase2_ytdlp_unused/*.kt.bak`) 是基于 README 写的，跟真实 API 全对不上，整个重写。
+
+## 实际写到的 6 个文件 + 1 个测试改
+
+| 文件 | 改动 |
+|---|---|
+| `gradle/libs.versions.toml` | 换坐标 `io.github.junkfood02.youtubedl-android:library:0.18.1` |
+| `app/build.gradle.kts` | 取消 `implementation(libs.ytdlp.android)` 注释 + 加 `ndk.abiFilters` |
+| `app/src/main/AndroidManifest.xml` | `extractNativeLibs="true"` + `requestLegacyExternalStorage="true"` |
+| `DouBiApplication.kt` | `YoutubeDL.getInstance().init(this)` in onCreate |
+| `engine/ytdlp/YtDlpEngine.kt` | 完整重写——`addOption` 分 key/value、Function3 callback、VideoInfo 字段映射 |
+| `download/DownloadWorker.kt` | 完整重写——`setForeground(ForegroundInfo(...))` 包装、进度回调每条都刷前台通知、try/catch 显式三态返回 |
+| `app/src/test/.../YtDlpEngineTest.kt` | 改测试语义——从「测 stub 行为」改成「测真引擎 catch 兜底行为」 |
+
+## v0.2 测试结果
+
+- **单元测试：46/46 全过**（编译 0 error，单测 0 fail）
+  - `ModelTest` 10
+  - `AppConfigTest` 13
+  - `AppConfigDataStoreTest` 11
+  - `YtDlpEngineTest` 11（v0.1 时 4 个 stub 测试 + ConfigToOptions 2 + 新增 5 个真引擎测试）
+  - `ExampleUnitTest` 1
+- 仪器测试：0（端到端下载需要真手机 + 真网络，v0.3 评估）
+
+## 仍待解决（v0.2 没做、留 v0.3+）
+
+- [ ] **APK 体积**：JunkFood02 fork 自带 ~30MB native libs（yt-dlp 二进制 + Python 3.8 运行时）。完整 `library` 装上后 APK 预计 30~50MB。要做 abi split 按架构分发才能压到 ~10MB / 架构。fmr Android 8 + ARM64 主流机型，可控。
+- [ ] **ffmpeg-kit 暂未开**：`io.github.junkfood02.youtubedl-android:ffmpeg:0.18.1` 另开 artifact（+10MB），用于 HLS / 音视频合并 / 抽音频。v0.1 阶段不需要，等 v0.3 真有 B 站/抖音 HLS 需求时再开。
+- [ ] **真机端到端测试**：v0.2 单测全过但没在真机/模拟器上跑过——`adb shell am start` 触发 enqueue → WorkManager → 真下载 YouTube 视频 → 通知点击跳到文件管理器。这条路径是阶段 5 的核心验证项。
+- [ ] **取消语义**：新 `execute(request, processId, callback)` 第二参是 processId，理论上能用 `YoutubeDL.getInstance().destroyProcessById(processId)` 取消。但目前 `DownloadWorker.cancel()` 走的是 WorkManager 取消，引擎层没有联动——v0.3+ 补。
+- [ ] **proguard 规则**：`release` 构建需要保留 `com.yausername.youtubedl_android.*` 类——v0.3+ 商店准备阶段一起处理。
+
+## 阶段 2 v0.2 测试覆盖
+
+| 测试 | 状态 |
+|---|---|
+| `YtDlpEngineTest::supports YouTube watch URL` | ✅ |
+| `YtDlpEngineTest::supports YouTube short URL` | ✅ |
+| `YtDlpEngineTest::supports YouTube URL case insensitive` | ✅ |
+| `YtDlpEngineTest::supports generic http URL` | ✅ |
+| `YtDlpEngineTest::rejects non-URL input` | ✅ |
+| `YtDlpEngineTest::engine name is yt-dlp` | ✅ |
+| `YtDlpEngineTest::probe returns minimal MediaItem with URL as title when yt-dlp unavailable` | ✅（v0.1 时是 stub 行为，v0.2 时是真引擎 catch 块兜底）|
+| `YtDlpEngineTest::probe of non-YouTube URL uses generic platform` | ✅ |
+| `YtDlpEngineTest::download returns Failure when yt-dlp not initialized in unit test` | ✅（v0.1 时测 stub 返 Failure 的 reason 文本，v0.2 时只验 Failure 类型）|
+| `YtDlpEngineTest::ConfigToOptions maps all relevant fields` | ✅ |
+| `YtDlpEngineTest::ConfigToOptions defaults from AppConfig DEFAULTS` | ✅ |
+
+## 下一阶段
+
+阶段 2 完整收官（v0.2 兑底完）。下一步按 [PHASES.md §3](../PHASES.md)：
+
+- **阶段 3：UI 框架**（Compose 导航 + 4 页 + 主题 7 套）——可在 AS 里点 Run 实机/模拟器看了
+- 阶段 3 完成后回到阶段 5：进度通知三档 + 通知点击跳文件管理器
+

@@ -12,14 +12,11 @@ import java.io.File
 /**
  * YtDlpEngine 单测。
  *
- * v0.1：当前是 stub 实现（yausername/yt-dlp-android 在 JitPack 401）。
- * `supports()` 是纯 URL 匹配（不调 yt-dlp-android）—— 测这个；
- * `probe()` stub 也返回最小 MediaItem —— 测这个；
- * `download()` stub 立即返回 Failure —— 测这个。
- *
- * v0.2（依赖恢复后）补：
- * - `probe` 真嗅探：拿测试 YouTube URL 验证 id / title 字段
- * - `download` 端到端：需要 instrumented test 或网络环境
+ * v0.2 兑底：JunkFood02/yt-dlp-android 已集成到 build.gradle.kts。
+ * `supports()` 仍是纯 URL 匹配（不调 yt-dlp-android）—— 测这个；
+ * `probe()` / `download()` 会真调 native 库，单测环境没网络/没 init，
+ * 期望返回 catch 块里的兜底（probe 返 URL 当标题，download 返 Failure）。
+ * 真实端到端得用 instrumented test + 模拟器 + 网络。
  */
 class YtDlpEngineTest {
 
@@ -60,14 +57,15 @@ class YtDlpEngineTest {
         assertThat(engine.name).isEqualTo("yt-dlp")
     }
 
-    // ---------- probe (stub 行为) ----------
+    // ---------- probe（v0.2 真调，单元测无网络走 catch 兜底） ----------
 
     @Test
-    fun `probe returns minimal MediaItem with URL as title`() = runTest {
+    fun `probe returns minimal MediaItem with URL as title when yt-dlp unavailable`() = runTest {
+        // 单测环境 YoutubeDL.getInstance() 未 init 或网络不可达，catch 块返回 URL 当标题
         val item = engine.probe("https://www.youtube.com/watch?v=abc", defaultOptions())
         assertThat(item.platform.key).isEqualTo("youtube")
         assertThat(item.sourceUrl).isEqualTo("https://www.youtube.com/watch?v=abc")
-        assertThat(item.title).isEqualTo("https://www.youtube.com/watch?v=abc")  // stub：URL 当标题
+        assertThat(item.title).isEqualTo("https://www.youtube.com/watch?v=abc")
         assertThat(item.itemId).isNotEmpty()
     }
 
@@ -77,16 +75,15 @@ class YtDlpEngineTest {
         assertThat(item.platform.key).isEqualTo("generic")
     }
 
-    // ---------- download (stub 行为) ----------
+    // ---------- download（v0.2 真调，单测期望 Failure） ----------
 
     @Test
-    fun `download immediately returns Failure in stub mode`() = runTest {
+    fun `download returns Failure when yt-dlp not initialized in unit test`() = runTest {
+        // 单测没 Application 上下文，YoutubeDL.getInstance() 抛异常 → 走 catch
         val item = engine.probe("https://www.youtube.com/watch?v=abc", defaultOptions())
-        var progressCalled = false
-        val result = engine.download(item, defaultOptions()) { progressCalled = true }
+        val result = engine.download(item, defaultOptions()) { /* progress callback */ }
         assertThat(result).isInstanceOf(DownloadResult.Failure::class.java)
-        assertThat((result as DownloadResult.Failure).reason).contains("yt-dlp-android")
-        assertThat(progressCalled).isFalse()  // stub 不调 progress
+        // 不再断言 reason 文本——真引擎的错误信息依赖底层实现，只验 Failure 类型
     }
 
     // ---------- AppConfig → DownloadOptions 转换（不依赖引擎） ----------

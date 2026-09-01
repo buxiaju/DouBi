@@ -11,26 +11,30 @@ import com.doubi.android.data.config.AppConfigDataStore
 import com.doubi.android.data.db.dao.PendingTaskDao
 import com.doubi.android.data.repository.DownloadRepository
 import com.doubi.android.engine.ytdlp.YtDlpEngine
+import com.doubi.android.engine.Engine
+import com.doubi.android.core.model.MediaItem
+import com.doubi.android.core.model.Platform
 import com.doubi.android.core.model.DownloadResult
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
 
 /**
- * 下载 Worker——**当前是占位 stub**。
+ * 下载 Worker。WorkManager + Hilt 集成。
  *
- * **状态（v0.1）**：JitPack 401 阻止 yausername/yt-dlp-android 集成。
- * Worker 仍然能起来（`@HiltWorker` 注入 + HiltWorkerFactory 配置好了），
- * 但调用的 YtDlpEngine 是 stub 版，所以 `download()` 立即返回 `Failure`。
+ * 桌面版对应：`src/doubi/ui/task_manager.py:TaskManager._run_task` 的协程。
+ * Android 端用 CoroutineWorker（WorkManager 的协程化版本），所有 IO 都在
+ * `coroutineContext = Dispatchers.IO` 上跑。
  *
- * **v0.2 恢复路径**：与 YtDlpEngine 同——恢复依赖 + 把 .bak 文件覆盖回原位。
+ * 流程：
+ * 1. 读 WorkManager inputData（task_id / source_url / platform）
+ * 2. 拉 `AppConfig` → `DownloadOptions`
+ * 3. 用 `setForeground()` 维持前台 Service（30 秒内必须调一次，否则 OS 杀）
+ * 4. Engine.probe() 嗅探 → Engine.download() 落盘
+ * 5. 进度回调：写 PendingTaskDao + 刷新前台通知
+ * 6. 退出：清前台通知 + 写完成状态 + 发桌面通知
  *
- * **桩行为**：
- * 1. 拉 AppConfig → DownloadOptions
- * 2. 调 YtDlpEngine.probe()（拿到 stub MediaItem）
- * 3. 调 YtDlpEngine.download()（立即返回 Failure）
- * 4. 写 PendingTaskDao 终态 = failed
- * 5. 发桌面通知（"失败：yt-dlp 集成未启用"）
- * 6. Result.failure()，WorkManager 标记任务失败
+ * Hilt 自动注入 `AppConfigDataStore` / `PendingTaskDao` / `DownloadRepository`。
+ * 任务级 worker 必须有 `@HiltWorker` 注解 + `@AssistedInject` 构造器。
  */
 @HiltWorker
 class DownloadWorker @AssistedInject constructor(
@@ -50,23 +54,35 @@ class DownloadWorker @AssistedInject constructor(
             ?: return Result.failure(workDataOf(KEY_ERROR to "Missing source_url"))
         val platformKey = inputData.getString(KEY_PLATFORM) ?: "generic"
 
+        // 1. 拉 AppConfig → DownloadOptions
         val config = configStore.get()
         val options = config.toDownloadOptions()
-        val engine = YtDlpEngine(downloadRepo.baseOutputDir)
-        val nowSec = System.currentTimeMillis() / 1000L
+        val engine: Engine = YtDlpEngine(downloadRepo.baseOutputDir)
 
-        // 1. 嗅探（stub 也能调——返回最小 MediaItem）
-        val item = try { engine.probe(sourceUrl, options) } catch (e: Throwable) {
-            com.doubi.android.core.model.MediaItem(
-                platform = com.doubi.android.core.model.Platform.fromString(platformKey),
+        // 2. 标记 running
+        pendingTaskDao.updateProgress(
+            taskId = taskId,
+            status = "downloading",
+            fraction = 0f,
+            message = "嗅探中…",
+            updatedAt = System.currentTimeMillis() / 1000L,
+        )
+
+        // 3. 嗅探（失败也不致命——直接拿 URL 走下载）
+        val item: MediaItem = try {
+            engine.probe(sourceUrl, options)
+        } catch (e: Throwable) {
+            MediaItem(
+                platform = Platform.fromString(platformKey),
                 itemId = sourceUrl.hashCode().toString(),
                 sourceUrl = sourceUrl,
                 title = sourceUrl,
             )
         }
+        // 标题从嗅探结果拿，没拿到就用 URL 当标题
         val displayTitle = item.title.ifBlank { sourceUrl }
 
-        // 2. 前台 Service 通知
+        // 4. 前台 Service 通知（WorkManager 要求 10s 内调一次，30s 周期保活）
         val progressNotification = notificationHelper.buildProgressNotification(
             taskId = taskId, title = displayTitle, fraction = 0f, message = "下载中…",
         )
@@ -77,34 +93,57 @@ class DownloadWorker @AssistedInject constructor(
             )
         )
 
-        // 3. 标记 running
-        pendingTaskDao.updateProgress(
-            taskId = taskId, status = "downloading", fraction = 0f,
-            message = "stub Worker 启动", updatedAt = nowSec,
-        )
+        // 5. 下载（带进度回调）
+        val result = engine.download(item, options) { progress ->
+            pendingTaskDao.updateProgress(
+                taskId = taskId,
+                status = "downloading",
+                fraction = progress.fraction,
+                message = progress.message,
+                updatedAt = System.currentTimeMillis() / 1000L,
+            )
+            // 刷新前台 Service 通知
+            val updated = notificationHelper.buildProgressNotification(
+                taskId = taskId,
+                title = displayTitle,
+                fraction = progress.fraction,
+                message = progress.message,
+            )
+            setProgress(workDataOf(KEY_PROGRESS to progress.fraction))
+            try {
+                setForeground(
+                    ForegroundInfo(
+                        NotificationHelper.PROGRESS_NOTIFICATION_ID,
+                        updated,
+                    )
+                )  // 30s 内必须调一次
+            } catch (_: Throwable) { /* setForeground 在 done 状态下无效，忽略 */ }
+        }
 
-        // 4. 调引擎（stub 立即返回 Failure）
-        val result = engine.download(item, options) { /* progress 永不触发 */ }
-
-        // 5. 退出
+        // 6. 退出：清前台 / 写终态 / 发桌面通知
         return when (result) {
             is DownloadResult.Success -> {
                 pendingTaskDao.updateProgress(
-                    taskId, "completed", 1f, "完成：${result.localPath}", nowSec,
+                    taskId, "completed", 1f,
+                    "完成：${result.localPath}",
+                    System.currentTimeMillis() / 1000L,
                 )
-                notificationHelper.notifyComplete(taskId, displayTitle, success = true, result.localPath)
+                // 阶段 6 接 notifyOnCompletion 三档
+                notificationHelper.notifyComplete(taskId, displayTitle, success = true, localPath = result.localPath)
                 Result.success(workDataOf(KEY_LOCAL_PATH to result.localPath))
             }
             is DownloadResult.Failure -> {
                 pendingTaskDao.updateProgress(
-                    taskId, "failed", 0f, "失败：${result.reason}", nowSec,
+                    taskId, "failed", 0f, "失败：${result.reason}",
+                    System.currentTimeMillis() / 1000L,
                 )
                 notificationHelper.notifyComplete(taskId, displayTitle, success = false)
                 Result.failure(workDataOf(KEY_ERROR to result.reason))
             }
             is DownloadResult.Cancelled -> {
                 pendingTaskDao.updateProgress(
-                    taskId, "paused", 0f, "已取消", nowSec,
+                    taskId, "paused", 0f, "已取消",
+                    System.currentTimeMillis() / 1000L,
                 )
                 Result.failure(workDataOf(KEY_ERROR to "cancelled"))
             }
