@@ -133,10 +133,12 @@ dependencies {
     implementation(libs.timber)
 
     // 下载引擎（阶段 2 启用）
-    // ytdlp-android: yausername/yt-dlp-android 是 yt-dlp 的 Android 端口，自带 ffmpeg
-    // 不用再装 ffmpeg-kit（那是个 100MB+ 的 native lib，HLS 站点需要时再开）
-    implementation(libs.ytdlp.android)
-    // implementation(libs.ffmpeg.kit)  // 暂不开启，HLS 通用方案 v0.2+ 再加
+    // ytdlp-android 集成见 phase-2.md「未落地」段——JitPack 401 Unauthorized，
+    // 暂时注释。Engine interface / 数据模型 / Repository / NotificationHelper
+    // 全部保留，缺的是 YtDlpEngine 和 DownloadWorker 两个具体实现。
+    // 替代方案（v0.2 评估）：fork 库 / yt-dlp 子进程 / 自研 OkHttp + M3U8 解析。
+    // implementation(libs.ytdlp.android)
+    // implementation(libs.ffmpeg.kit)
 
     // 单元测试
     testImplementation(libs.junit)

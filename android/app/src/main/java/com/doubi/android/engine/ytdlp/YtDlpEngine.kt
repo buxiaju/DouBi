@@ -1,161 +1,59 @@
 package com.doubi.android.engine.ytdlp
 
-import com.doubi.android.core.model.Author
 import com.doubi.android.core.model.DownloadOptions
 import com.doubi.android.core.model.DownloadResult
 import com.doubi.android.core.model.MediaItem
-import com.doubi.android.core.model.MediaType
 import com.doubi.android.core.model.Platform
 import com.doubi.android.core.model.Progress
 import com.doubi.android.engine.Engine
-import com.yausername.ytdlp.YoutubeDL
-import com.yausername.ytdlp.YoutubeDLCallback
-import com.yausername.ytdlp.YoutubeDLException
-import com.yausername.ytdlp.YoutubeDLRequest
-import kotlinx.coroutines.CancellableContinuation
-import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.suspendCancellableCoroutine
-import java.io.File
-import kotlin.coroutines.resume
 
 /**
- * yt-dlp 引擎。1:1 对拍桌面版 `src/doubi/engines/yt_dlp.py`。
+ * yt-dlp 引擎——**当前是占位 stub**。
  *
- * 桌面版用 Python `yt_dlp` + `asyncio.to_thread` 包装 sync API；
- * Android 端用 [yausername/yt-dlp-android]（同源，下载/嗅探 API 几乎一致），
- * 把 callback API 用 `suspendCancellableCoroutine` 包成挂起函数。
+ * **状态（v0.1，2026-09-02）**：`yausername/yt-dlp-android:core:2024.10.27` 在
+ * JitPack 上 401 Unauthorized，无法解析依赖。完整实现版本被 stash 到
+ * `.scratch/phase2_ytdlp_unused/YtDlpEngine.kt.bak` 作参考。
  *
- * 输出目录在构造时注入（`baseOutputDir`），由 Hilt 提供 `context.filesDir`。
- * 不写 `java.io.tmpdir`——Android 可能在低存储时清理。
+ * **stub 行为**：
+ * - `supports()` 返回 true（让 UI 看起来「支持 YouTube」）
+ * - `probe()` 返回一个最小可用 `MediaItem`（id = URL hash，title = URL）
+ * - `download()` 立即返回 `Failure("yt-dlp-android 集成未启用")`
+ *
+ * **v0.2 恢复路径**（按推荐顺序）：
+ * 1. 试 Maven Central 是否有 yausername 镜像：`io.github.yausername.*`
+ * 2. 用 fork：[JunkFood02/yt-dlp-android](https://github.com/junkfood02/yt-dlp-android)
+ *    （Maven Central 可用，持续维护）
+ * 3. 退到 yt-dlp 子进程方案：自己下 yt-dlp 静态二进制 + `Runtime.exec()`
+ * 4. 极端：自研 OkHttp + M3U8 解析，仅 YouTube 走 token 嗅探
+ *
+ * 任何方案恢复后，**把 `.bak` 文件覆盖回原位 + 取消 build.gradle.kts 里
+ * `ytdlp-android` 依赖的注释**即可，无需改其他文件。
  */
 class YtDlpEngine(
-    private val baseOutputDir: File,
+    @Suppress("UNUSED_PARAMETER") private val baseOutputDir: java.io.File,
 ) : Engine {
 
     override val name: String = "yt-dlp"
 
     override fun supports(url: String, options: DownloadOptions): Boolean {
         val u = url.lowercase()
-        return when {
-            u.contains("youtube.com") || u.contains("youtu.be") -> true
-            u.startsWith("http://") || u.startsWith("https://") -> true  // 通用兜底
-            else -> false
-        }
+        return u.contains("youtube.com") || u.contains("youtu.be") ||
+            u.startsWith("http://") || u.startsWith("https://")
     }
 
     override suspend fun probe(url: String, options: DownloadOptions): MediaItem =
-        suspendCancellableCoroutine { cont ->
-            val request = YoutubeDLRequest(url, listOf("--skip-download"))
-            val callback = object : YoutubeDLCallback {
-                override fun onYoutubeDLProgress(percent: Float, etaSeconds: Long, line: String) {
-                    // 嗅探阶段不报进度
-                }
-                override fun onYoutubeDLLine(line: String, outputType: Int) {
-                    // yt-dlp-android 嗅探成功时 onSuccess 触发
-                }
-            }
-            try {
-                val info = YoutubeDL.getInstance().getInfo(request, callback)
-                val platform = if (url.contains("youtu")) Platform.YOUTUBE else Platform.GENERIC
-                cont.resume(
-                    MediaItem(
-                        platform = platform,
-                        itemId = info.id ?: url.hashCode().toString(),
-                        sourceUrl = url,
-                        title = info.title ?: "",
-                        author = info.uploader?.let { Author(name = it) },
-                        coverUrl = info.thumbnail,
-                        duration = info.duration?.toDouble(),
-                        mediaType = if (info.duration != null) MediaType.VIDEO else MediaType.AUDIO,
-                    )
-                )
-            } catch (e: YoutubeDLException) {
-                cont.resume(
-                    MediaItem(
-                        platform = Platform.GENERIC,
-                        itemId = url.hashCode().toString(),
-                        sourceUrl = url,
-                        title = url,
-                    )
-                )
-            } catch (e: Throwable) {
-                cont.resume(
-                    MediaItem(
-                        platform = Platform.GENERIC,
-                        itemId = url.hashCode().toString(),
-                        sourceUrl = url,
-                        title = url,
-                    )
-                )
-            }
-        }
+        MediaItem(
+            platform = if (url.contains("youtu")) Platform.YOUTUBE else Platform.GENERIC,
+            itemId = url.hashCode().toString(),
+            sourceUrl = url,
+            title = url,  // 嗅探不可用——UI 显示 URL
+        )
 
     override suspend fun download(
         item: MediaItem,
         options: DownloadOptions,
         onProgress: suspend (Progress) -> Unit,
-    ): DownloadResult = suspendCancellableCoroutine { cont: CancellableContinuation<DownloadResult> ->
-        val outDir = File(baseOutputDir, item.platform.key).apply { mkdirs() }
-        val outTemplate = File(outDir, "${item.itemId}.%(ext)s").absolutePath
-
-        val args = buildList {
-            add("-o"); add(outTemplate)
-            add("--no-playlist")
-            add("--no-mtime")
-            // 容器（yt-dlp 的 --merge-output-format 在下载后合并视频/音频流）
-            when (options.container) {
-                "mp4" -> { add("--merge-output-format"); add("mp4") }
-                "mkv" -> { add("--merge-output-format"); add("mkv") }
-            }
-            // 画质
-            when {
-                options.maxQuality == "best" -> {
-                    add("-f"); add("bestvideo*+bestaudio/best")
-                }
-                options.maxQuality.endsWith("p") -> {
-                    val h = options.maxQuality.dropLast(1)
-                    add("-f"); add("bestvideo[height<=$h]+bestaudio/best[height<=$h]")
-                }
-                else -> {
-                    add("-f"); add(options.maxQuality)
-                }
-            }
-            if (options.writeThumbnail) add("--write-thumbnail")
-            if (options.writeSubtitles) add("--write-subs")
-            if (!options.resume) add("--no-continue")
-            options.proxy?.let { add("--proxy"); add(it) }
-            options.rateLimit?.let { add("--limit-rate"); add(it) }
-        }
-
-        val request = YoutubeDLRequest(item.sourceUrl, args)
-        val callback = object : YoutubeDLCallback {
-            override fun onYoutubeDLProgress(percent: Float, etaSeconds: Long, line: String) {
-                if (cont.isCancelled) return  // 协程已取消，停止回调（yt-dlp-android 不支持外中断，会自然结束）
-                try {
-                    runBlocking {
-                        onProgress(
-                            Progress(
-                                fraction = percent.coerceIn(0f, 1f),
-                                message = line.take(200),
-                            )
-                        )
-                    }
-                } catch (_: Throwable) { /* progress 失败不阻塞下载 */ }
-            }
-        }
-
-        try {
-            YoutubeDL.getInstance().execute(request, callback)
-            val actual = outDir.listFiles { f -> f.name.startsWith(item.itemId) }?.firstOrNull()
-            if (actual != null && actual.length() > 0) {
-                cont.resume(DownloadResult.Success(actual.absolutePath))
-            } else {
-                cont.resume(DownloadResult.Failure("Output file not found in ${outDir.absolutePath}"))
-            }
-        } catch (e: YoutubeDLException) {
-            cont.resume(DownloadResult.Failure("yt-dlp: ${e.message ?: e.javaClass.simpleName}"))
-        } catch (e: Throwable) {
-            cont.resume(DownloadResult.Failure("Unexpected: ${e.message ?: e.javaClass.simpleName}"))
-        }
-    }
+    ): DownloadResult = DownloadResult.Failure(
+        "yt-dlp-android 集成未启用：JitPack 401 Unauthorized。详见 android/docs/phases/phase-2.md"
+    )
 }
