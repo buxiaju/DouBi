@@ -1,10 +1,10 @@
-package com.doubi.android.data.config
+﻿package com.doubi.android.data.config
 
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.datastore.preferences.core.Preferences
 import com.doubi.android.core.config.AppConfig
-import com.doubi.android.core.config.AppConfig.DEFAULTS
+import com.doubi.android.core.config.DEFAULTS
 import com.google.common.truth.Truth.assertThat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers

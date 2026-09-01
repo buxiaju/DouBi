@@ -1,10 +1,11 @@
-package com.doubi.android.data.config
+﻿package com.doubi.android.data.config
 
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import com.doubi.android.core.config.AppConfig
 import com.doubi.android.core.config.ConfigValidator
+import com.doubi.android.core.config.DEFAULTS
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -119,35 +120,35 @@ class AppConfigDataStore(
      * 坏值回退默认。
      */
     private fun Preferences.toAppConfig(): AppConfig = AppConfig(
-        outputRoot = this[ConfigKeys.OUTPUT_ROOT] ?: AppConfig.DEFAULTS.outputRoot,
-        outputDirTemplate = this[ConfigKeys.OUTPUT_DIR_TEMPLATE] ?: AppConfig.DEFAULTS.outputDirTemplate,
+        outputRoot = this[ConfigKeys.OUTPUT_ROOT] ?: DEFAULTS.outputRoot,
+        outputDirTemplate = this[ConfigKeys.OUTPUT_DIR_TEMPLATE] ?: DEFAULTS.outputDirTemplate,
         concurrentJobs = ConfigValidator.validateConcurrentJobs(this[ConfigKeys.CONCURRENT_JOBS]),
-        container = this[ConfigKeys.CONTAINER] ?: AppConfig.DEFAULTS.container,
-        maxQuality = this[ConfigKeys.MAX_QUALITY] ?: AppConfig.DEFAULTS.maxQuality,
-        writeThumbnail = this[ConfigKeys.WRITE_THUMBNAIL] ?: AppConfig.DEFAULTS.writeThumbnail,
-        writeMetadataJson = this[ConfigKeys.WRITE_METADATA_JSON] ?: AppConfig.DEFAULTS.writeMetadataJson,
-        writeNfo = this[ConfigKeys.WRITE_NFO] ?: AppConfig.DEFAULTS.writeNfo,
-        writeDanmaku = this[ConfigKeys.WRITE_DANMAKU] ?: AppConfig.DEFAULTS.writeDanmaku,
-        writeSubtitles = this[ConfigKeys.WRITE_SUBTITLES] ?: AppConfig.DEFAULTS.writeSubtitles,
-        resume = this[ConfigKeys.RESUME] ?: AppConfig.DEFAULTS.resume,
-        filenameTemplate = this[ConfigKeys.FILENAME_TEMPLATE] ?: AppConfig.DEFAULTS.filenameTemplate,
+        container = this[ConfigKeys.CONTAINER] ?: DEFAULTS.container,
+        maxQuality = this[ConfigKeys.MAX_QUALITY] ?: DEFAULTS.maxQuality,
+        writeThumbnail = this[ConfigKeys.WRITE_THUMBNAIL] ?: DEFAULTS.writeThumbnail,
+        writeMetadataJson = this[ConfigKeys.WRITE_METADATA_JSON] ?: DEFAULTS.writeMetadataJson,
+        writeNfo = this[ConfigKeys.WRITE_NFO] ?: DEFAULTS.writeNfo,
+        writeDanmaku = this[ConfigKeys.WRITE_DANMAKU] ?: DEFAULTS.writeDanmaku,
+        writeSubtitles = this[ConfigKeys.WRITE_SUBTITLES] ?: DEFAULTS.writeSubtitles,
+        resume = this[ConfigKeys.RESUME] ?: DEFAULTS.resume,
+        filenameTemplate = this[ConfigKeys.FILENAME_TEMPLATE] ?: DEFAULTS.filenameTemplate,
         rateLimit = this[ConfigKeys.RATE_LIMIT]?.takeIf { it.isNotEmpty() },
         proxy = this[ConfigKeys.PROXY]?.takeIf { it.isNotEmpty() },
-        database = this[ConfigKeys.DATABASE] ?: AppConfig.DEFAULTS.database,
-        databasePath = this[ConfigKeys.DATABASE_PATH] ?: AppConfig.DEFAULTS.databasePath,
-        manifestPath = this[ConfigKeys.MANIFEST_PATH] ?: AppConfig.DEFAULTS.manifestPath,
+        database = this[ConfigKeys.DATABASE] ?: DEFAULTS.database,
+        databasePath = this[ConfigKeys.DATABASE_PATH] ?: DEFAULTS.databasePath,
+        manifestPath = this[ConfigKeys.MANIFEST_PATH] ?: DEFAULTS.manifestPath,
         theme = ConfigValidator.validateTheme(this[ConfigKeys.THEME]),
-        promptBeforeDownload = this[ConfigKeys.PROMPT_BEFORE_DOWNLOAD] ?: AppConfig.DEFAULTS.promptBeforeDownload,
+        promptBeforeDownload = this[ConfigKeys.PROMPT_BEFORE_DOWNLOAD] ?: DEFAULTS.promptBeforeDownload,
         duplicatePolicy = ConfigValidator.validateDuplicatePolicy(this[ConfigKeys.DUPLICATE_POLICY]),
         language = ConfigValidator.validateLanguage(this[ConfigKeys.LANGUAGE]),
         engine = ConfigValidator.validateEngine(this[ConfigKeys.ENGINE]),
-        aria2RpcUrl = this[ConfigKeys.ARIA2_RPC_URL] ?: AppConfig.DEFAULTS.aria2RpcUrl,
+        aria2RpcUrl = this[ConfigKeys.ARIA2_RPC_URL] ?: DEFAULTS.aria2RpcUrl,
         aria2Secret = this[ConfigKeys.ARIA2_SECRET]?.takeIf { it.isNotEmpty() },
-        sniffEnabled = this[ConfigKeys.SNIFF_ENABLED] ?: AppConfig.DEFAULTS.sniffEnabled,
+        sniffEnabled = this[ConfigKeys.SNIFF_ENABLED] ?: DEFAULTS.sniffEnabled,
         sniffDurationSec = ConfigValidator.validateSniffDurationSec(this[ConfigKeys.SNIFF_DURATION_SEC]),
-        sniffHeadless = this[ConfigKeys.SNIFF_HEADLESS] ?: AppConfig.DEFAULTS.sniffHeadless,
-        sniffUserAgent = this[ConfigKeys.SNIFF_USER_AGENT] ?: AppConfig.DEFAULTS.sniffUserAgent,
-        sniffAutoPlay = this[ConfigKeys.SNIFF_AUTO_PLAY] ?: AppConfig.DEFAULTS.sniffAutoPlay,
+        sniffHeadless = this[ConfigKeys.SNIFF_HEADLESS] ?: DEFAULTS.sniffHeadless,
+        sniffUserAgent = this[ConfigKeys.SNIFF_USER_AGENT] ?: DEFAULTS.sniffUserAgent,
+        sniffAutoPlay = this[ConfigKeys.SNIFF_AUTO_PLAY] ?: DEFAULTS.sniffAutoPlay,
         sniffCaptureTypes = ConfigValidator.validateSniffCaptureTypes(
             this[ConfigKeys.SNIFF_CAPTURE_TYPES]?.toList()?.sorted(),
         ),

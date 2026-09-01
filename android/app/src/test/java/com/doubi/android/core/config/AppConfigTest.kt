@@ -1,4 +1,4 @@
-package com.doubi.android.core.config
+﻿package com.doubi.android.core.config
 
 import com.google.common.truth.Truth.assertThat
 import org.junit.Test
@@ -7,7 +7,7 @@ import org.junit.Test
  * 桌面版对照：`tests/test_config_theme.py`。
  *
  * 这一组单测只验两个东西：
- * 1. 默认值（`AppConfig.DEFAULTS`）跟桌面版 `core/config.py:DEFAULTS` 1:1
+ * 1. 默认值（`DEFAULTS`）跟桌面版 `core/config.py:DEFAULTS` 1:1
  * 2. `ConfigValidator` 各类白名单/边界/回退与桌面版 `_validate_*` 系列等价
  *
  * DataStore 读写往返测试在 [AppConfigDataStoreTest]（单独文件，
@@ -21,7 +21,7 @@ class AppConfigTest {
 
     @Test
     fun `defaults match desktop core config py DEFAULTS`() {
-        val d = AppConfig.DEFAULTS
+        val d = DEFAULTS
         // 路径 / 输出
         assertThat(d.outputRoot).isEqualTo("./Downloaded")
         assertThat(d.outputDirTemplate).isEqualTo("{platform}/{author}/{media_type}")
@@ -69,7 +69,7 @@ class AppConfigTest {
     @Test
     fun `default AppConfig instance has all defaults`() {
         val cfg = AppConfig()
-        assertThat(cfg.concurrentJobs).isEqualTo(AppConfig.DEFAULTS.concurrentJobs)
+        assertThat(cfg.concurrentJobs).isEqualTo(DEFAULTS.concurrentJobs)
         assertThat(cfg.theme).isEqualTo("default_light")
         assertThat(cfg.engine).isEqualTo("yt-dlp")
         assertThat(cfg.notifyOnCompletion).isEqualTo("success")
@@ -135,9 +135,9 @@ class AppConfigTest {
     @Test
     fun `sniff_capture_types falls back to default when null or empty`() {
         assertThat(ConfigValidator.validateSniffCaptureTypes(null))
-            .isEqualTo(AppConfig.DEFAULTS.sniffCaptureTypes)
+            .isEqualTo(DEFAULTS.sniffCaptureTypes)
         assertThat(ConfigValidator.validateSniffCaptureTypes(emptyList()))
-            .isEqualTo(AppConfig.DEFAULTS.sniffCaptureTypes)
+            .isEqualTo(DEFAULTS.sniffCaptureTypes)
         // 非空保留（不做白名单过滤——用户可扩展）
         val custom = listOf("video/x-matroska", "application/x-mpegURL")
         assertThat(ConfigValidator.validateSniffCaptureTypes(custom)).isEqualTo(custom)

@@ -13,8 +13,8 @@ object ConfigValidator {
      * 合法值：`{"success", "all", "summary"}`，否则回退 `"success"`。
      */
     fun validateNotifyMode(value: String?): String =
-        if (value != null && value in AppConfig.DEFAULTS.NOTIFY_MODES) value
-        else AppConfig.DEFAULTS.notifyOnCompletion
+        if (value != null && value in DEFAULTS.NOTIFY_MODES) value
+        else DEFAULTS.notifyOnCompletion
 
     /**
      * 引擎白名单。合法值：`{"yt-dlp", "aria2"}`，否则回退 `"yt-dlp"`。
@@ -22,22 +22,22 @@ object ConfigValidator {
      * 与 notify_mode 对称。
      */
     fun validateEngine(value: String?): String =
-        if (value != null && value in AppConfig.DEFAULTS.ENGINES) value
-        else AppConfig.DEFAULTS.engine
+        if (value != null && value in DEFAULTS.ENGINES) value
+        else DEFAULTS.engine
 
     /**
      * 并发数 clamp 到 [1, 16]。桌面版没做 clamp——这里加一道防御，
      * 防止用户在设置页输 "0" 或 "9999" 让 Worker 池炸掉。
      */
     fun validateConcurrentJobs(value: Int?): Int =
-        (value ?: AppConfig.DEFAULTS.concurrentJobs).coerceIn(1, 16)
+        (value ?: DEFAULTS.concurrentJobs).coerceIn(1, 16)
 
     /**
      * 嗅探时长 clamp 到 [5, 60]。桌面版也没 clamp——5 秒是 Playwright 启动
      * 最低要求，60 秒是用户耐心上限。
      */
     fun validateSniffDurationSec(value: Int?): Int =
-        (value ?: AppConfig.DEFAULTS.sniffDurationSec).coerceIn(5, 60)
+        (value ?: DEFAULTS.sniffDurationSec).coerceIn(5, 60)
 
     /**
      * 嗅探 MIME 白名单过滤。未知类型静默丢弃，不抛错。
@@ -45,7 +45,7 @@ object ConfigValidator {
      * 缺了也只会让嗅探少抓一些类型，不会崩。
      */
     fun validateSniffCaptureTypes(value: List<String>?): List<String> =
-        value?.takeIf { it.isNotEmpty() } ?: AppConfig.DEFAULTS.sniffCaptureTypes
+        value?.takeIf { it.isNotEmpty() } ?: DEFAULTS.sniffCaptureTypes
 
     /**
      * 重复下载策略白名单。合法值：`{"skip", "redownload", "ask"}`，
@@ -53,7 +53,7 @@ object ConfigValidator {
      */
     fun validateDuplicatePolicy(value: String?): String =
         if (value in setOf("skip", "redownload", "ask")) value
-        else AppConfig.DEFAULTS.duplicatePolicy
+        else DEFAULTS.duplicatePolicy
 
     /**
      * UI 语言白名单。空串 / 未知值回退 `"zh_CN"`。
@@ -61,7 +61,7 @@ object ConfigValidator {
      */
     fun validateLanguage(value: String?): String =
         if (!value.isNullOrBlank() && value in setOf("zh_CN", "en")) value
-        else AppConfig.DEFAULTS.language
+        else DEFAULTS.language
 
     /**
      * 主题白名单。v0.1 Android 端只支持 2 套（default_light / default_dark），
@@ -72,5 +72,5 @@ object ConfigValidator {
      */
     fun validateTheme(value: String?): String =
         if (value in setOf("default_light", "default_dark")) value
-        else AppConfig.DEFAULTS.theme
+        else DEFAULTS.theme
 }

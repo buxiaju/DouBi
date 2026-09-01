@@ -170,6 +170,49 @@ v0.1 schema v1 没历史负担，从 v1 升 v2 时 Room 会清表重建——dev
 | `androidx.test.espresso:espresso-core` | — | 阶段 3+ | Compose UI 测试 |
 
 **未来阶段的清单**（`androidTest` 里）：
+
+### 坑 4：Kotlin `companion object` 嵌套 `object` 的作用域盲区（0.3.1 修）
+
+**症状**：`compileDebugKotlin` 报一堆 `Unresolved reference 'DEFAULTS'` + 几条看着吓人的 `Return type mismatch: expected 'kotlin.String', actual 'kotlin.String?'`（其实都同根因——`DEFAULTS` 解析失败 → `if/else` 推断不出 `String`）。
+
+**根因**：`data class AppConfig(val x: T = DEFAULTS.x)` 这种**主构造器默认值参数**不在 `companion object` 的作用域内。具体说：
+
+| 位置 | 能否看到 `AppConfig.DEFAULTS` |
+|---|---|
+| 主构造器默认值参数 | ❌ |
+| 类体内方法 | ✅（`toMap()` 等） |
+| 类的 `companion object` 内部 | ✅（`object DEFAULTS` 自己） |
+| 外部代码（`ConfigValidator.kt` 等） | ✅（Kotlin 伴生对象自动解析） |
+
+Kotlin 文档里这规则的措辞是「default values for primary constructor parameters are evaluated in a context that has access to the enclosing class, but not necessarily its companion object's nested types」。于是 `val x: T = DEFAULTS.x` 找不到 `DEFAULTS`，编译器一连串报错都从这个失败里冒出来。
+
+**修法**：把 `object DEFAULTS` 提到**文件顶层**（在 `data class` 之外），Kotlin 主构造器默认值作用域能直接看到顶层声明。外部访问从 `AppConfig.DEFAULTS.xxx` 改成 `DEFAULTS.xxx`（同包直接用，跨包加 `import com.doubi.android.core.config.DEFAULTS`）。
+
+```diff
+- data class AppConfig(
+-     val outputRoot: String = DEFAULTS.outputRoot,
+-     // ...
+- ) {
+-     fun toMap(): Map<String, Any> = mapOf(...)
+-     companion object {
+-         object DEFAULTS {           ← 找不到，编译失败
+-             const val outputRoot: String = "./Downloaded"
+-             // ...
+-         }
+-     }
+- }
+
++ object DEFAULTS {                   ← 顶层可见，构造器能引用
++     const val outputRoot: String = "./Downloaded"
++     // ...
++ }
++ data class AppConfig(
++     val outputRoot: String = DEFAULTS.outputRoot,  ← ✅
++     // ...
++ )
+```
+
+**教训**：在 `data class`（或 `class`）的**主构造器默认值参数**里引用**任何**类成员时，包括 `companion object` 里的，都要用全限定名（包括 `this@ClassName.X` 或者顶层 `X`）。只有「直接放在顶层 `object` 旁边」或「在类体内部（不是构造器参数）」用短名才稳。
 - 阶段 2 加 `mockk`（mock `WorkManager` 入口）
 - 阶段 3 加 `espresso`（Compose UI 自动化）
 
