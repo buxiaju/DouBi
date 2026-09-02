@@ -33,4 +33,24 @@
 
     <!-- 阶段 6+ 启用：设置 tab（v0.1 阶段 3 不显示，留 string 仅为对齐桌面版 nav.*） -->
     <string name="nav_settings">设置</string>
+
+    <!-- 阶段 4 启用：PromptOptionsDialog（Compose Dialog） -->
+    <string name="prompt_title">下载选项</string>
+    <string name="prompt_section_format">格式</string>
+    <string name="prompt_section_options">附加选项</string>
+    <string name="prompt_container">容器</string>
+    <string name="prompt_write_thumbnail">下载缩略图</string>
+    <string name="prompt_write_subtitles">下载字幕</string>
+    <string name="prompt_resume">断点续传</string>
+    <string name="prompt_modify_title">修改视频标题</string>
+    <string name="prompt_title_template">标题模板</string>
+    <string name="prompt_action_download">下载</string>
+    <string name="prompt_action_cancel">取消</string>
+
+    <!-- 阶段 4 启用：PastingScreen 反馈消息 -->
+    <string name="pasting_parsing">解析中…</string>
+    <string name="pasting_unsupported">不支持的链接：%1$s</string>
+    <string name="pasting_enqueued">已入队：%1$s</string>
+    <string name="pasting_parse_failed">解析失败：%1$s</string>
+    <string name="pasting_url_empty">请输入链接</string>
 </resources>
