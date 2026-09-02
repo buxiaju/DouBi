@@ -53,4 +53,16 @@
     <string name="pasting_enqueued">已入队：%1$s</string>
     <string name="pasting_parse_failed">解析失败：%1$s</string>
     <string name="pasting_url_empty">请输入链接</string>
+    <string name="pasting_queue_full">下载队列已满（%1$d / %2$d），请稍候</string>
+
+    <!-- 阶段 5 启用：DownloadingScreen -->
+    <string name="downloading_count">活跃任务：%1$d</string>
+    <string name="downloading_cancel">取消</string>
+    <string name="downloading_cancelled">已取消：%1$s</string>
+    <string name="downloading_status_queued">排队中</string>
+    <string name="downloading_status_running">下载中</string>
+    <string name="downloading_status_paused">已暂停</string>
+    <string name="downloading_status_completed">已完成</string>
+    <string name="downloading_status_failed">失败</string>
+    <string name="downloading_status_unknown">未知</string>
 </resources>
