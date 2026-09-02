@@ -105,15 +105,18 @@
 - **命令行构建挂在 `androidJdkImage`**（`阶段 3`）：本机 PATH 上是 JDK 26，AGP 8.7.3 在 jlink 这步挂掉。**修法**：把 `JAVA_HOME` 指向 Android Studio 自带的 JBR 25（`C:\A\01SoftWares\03IDE\Android Studio\jbr`），或写 `~/.gradle/gradle.properties` 的 `org.gradle.java.home`。详见 [SETUP.md](SETUP.md)
 - **`UP-TO-DATE` 假绿**（`阶段 3`）：`testDebugUnitTest` 在没源文件变动时直接返回 `BUILD SUCCESSFUL` 而一个测试都没跑。要强制重跑必须加 `--rerun`，或看 `app/build/test-results/testDebugUnitTest/` 报告时间戳
 - **progress 回调量纲是 0-100 而非 0-1**（`阶段 3`）：youtubedl-android 0.18.1 的 `StreamProcessExtractor.getProgress` 直接 `Float.parseFloat` 百分号前的数字（**字节码级证据**：`\[download\]\s+(\d+\.\d)% .* ETA (\d+):(\d+)`），ffmpeg 分支硬编 `99.0f`，初始值 `-1.0f`。原 `YtDlpEngine.download` 写 `progress.coerceIn(0f, 1f)` 会把 1% 以上的进度**全部截成 100%**——进度条从第一次回调起就满格。修法：`(progress / 100f).coerceIn(0f, 1f)`
+- **Kotlin String literal 把 `%1$d` 里的 `$d` 解析成变量引用**（`阶段 5`）：`stringResource(R.string.pasting_queue_full, "%1$d", "%2$d")` 编译错 `Unresolved reference 'd'`——Kotlin 把 `$` 紧跟 identifier char `d` 当 Kotlin 变量。修法：`stringResource` 只传模板，`String.format` 推迟到运行时
 
-### 已知问题（v0.1.0 发布前**剩余**的必须处理）
+### 已知问题（v0.2.1 发布前**剩余**的必须处理）
 
-完整登记见 [PHASES.md 的跨阶段欠账](PHASES.md)。阶段 3 已还 #1#2#3#4#6 + #5 部分，**仍欠**：
+完整登记见 [PHASES.md 的跨阶段欠账](PHASES.md)。阶段 5 已还 5 笔 v0.2.0 阶段欠账（#1 阶段 3 已还的也累计算），**仍欠**：
 
-- **真机端到端未完整验证**——assembleDebug 产包结构 OK，10 个仪器测试（`MediaItemDaoTest` 6 + `MigrationTest` 3 + 模板 1）写了但一次没跑；落盘、通知、前台 Service 仍是「代码通、没人见过」的全靠 v0.2 阶段 4 真机跑
-- **`DownloadWorker.doWork()` 覆盖率 2.5%**——worker 测试要 mock Hilt/coroutine context/WorkManager InputData，单测不实用，留给 instrumented test
-- **80% 覆盖率门槛未达成**——基线 LINE 37.5% / METHOD 48.5% / CLASS 30.8%；`core/model` 100% / `core/config` 100% / `data/config` 85.1% / `engine/ytdlp` 59.9% 是真实成绩，**UI ViewModel / Worker / Repository 这三个新写入路径 0% 覆盖**是预期差距
-- **无 HLS 兜底**——ffmpeg 依赖未启用
+- **真机 adb install 验证完整流程**（解析 → 弹 dialog → 入队 → Worker 跑 → Downloading tab 看进度）—— 阶段 6 接历史 tab 前必须补
+- **Compose UI test for DownloadingScreen** —— 阶段 6 加
+- **instrumented test for DownloadWorker 三档通知**（mock NotificationHelper）—— 阶段 6 加
+- **summary 模式 batch 定时汇总**（桌面版 10 分钟汇总）—— v0.2.2
+- **取消任务时回收 PendingTaskDao 那条 row**（当前只 updateProgress "paused"，不删）—— v0.2.2
+- **覆盖率门槛** —— LINE 30.7% / METHOD 42.1%（新 UI 增量大于测试覆盖；阶段 6 加 Compose UI test + instrumented 拉起来）
 
 ### vs 桌面版的行为差异
 
@@ -131,6 +134,8 @@
 | `AppConfig.extra` | `dict[str, Any]` | **未实现** | 首版设置页与 Worker 都用不到 |
 | i18n | 自研 JSON 词表 + `tr()` | `res/values-zh/strings.xml` + `stringResource()` | 更原生，两边各自维护、术语对齐 |
 | Room Migration | SQLAlchemy `Base.metadata.create_all()` 跑全量 | 显式 `Migration(n, n+1)` 链 + `MigrationTestHelper` 仪器测试 | 移动端不能容忍升级丢数据 |
+| 队列并发 | 桌面版 `TaskManager` 内存态并发 | **enqueue 入口并发检查**（`AppConfig.concurrentJobs`，默认 3） | Android 单 UI 不需要 Worker 内部 Semaphore |
+| 完成通知 | `TrayController.notify_on_completion` 三档 | `NotificationHelper.notifyByCompletionMode` 三档（success / all / summary） | 1:1 对拍，summary batch 摘要留 v0.2.2 |
 
 ---
 

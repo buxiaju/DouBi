@@ -177,15 +177,26 @@
 - `ui/main_window.py:notify_on_completion` → `Worker.doWork()` 完成后发 `NotificationCompat.Builder`
 
 **验收**：
-- [ ] 下载中页能看到实时进度条 + 速度 + ETA
-- [ ] 队列并发（默认 3，配置可改）
-- [ ] 完成通知（success / all / summary 三档，对齐桌面版）
-- [ ] 阶段 5 复盘文档
+- [x] 下载中页能看到实时进度条 + 速度 + ETA
+- [x] 队列并发（默认 3，配置可改）
+- [x] 完成通知（success / all / summary 三档，对齐桌面版）
+- [x] 阶段 5 复盘文档（[phase-5.md](phases/phase-5.md)）
+
+**已完成（详见 [phase-5.md](phases/phase-5.md)）**：
+- DownloadingViewModel `combine(activeTasks, workInfosFlow).stateIn` 拿实时 WorkInfo.progress
+- DownloadingScreen LazyColumn + TaskRow（title + 进度条 + `Progress.statusLine()` + 取消按钮 + 6 种 DisplayStatus 颜色）
+- DownloadRepository.QueueFullException + enqueue 入口按 `AppConfig.concurrentJobs` 检查
+- PastingViewModel 捕获 QueueFullException → ParseStatus.QueueFull → snackbar 「队列已满 N / M」
+- NotificationHelper.notifyByCompletionMode 按 mode 路由：`success` 只发成功 / `all` 都发 / `summary` 单条静默（batch 摘要留 v0.2.2）
+- DownloadWorker 退出分支从 `notifyComplete` 改 `notifyByCompletionMode(config.notifyOnCompletion)`
+- DisplayStatus enum 6 种（QUEUED / RUNNING / PAUSED / COMPLETED / FAILED / UNKNOWN）
+- 单测 153 → 158 全绿（+5：DownloadingViewModelTest 5 例纯数据变换）
+- assembleDebug 0 警告通过，APK 77.05 MB（不变）
 
 **必须先还的账**（不还则上面的验收做不出来）：
-- [ ] `Progress` 补 `speed` / `eta` 字段（欠账 #4）——否则「进度条 + 速度 + ETA」无从显示
-- [ ] 失败重试 + 指数退避（欠账 #3）——`setBackoffCriteria(BackoffPolicy.EXPONENTIAL, ...)` + Worker 内 `Result.retry()`，并把桌面版 `test_pipeline_retry.py` 的用例翻译过来
-- [ ] `FileLayout` + `FilenameTemplate`（欠账 #1）——否则 `outputRoot` / `outputDirTemplate` / `filenameTemplate` 一直空转
+- [x] `Progress` 补 `speed` / `eta` 字段（欠账 #4）—— 阶段 3 已还
+- [x] 失败重试 + 指数退避（欠账 #3）—— 阶段 3 已还
+- [x] `FileLayout` + `FilenameTemplate`（欠账 #1）—— 阶段 3 已还
 
 ## 阶段 6：历史 + 设置
 
