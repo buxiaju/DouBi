@@ -15,6 +15,8 @@ import com.doubi.android.engine.Engine
 import com.doubi.android.core.model.MediaItem
 import com.doubi.android.core.model.Platform
 import com.doubi.android.core.model.DownloadResult
+import com.doubi.android.data.db.dao.MediaItemDao
+import com.doubi.android.data.db.entity.MediaItemEntity
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
 import timber.log.Timber
@@ -51,6 +53,7 @@ class DownloadWorker @AssistedInject constructor(
     private val configStore: AppConfigDataStore,
     private val pendingTaskDao: PendingTaskDao,
     private val downloadRepo: DownloadRepository,
+    private val mediaItemDao: MediaItemDao,
 ) : CoroutineWorker(appContext, params) {
 
     private val notificationHelper = NotificationHelper(appContext)
@@ -161,6 +164,35 @@ class DownloadWorker @AssistedInject constructor(
                     "完成：${result.localPath}",
                     System.currentTimeMillis() / 1000L,
                 )
+                // 阶段 6：把成功的 MediaItem 落 media_item 表，给「历史」tab 用。
+                // 桌面版 Database.record_download() 1:1 对拍——只多存 platform+item_id 主键 + 最后下载时间 + 保存目录。
+                // lastSaveDir 写成 localPath 的父目录，文件存在性检查由 HistoryViewModel 后台查。
+                // extra 字段存 source_url（JSON map）——历史页「重新下载」需要原 URL，
+                // MediaItemEntity 没 sourceUrl 列（schema 冻结），借 extra 字段（桌面版也用 extra 存 platform-specific）。
+                runCatching {
+                    val nowSec = System.currentTimeMillis() / 1000L
+                    val localFile = java.io.File(result.localPath)
+                    val extraJson = org.json.JSONObject().apply {
+                        put("source_url", item.sourceUrl)
+                    }.toString()
+                    mediaItemDao.upsert(
+                        MediaItemEntity(
+                            platform = item.platform.key,
+                            itemId = item.itemId,
+                            title = item.title,
+                            authorId = item.author?.id,
+                            authorName = item.author?.name,
+                            coverUrl = item.coverUrl,
+                            duration = item.duration,
+                            publishTime = null,  // 嗅探不报 publish time；v0.2.2 阶段 7 拿
+                            mediaType = item.mediaType.name,
+                            payload = null,
+                            lastDownloadTime = nowSec,
+                            lastSaveDir = localFile.parent,
+                            extra = extraJson,
+                        )
+                    )
+                }.onFailure { Timber.w(it, "record media_item failed for $taskId") }
                 notificationHelper.notifyByCompletionMode(
                     mode = notifyMode,
                     taskId = taskId,
