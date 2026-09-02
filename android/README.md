@@ -10,10 +10,10 @@
 
 | | 状态 |
 |---|---|
-| 已完成 | 阶段 0 脚手架 ✅ ｜ 阶段 1 数据层 + 配置 ✅（Room Migration 链已显式化）｜ 阶段 2 下载引擎 ✅（重试退避已加）｜ 阶段 3 UI 框架 ✅（4 占位 tab + Hilt ViewModel）|
-| 待完成 | 阶段 4 解析 ｜ 5 下载进度 ｜ 6 历史设置 ｜ 7 商店准备 |
-| 测试 | 单测 **99/99 全绿**（2026-09-02 实跑验证：46 → 64 → 99，+53 例）；仪器测试 10 个**写了但从未在真机执行**；jacoco 报告 LINE 37.5% / METHOD 48.5%（`core/model` 100% / `core/config` 100% / `engine/ytdlp` 59.9% / `download` 2.5% 是真缺口） |
-| 能跑什么 | Run 起来 4 个 tab 底栏可点；粘贴 tab 可输入 URL；下载链路代码通但**无 UI 入口触发、未在真机验证**；`assembleDebug` 0 警告通过，APK 76.4 MB 含 4 ABI JNI 库 |
+| 已完成 | 阶段 0 脚手架 ✅ ｜ 阶段 1 数据层 + 配置 ✅（Room Migration 链已显式化）｜ 阶段 2 下载引擎 ✅（重试退避已加）｜ 阶段 3 UI 框架 ✅（4 占位 tab + Hilt ViewModel）｜ 阶段 4 解析 + 列表 ✅（YouTubeUrl 分类 + MediaFormat + PromptOptionsDialog + DownloadRepository.enqueue 一条龙）|
+| 待完成 | 阶段 5 下载进度 ｜ 6 历史设置 ｜ 7 商店准备 |
+| 测试 | 单测 **153/153 全绿**（2026-09-02 实跑验证：46 → 64 → 99 → 153，+107 例）；仪器测试 10 个**写了但从未在真机执行**；jacoco 报告 LINE 34.7% / METHOD 45.2% / CLASS 31.2%（新代码增量大于测试覆盖是预期，阶段 5 加 Compose UI test + instrumented 拉起来） |
+| 能跑什么 | Run 起来 4 个 tab 底栏可点；粘贴 tab 输入 URL → 解析 → 弹「下载选项」选 format + 容器 / 缩略图 / 字幕 / 续传 / 标题模板 → 入队 Worker；`assembleDebug` 0 警告通过，APK 77.05 MB 含 4 ABI JNI 库 |
 | 构建环境 | ⚠️ 命令行必须用 AS 自带 JBR 25，系统 JDK 26 会挂在 `androidJdkImage`（[SETUP.md](docs/SETUP.md)） |
 
 **v0.1.0 收官前已还 7 笔欠账**：
@@ -34,7 +34,7 @@
 - **架构总览**：[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) —— 模块划分（标注已落地/未落地）、技术栈
 - **从 Python 桌面版移植了什么**：[`docs/REUSE-MAP.md`](docs/REUSE-MAP.md) —— 一对一映射 + 落地状态
 - **变更记录**：[`docs/CHANGELOG.md`](docs/CHANGELOG.md) —— Android 版独立 CHANGELOG，含「vs 桌面版」行为差异表
-- **阶段复盘**：[`docs/phases/`](docs/phases/) —— [phase-1](docs/phases/phase-1.md)（含 5 个 Kotlin 编译坑）、[phase-2](docs/phases/phase-2.md)（含 4 个依赖集成坑）、[phase-3](docs/phases/phase-3.md)（含 5 笔欠账逐笔详解 + 6 个设计决定 + progress 0-100 量纲字节码证据）
+- **阶段复盘**：[`docs/phases/`](docs/phases/) —— [phase-1](docs/phases/phase-1.md)（含 5 个 Kotlin 编译坑）、[phase-2](docs/phases/phase-2.md)（含 4 个依赖集成坑）、[phase-3](docs/phases/phase-3.md)（含 5 笔欠账逐笔详解 + 6 个设计决定 + progress 0-100 量纲字节码证据）、[phase-4](docs/phases/phase-4.md)（含 5 个新文件 + 4 个坑 + 5 个设计决定）
 
 ## 与桌面版的对应关系
 

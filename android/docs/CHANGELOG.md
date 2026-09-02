@@ -12,7 +12,42 @@
 首发范围是「UI 框架 + 4 占位 tab + 还完 5 笔欠账（#1 重试 / #2 路径模板 / #3 Room 迁移 / #4 Progress speed·eta / #6 jacoco）+ #5 产包验证」；阶段 4-7 留给后续版本。
 剩余工作见 [PHASES.md](PHASES.md)。
 
+---
+
+## [未发布] v0.2.0
+
+**当前状态**：阶段 4 完成（解析 + 列表），`versionName = 0.2.0`，**尚未发布**。
+本版本新增 YouTube URL 分类 + MediaFormat formats 列表 + PromptOptionsDialog 选清晰度 + DownloadRepository.enqueue 一条龙；上一版 4 个未触发按钮变成真能下载。
+**Tag**：`v0.2.0-android`（避免跟 Python 桌面版未来可能的 v0.2.x 撞号）。
+
 ### 已完成
+
+**阶段 4 — 解析 + 列表**（`未提交`）
+
+- **YouTubeUrl 分类**（`core/platform/youtube/YouTubeUrl.kt`）：11 字符 video ID regex 1:1 对拍桌面版 `classify_youtube_url`，支持 VIDEO / SHORTS / LIVE / EMBED；CHANNEL / PLAYLIST 归 `UNSUPPORTED`。归一化函数 `toWatchUrl()` 把任意合法 YouTube URL 变成 `https://www.youtube.com/watch?v=ID`
+- **MediaFormat 数据类**（`core/model/MediaFormat.kt`）：1:1 对拍 desktop `FormatSpec` 精简版——`formatId` / `ext` / `height` / `width` / `vcodec` / `acodec` / `tbr` / `fileSize` / `isAudioOnly`。`label` 人类可读格式化（4K / 1080p / 720p / 480p / 360p / 240p / 144p / audio only），1 PB/s 停在 TB/s 不数组越界
+- **YtDlpEngine.probeWithFormats()**：直接走 `YoutubeDL.getInfo()` 拿 `VideoInfo`，含 `formats: ArrayList<VideoFormat>`。`VideoFormat.toMediaFormatOrNull()` 转换器，`fileSize == 0` 时兜底用 `fileSizeApproximate`
+- **EngineModule Hilt 装配**（`engine/ytdlp/di/EngineModule.kt`）：`@Named("baseOutputDir")` 拿 `Context.filesDir/downloads`，避免 YtDlpEngine 间接持有 Context。`@Singleton` 提供 YtDlpEngine
+- **ParseAndExpandUseCase**（`core/pipeline/ParseAndExpandUseCase.kt`）：sealed `ParseResult`（Youtube / DirectLink / Unsupported）。YouTube 路径走 `toWatchUrlOrNull` 判 → probeWithFormats；youtube 频道 / 播放列表走 Unsupported；直链（m3u8 / mp4）走 DirectLink，format 选 video-first fallback
+- **PromptOptionsDialog**（`ui/parse/PromptOptionsDialog.kt`）：Compose Material 3 AlertDialog。format radio（LazyColumn 滚动列表）+ 容器 chip（mp4 / mkv）+ 缩略图 / 字幕 / 续传 checkbox + 标题模板（勾选启用 + 输入框，默认 `{title}`）。`onConfirm(item, format, options, titleTemplate)` 把数据回传给 ViewModel
+- **PastingViewModel 5 状态机**：`Idle` / `Parsing` / `AwaitingConfirm(item, formats, seed)` / `Unsupported(reason)` / `Enqueued(taskId, title)` / `Failure(error)`。一次性消息用 `onMessageShown()` 重置回 Idle，让 snackbar 不重复
+- **PastingScreen 改造**：监听 state，`AwaitingConfirm` 时弹 Dialog，`Enqueued` / `Unsupported` / `Failure` 时 snackbar 一次性反馈
+- **测试 +54**（`YouTubeUrlTest` 25 + `MediaFormatTest` 15 + `ParseAndExpandUseCaseTest` 14），全量单测 **153/153 全绿**（v0.1 99 → v0.2 153）
+- **APK 验证**：`assembleDebug` 0 警告通过，77.05 MB（v0.1 76.43 → v0.2 77.05，+0.6 MB），4 ABI JNI 库 + 8 权限齐
+- **覆盖率**：LINE 34.7% / METHOD 45.2% / CLASS 31.2%（v0.1 37.5 / 48.5 / 30.8 —— 新代码量大于测试覆盖是预期，阶段 5 加 Compose UI test + instrumented test 拉起来）
+
+### 修复
+
+- **Function type 不允许 named args**（`v0.2.0`）：`onConfirm: (item, format, options, titleTemplate) -> Unit` 是 function type，调用 `onConfirm(item, sel, opts, titleTemplate = xxx)` 编译错 `Named arguments are prohibited for function types`。lambda 类型的参数名是 IDE 提示用，**不是** named arg key。改成位置传参
+- **Use case 漏判 YouTube 频道 / 播放列表**（`v0.2.0`）：第一版 `toWatchUrlOrNull` null 就走 DirectLink 调 probeWithFormats，导致 youtube 频道 URL 也调了 yt-dlp。修：youtube 域名但非视频形态 → Unsupported，**不调** engine
+- **Regex 命名组 + `groups["id"]` 在缺失组上崩**（`v0.2.0`）：`YouTubeUrl.classify()` 总是 `m.groups["id"]?.value`，但 CHANNEL / PLAYLIST pattern **不带** `(?<id>...)` 命名组，触发 `IllegalArgumentException: No group with name <id>`。修：`runCatching { m.groups["id"]?.value }.getOrNull().orEmpty()` 兜底
+
+### 已知问题（v0.2.0 发布前**剩余**的必须处理）
+
+- **v0.1 阶段 5 / 6 全部未做**（Worker 进度 / 队列并发 3 / 完成通知三档 / 历史 Room 查询 / 设置 tab）
+- **Compose UI test for PromptOptionsDialog** —— 阶段 5 加
+- **仪器测试 10 个仍没真机跑过**（v0.1 留的债，v0.2 阶段 5 接 Worker 时一起跑）
+- **覆盖率门槛** —— 当前 LINE 34.7% / METHOD 45.2%，新代码增量大于测试覆盖；阶段 5 加 Compose UI test + instrumented test 拉起来
 
 **阶段 0 — 项目脚手架**（`fed93ac`）
 

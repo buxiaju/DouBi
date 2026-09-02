@@ -22,9 +22,11 @@
 | 桌面版文件 | 行数 | Android 版落点 | 计划阶段 | 状态 |
 |---|---|---|---|---|
 | `core/models.py` | ~200 | `core/model/MediaItem.kt` / `DownloadOptions.kt` / `DownloadResult.kt` / `Progress.kt` / `Platform.kt` / `MediaType.kt` / `Author.kt` | 1 | ✅ 阶段 3 补齐（欠账 #4 已还）—— `Progress` 加 `speedBytesPerSec` / `etaSeconds` 字段 + `statusLine()` / `formatSpeed()` / `formatEta()`，并修了「progress 回调是 0-100 百分比」的量纲 bug（之前会被 `coerceIn(0f, 1f)` 截成满格）。**还顺带发现并修了一个旧 bug**：原 YtDlpEngine 把 `progress / 100` 漏写 |
-| `core/pipeline.py` | ~600 | `core/pipeline/ParseAndExpandUseCase.kt` / `DownloadUseCase.kt` / `DownloadPipeline.kt` | 1, 2, 4 | ❌ **`core/pipeline/` 目录不存在**，阶段 4 的主体工作 |
+| `core/pipeline.py` | ~600 | `core/pipeline/ParseAndExpandUseCase.kt` / `DownloadUseCase.kt` / `DownloadPipeline.kt` | 1, 2, 4 | ⚠️ **阶段 4 部分还**——`ParseAndExpandUseCase` 落地（解析 + 选 format + 弹 PromptOptionsDialog 入队），`DownloadUseCase` / `DownloadPipeline` / `PipelineRegistry` 留 v0.2+ 阶段 5/6 |
 | `core/naming.py` | ~150 | `engine/ytdlp/YtDlpEngine.sanitizeFilename()` + `renderTemplate()` + `renderPathTemplate()` | 1 | ✅ 阶段 3 落地（合并到 Engine，不再单列 `core/naming/`）—— `{title}` / `{item_id}` / `{platform}` / `{author}` / `{media_type}` 全支持，author 为空降级 `_`，9 个非法字符全替 `_` |
 | `core/registry.py` | ~50 | `core/pipeline/PipelineRegistry.kt` | 1 | ❌ 未落地，阶段 4 策略分发前必须补 |
+| `platforms/youtube/url.py` | ~80 | `core/platform/youtube/YouTubeUrl.kt` | 4 | ✅ 阶段 4 落地——`classify_youtube_url` 1:1 对拍 VIDEO / SHORTS / LIVE / EMBED / UNSUPPORTED；`to_watch_url` 归一化到 `https://www.youtube.com/watch?v=ID` |
+| `platforms/youtube/adapter.py` | ~180 | `engine/ytdlp/YtDlpEngine.probeWithFormats()` + 内部 `VideoFormat.toMediaFormatOrNull()` | 4 | ✅ 阶段 4 落地——`extract_info` 拿 title / duration / uploader，YouTubeUrl 分类后的 watch URL 喂给 yt-dlp-android，formats 列表转成 `MediaFormat` 列表 |
 | `core/config.py` | ~300 | `core/config/AppConfig.kt` + `core/config/ConfigValidator.kt` + `data/config/AppConfigDataStore.kt` + `data/config/ConfigKeys.kt` | 1 | ✅ 30 字段全落地，校验比桌面版更严 |
 | `core/logger.py` | ~50 | Timber（直接用第三方） | 1 | ✅ `DouBiApplication` 里初始化 |
 | `core/storage/database.py` | ~400 | `data/db/DouBiDatabase.kt` + `data/db/entity/*.kt` + `data/db/dao/*.kt` | 1 | ✅ 4 entity + 4 DAO 全落地 |

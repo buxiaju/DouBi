@@ -150,10 +150,22 @@
 **v0.1 站点**：YouTube + 通用 m3u8/mp4 直链（yt-dlp-android 用 `YoutubeDL.extractInfo()` 处理）
 
 **验收**：
-- [ ] YouTube 链接（普通 + Shorts + Live）解析正确
-- [ ] 直链 m3u8 / mp4 解析正确
-- [ ] 选清晰度后能入队（到阶段 5 才真正下载）
-- [ ] 阶段 4 复盘文档
+- [x] YouTube 链接（普通 + Shorts + Live）解析正确
+- [x] 直链 m3u8 / mp4 解析正确
+- [x] 选清晰度后能入队（到阶段 5 才真正下载）
+- [x] 阶段 4 复盘文档（[phase-4.md](phases/phase-4.md)）
+
+**已完成（详见 [phase-4.md](phases/phase-4.md)）**：
+- YouTubeUrl 分类（VIDEO / SHORTS / LIVE / EMBED / UNSUPPORTED）+ 归一化到 `watch?v=ID`
+- MediaFormat 数据类（formatId / ext / vcodec / acodec / height / fileSize / isAudioOnly）
+- YtDlpEngine.probeWithFormats() 拿 title + formats 列表
+- EngineModule Hilt 装配（@Named("baseOutputDir") 避免 Engine 持有 Context）
+- ParseAndExpandUseCase + ParseResult sealed class（Youtube / DirectLink / Unsupported）
+- PromptOptionsDialog Compose（format radio + 容器 / 缩略图 / 字幕 / 续传 + 标题模板可选）
+- PastingViewModel 5 状态机（Idle / Parsing / AwaitingConfirm / Unsupported / Enqueued / Failure）
+- PastingScreen 串 dialog + snackbar
+- 单测 99 → 153 全绿（+54：YouTubeUrl 25 + MediaFormat 15 + ParseAndExpandUseCase 14）
+- assembleDebug 0 警告通过，APK 77.05 MB（vs v0.1.0 76.43 MB，+0.6 MB）
 
 ## 阶段 5：下载 + 进度 + 完成通知
 
