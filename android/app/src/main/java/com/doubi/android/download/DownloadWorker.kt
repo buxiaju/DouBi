@@ -152,6 +152,8 @@ class DownloadWorker @AssistedInject constructor(
         }
 
         // 6. 退出：清前台 / 写终态 / 发桌面通知
+        // 阶段 5：通知走 notifyByCompletionMode 按 AppConfig.notifyOnCompletion 三档
+        val notifyMode = config.notifyOnCompletion
         return when (result) {
             is DownloadResult.Success -> {
                 pendingTaskDao.updateProgress(
@@ -159,8 +161,13 @@ class DownloadWorker @AssistedInject constructor(
                     "完成：${result.localPath}",
                     System.currentTimeMillis() / 1000L,
                 )
-                // 阶段 6 接 notifyOnCompletion 三档
-                notificationHelper.notifyComplete(taskId, displayTitle, success = true, localPath = result.localPath)
+                notificationHelper.notifyByCompletionMode(
+                    mode = notifyMode,
+                    taskId = taskId,
+                    title = displayTitle,
+                    success = true,
+                    localPath = result.localPath,
+                )
                 Result.success(workDataOf(KEY_LOCAL_PATH to result.localPath))
             }
             is DownloadResult.Failure -> {
@@ -181,7 +188,12 @@ class DownloadWorker @AssistedInject constructor(
                     Result.retry()
                 } else {
                     Timber.e("DownloadWorker[%s] permanent failure: %s", taskId, result.reason)
-                    notificationHelper.notifyComplete(taskId, displayTitle, success = false)
+                    notificationHelper.notifyByCompletionMode(
+                        mode = notifyMode,
+                        taskId = taskId,
+                        title = displayTitle,
+                        success = false,
+                    )
                     Result.failure(workDataOf(KEY_ERROR to result.reason))
                 }
             }
@@ -190,6 +202,7 @@ class DownloadWorker @AssistedInject constructor(
                     taskId, "paused", 0f, "已取消",
                     System.currentTimeMillis() / 1000L,
                 )
+                // Cancelled 不发通知——用户主动取消
                 Result.failure(workDataOf(KEY_ERROR to "cancelled"))
             }
         }

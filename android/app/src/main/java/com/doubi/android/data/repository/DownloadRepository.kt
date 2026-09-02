@@ -7,6 +7,7 @@ import androidx.work.Data
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import com.doubi.android.data.config.AppConfigDataStore
 import com.doubi.android.data.db.dao.PendingTaskDao
@@ -51,6 +52,19 @@ class DownloadRepository @Inject constructor(
     val activeTasks: Flow<List<PendingTaskEntity>> = pendingTaskDao.listUnfinishedFlow()
 
     /**
+     * WorkManager 实时 WorkInfo 列表（Flow），按 "download" tag 过滤。阶段 5 用：
+     * UI 把 `activeTasks` + `workInfosFlow` combine 起来，**实时进度 / 速度 / ETA**
+     * 走 WorkInfo.progress（Worker 内 setProgress 推过来的），**持久化状态**走 Room。
+     *
+     * 注意：`getWorkInfosByTagFlow` 是 WorkManager 2.10.0 提供的 flow API，
+     * 内部监听 WorkManager database 变化，对「SUCCEEDED / FAILED / CANCELLED」状态
+     * 也会持续 emit（不在 `RUNNING / ENQUEUED` 时同样有 List 元素）——UI 端要做
+     * 状态过滤。
+     */
+    val workInfosFlow: Flow<List<WorkInfo>> = WorkManager.getInstance(context)
+        .getWorkInfosByTagFlow("download")
+
+    /**
      * 注入给 YtDlpEngine 用的 baseOutputDir。app 私有 files/downloads。
      * 不放 Worker 内部——Engine 不该有 Context 依赖。
      */
@@ -62,6 +76,7 @@ class DownloadRepository @Inject constructor(
      * @param sourceUrl 视频 URL（YouTube / 直链 / m3u8）
      * @param taskId 业务 id（桌面版 GUI 自己发 T0001 那种）；null 则自动生成
      * @return 入队的 WorkManager requestId
+     * @throws QueueFullException 当 in-flight 任务数（queued + running）≥ `AppConfig.concurrentJobs` 时
      */
     suspend fun enqueue(
         sourceUrl: String,
@@ -72,6 +87,29 @@ class DownloadRepository @Inject constructor(
     ): String {
         val finalTaskId = taskId ?: "T${System.currentTimeMillis()}"
         val nowSec = System.currentTimeMillis() / 1000L
+
+        // 0. 阶段 5：并发数检查。activeTasks 数（Room 端 queued/downloading/paused）
+        // + in-flight workInfos（WorkManager 端 ENQUEUED + RUNNING）去重后比 concurrentJobs。
+        // 两者可能不完全一致（Room 入队时 WorkInfo 还没建出来），用合集保守估计。
+        val concurrentJobs = appConfigDataStore.get().concurrentJobs
+        val roomActive = pendingTaskDao.listUnfinished().map { it.taskId }.toSet()
+        val workManagerActive = try {
+            WorkManager.getInstance(context)
+                .getWorkInfosByTag("download")
+                .get()
+                .filter { it.state == WorkInfo.State.ENQUEUED || it.state == WorkInfo.State.RUNNING }
+                .mapNotNull { it.tags.firstOrNull { tag -> tag != "download" } }
+                .toSet()
+        } catch (_: Throwable) {
+            emptySet()
+        }
+        val allActive = roomActive + workManagerActive
+        if (allActive.size >= concurrentJobs) {
+            throw QueueFullException(
+                current = allActive.size,
+                limit = concurrentJobs,
+            )
+        }
 
         // 1. 落 PendingTaskDao（live 状态）
         val entity = PendingTaskEntity(
@@ -121,6 +159,14 @@ class DownloadRepository @Inject constructor(
         )
         return finalTaskId
     }
+
+    /**
+     * 阶段 5：并发数已满。UI 收到后弹「队列已满（N/M）」toast 提示用户稍候。
+     */
+    class QueueFullException(
+        val current: Int,
+        val limit: Int,
+    ) : Exception("下载队列已满：当前 $current / 上限 $limit")
 
     /**
      * 取消一个任务。

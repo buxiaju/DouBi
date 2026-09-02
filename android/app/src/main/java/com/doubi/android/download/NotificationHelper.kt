@@ -106,6 +106,42 @@ class NotificationHelper(private val context: Context) {
         }
     }
 
+    /**
+     * 阶段 5：完成通知三档。1:1 对拍桌面版 `src/doubi/ui/tray.py:TrayController.notify_on_completion`。
+     *
+     * - `success`：只有成功的任务才发通知，失败静默
+     * - `all`：成功 / 失败都发
+     * - `summary`：单条任务不发，攒到 batch / 定时汇总发（v0.1 简化为直接吞掉）
+     *
+     * DownloadWorker 在退出分支（success / failure / cancelled）里调本方法，
+     * 根据 AppConfig.notifyOnCompletion 决定走哪一档。
+     *
+     * @param batchState 阶段 5 简化为只关心"单条成功 / 单条失败"，
+     *   真正的 batch summary 留 v0.2 阶段 6 + 桌面版 tray 的"10 分钟汇总"路径
+     */
+    fun notifyByCompletionMode(
+        mode: String,
+        taskId: String,
+        title: String,
+        success: Boolean,
+        localPath: String? = null,
+    ) {
+        when (mode) {
+            "success" -> {
+                if (success) notifyComplete(taskId, title, success = true, localPath = localPath)
+                // 失败静默
+            }
+            "all" -> notifyComplete(taskId, title, success = success, localPath = localPath)
+            "summary" -> {
+                // v0.1 简化：summary 模式单条不通知，留 v0.2 阶段 6 实现 batch 汇总
+            }
+            else -> {
+                // 非法值（ConfigValidator 已回退到 "success"，但运行时仍兜底）
+                if (success) notifyComplete(taskId, title, success = true, localPath = localPath)
+            }
+        }
+    }
+
     private fun ensureChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val nm = context.getSystemService(NotificationManager::class.java) ?: return
