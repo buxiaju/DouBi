@@ -1,6 +1,7 @@
 package com.doubi.android.data.repository
 
 import android.content.Context
+import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.Data
 import androidx.work.ExistingWorkPolicy
@@ -21,6 +22,7 @@ import dagger.hilt.components.SingletonComponent
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
+import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -102,6 +104,15 @@ class DownloadRepository @Inject constructor(
             .setConstraints(constraints)
             .addTag("download")
             .addTag(finalTaskId)
+            // 欠账 #1 已还：失败时按指数退避 30s 重试，最多 DownloadWorker.MAX_ATTEMPTS 次
+            // （由 Result.retry() 触发，WorkManager 内部把 runAttemptCount 推到上限后
+            // 自动转 failure）。永久错误（404 / 磁盘满 / URL 非法）不重试，直接
+            // failure，让用户在历史页手动 retry。
+            .setBackoffCriteria(
+                BackoffPolicy.EXPONENTIAL,
+                WorkRequestBuilder_BACKOFF_SECONDS,
+                TimeUnit.SECONDS,
+            )
             .build()
         WorkManager.getInstance(context).enqueueUniqueWork(
             "download_$finalTaskId",
@@ -119,5 +130,14 @@ class DownloadRepository @Inject constructor(
      */
     fun cancel(taskId: String) {
         WorkManager.getInstance(context).cancelUniqueWork("download_$taskId")
+    }
+
+    companion object {
+        /**
+         * 退避初始延迟 30s（指数翻倍，最长 5 小时）。
+         * WorkManager 指数退避公式：actual = initial * 2^runAttemptCount（带 ± jitter）。
+         * DownloadWorker.MAX_ATTEMPTS=10：第 10 次重试的延迟 ≈ 30s * 2^9 ≈ 170 分钟。
+         */
+        const val WorkRequestBuilder_BACKOFF_SECONDS = 30L
     }
 }
