@@ -4,6 +4,7 @@ import androidx.annotation.VisibleForTesting
 import com.doubi.android.core.model.Author
 import com.doubi.android.core.model.DownloadOptions
 import com.doubi.android.core.model.DownloadResult
+import com.doubi.android.core.model.MediaFormat
 import com.doubi.android.core.model.MediaItem
 import com.doubi.android.core.model.MediaType
 import com.doubi.android.core.model.Platform
@@ -12,6 +13,7 @@ import com.doubi.android.engine.Engine
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLException
 import com.yausername.youtubedl_android.YoutubeDLRequest
+import com.yausername.youtubedl_android.mapper.VideoFormat
 import com.yausername.youtubedl_android.mapper.VideoInfo
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -65,6 +67,34 @@ class YtDlpEngine(
                 cont.resume(fallbackMediaItem(url))
             }
         }
+
+    /**
+     * 阶段 4：嗅探 + 拿 formats 列表，给 PromptOptionsDialog 选清晰度。
+     *
+     * **不**走 Engine interface——`formats` 是 yt-dlp 特有的概念，aria2 / ffmpeg 没
+     * 这层抽象。`ParseAndExpandUseCase` 注入 [YtDlpEngine] 具体类，调用此方法。
+     *
+     * 失败时 `formats` 返空列表（不让调用方崩溃），item 走 [fallbackMediaItem] 兜底。
+     * YouTube / m3u8 直链都走同一路径——youtubedl-android 对 m3u8 直链也支持 getInfo。
+     */
+    suspend fun probeWithFormats(url: String): ProbeResult =
+        suspendCancellableCoroutine { cont ->
+            try {
+                val info = YoutubeDL.getInstance().getInfo(url)
+                val item = info.toMediaItem(url)
+                val formats = info.formats.orEmpty().mapNotNull { it.toMediaFormatOrNull() }
+                cont.resume(ProbeResult(item, formats))
+            } catch (e: Throwable) {
+                // 嗅探失败：item 走 URL 兜底，formats 空列表（直链场景就是 formats 空）
+                cont.resume(ProbeResult(fallbackMediaItem(url), emptyList()))
+            }
+        }
+
+    /** [probeWithFormats] 的返回值。formats 可能为空（解析失败 / 直链没 formats）。 */
+    data class ProbeResult(
+        val item: MediaItem,
+        val formats: List<MediaFormat>,
+    )
 
     /** 嗅探失败时的兜底 MediaItem——从 URL 推断平台。 */
     private fun fallbackMediaItem(url: String): MediaItem = MediaItem(
@@ -299,6 +329,27 @@ class YtDlpEngine(
         duration = if (duration > 0) duration.toDouble() else null,
         mediaType = if (duration > 0) MediaType.VIDEO else MediaType.AUDIO,
     )
+
+    /**
+     * VideoFormat → MediaFormat 转换。`formatId` 缺失或 `ext` 缺失 → null（脏数据丢弃）。
+     * `fileSize == 0` 视为未知，用 `fileSizeApproximate` 兜底——YouTube 这俩经常是 0。
+     */
+    private fun VideoFormat.toMediaFormatOrNull(): MediaFormat? {
+        val id = formatId ?: return null
+        val e = ext ?: return null
+        val audioOnly = (vcodec == "none" || vcodec == null) && acodec != null && acodec != "none"
+        return MediaFormat(
+            formatId = id,
+            ext = e,
+            height = height.takeIf { it > 0 },
+            width = width.takeIf { it > 0 },
+            vcodec = vcodec,
+            acodec = acodec,
+            tbr = tbr.takeIf { it > 0 },
+            fileSize = fileSize.takeIf { it > 0 } ?: fileSizeApproximate.takeIf { it > 0 },
+            isAudioOnly = audioOnly,
+        )
+    }
 
     companion object {
         // Engine 内部用的 fallback，避免直接 import core.config（造成 engine→core 循环）
