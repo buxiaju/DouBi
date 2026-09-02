@@ -1,12 +1,18 @@
 package com.doubi.android.engine
 
 import com.doubi.android.core.config.toDownloadOptions
+import com.doubi.android.core.model.Author
 import com.doubi.android.core.model.DownloadOptions
 import com.doubi.android.core.model.DownloadResult
+import com.doubi.android.core.model.MediaItem
+import com.doubi.android.core.model.MediaType
+import com.doubi.android.core.model.Platform
 import com.doubi.android.engine.ytdlp.YtDlpEngine
 import com.google.common.truth.Truth.assertThat
 import kotlinx.coroutines.test.runTest
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 import java.io.File
 
 /**
@@ -19,6 +25,9 @@ import java.io.File
  * 真实端到端得用 instrumented test + 模拟器 + 网络。
  */
 class YtDlpEngineTest {
+
+    @get:Rule
+    val tmp = TemporaryFolder()
 
     private val engine = YtDlpEngine(File("/tmp/dummy"))
 
@@ -120,6 +129,165 @@ class YtDlpEngineTest {
         assertThat(options.resume).isTrue()
         assertThat(options.filenameTemplate).isEqualTo("{title}_{item_id}")
     }
+
+    // ---------- 欠账 #2：路径模板（outputRoot / outputDirTemplate / filenameTemplate） ----------
+
+    @Test
+    fun `resolveOutputDir creates directory under outputRoot with full template`() {
+        val base = tmp.newFolder("base")
+        val item = sampleYouTubeItem()
+        val options = DownloadOptions(
+            outputRoot = "Downloaded",
+            outputDirTemplate = "{platform}/{author}/{media_type}",
+        )
+        val dir = engine.resolveOutputDir(base, item, options)
+        // 路径断言用 normalized 正斜杠（File.absolutePath 在 Windows 是反斜杠）
+        val expected = File(base, "Downloaded/youtube/Smith/VIDEO").path.replace('\\', '/')
+        assertThat(dir.path.replace('\\', '/')).isEqualTo(expected)
+        assertThat(dir.exists()).isTrue()
+        assertThat(dir.isDirectory).isTrue()
+    }
+
+    @Test
+    fun `resolveOutputDir downgrades missing author to underscore`() {
+        val base = tmp.newFolder("base")
+        val item = sampleYouTubeItem(author = null)
+        val options = DownloadOptions(
+            outputRoot = "Downloaded",
+            outputDirTemplate = "{platform}/{author}/{media_type}",
+        )
+        val dir = engine.resolveOutputDir(base, item, options)
+        // 正斜杠化后再 contains
+        assertThat(dir.path.replace('\\', '/')).contains("youtube/_/VIDEO")
+    }
+
+    @Test
+    fun `resolveOutputDir falls back to DEFAULTS when template is null`() {
+        val base = tmp.newFolder("base")
+        val item = sampleYouTubeItem()
+        val options = DownloadOptions(outputRoot = "MyVideos", outputDirTemplate = null)
+        val dir = engine.resolveOutputDir(base, item, options)
+        // 默认 {platform}/{author}/{media_type} → youtube/Smith/VIDEO
+        assertThat(dir.path.replace('\\', '/')).contains("MyVideos/youtube/Smith/VIDEO")
+    }
+
+    @Test
+    fun `resolveOutputDir falls back to Downloaded when outputRoot is blank`() {
+        val base = tmp.newFolder("base")
+        val item = sampleYouTubeItem()
+        val options = DownloadOptions(outputRoot = "  ", outputDirTemplate = "{platform}")
+        val dir = engine.resolveOutputDir(base, item, options)
+        assertThat(dir.path.replace('\\', '/')).contains("Downloaded/youtube")
+    }
+
+    // ---------- filenameTemplate 间接验证：sanitize 后冒号/斜杠都成下划线 ----------
+
+    @Test
+    fun `filename template sanitizes special characters`() {
+        // 单字符逐一验证 set 里的 9 个非法字符都能被替
+        val cases = mapOf(
+            "/" to "_",
+            "\\" to "_",
+            ":" to "_",
+            "*" to "_",
+            "?" to "_",
+            "\"" to "_",
+            "<" to "_",
+            ">" to "_",
+            "|" to "_",
+            "a" to "a",
+            "Foo Bar" to "Foo Bar",
+            "Foo/Bar" to "Foo_Bar",
+            "Foo:Bar" to "Foo_Bar",
+        )
+        for ((input, expected) in cases) {
+            val got = engine.sanitizeFilenameForTest(input)
+            assertThat(got).isEqualTo(expected)
+        }
+    }
+
+    // ---------- parseSpeedBytesPerSec（欠账 #4） ----------
+    //
+    // 这些是 youtubedl-android 0.18.1 真实会回调的行格式：它的 regex 是
+    // `\[download\]\s+(\d+\.\d)% .* ETA (\d+):(\d+)`，所以能触发回调的行
+    // 必然同时含 `%` 和 ` ETA mm:ss`。库本身不给速度，只能从行里抠。
+
+    @Test
+    fun `parseSpeed reads MiB per second`() {
+        val line = "[download]  45.2% of  10.50MiB at    1.23MiB/s ETA 00:05"
+        // 1.23 * 1024 * 1024 = 1289748.48 → 截断
+        assertThat(engine.parseSpeedBytesPerSec(line)).isEqualTo(1289748L)
+    }
+
+    @Test
+    fun `parseSpeed reads KiB per second`() {
+        val line = "[download]  45.2% of ~10.50MiB at  512.00KiB/s ETA 00:05"
+        assertThat(engine.parseSpeedBytesPerSec(line)).isEqualTo(512L * 1024)
+    }
+
+    @Test
+    fun `parseSpeed reads plain bytes per second`() {
+        val line = "[download]   1.0% of  10.50MiB at    1024B/s ETA 02:59"
+        assertThat(engine.parseSpeedBytesPerSec(line)).isEqualTo(1024L)
+    }
+
+    @Test
+    fun `parseSpeed reads GiB per second`() {
+        val line = "[download]  99.9% of  40.00GiB at    2.00GiB/s ETA 00:01"
+        assertThat(engine.parseSpeedBytesPerSec(line)).isEqualTo(2L * 1024 * 1024 * 1024)
+    }
+
+    @Test
+    fun `parseSpeed accepts non-binary unit spelling`() {
+        // yt-dlp 某些版本 / --newline 模式下输出 MB/s 而不是 MiB/s，仍按 1024 进制换算
+        val line = "[download]  50.0% of  10.00MB at 1.50MB/s ETA 00:03"
+        assertThat(engine.parseSpeedBytesPerSec(line)).isEqualTo(1572864L)
+    }
+
+    @Test
+    fun `parseSpeed returns null for unknown speed`() {
+        val line = "[download]  45.2% of  10.50MiB at  Unknown B/s ETA Unknown"
+        assertThat(engine.parseSpeedBytesPerSec(line)).isNull()
+    }
+
+    @Test
+    fun `parseSpeed returns null for zero speed`() {
+        val line = "[download]   0.0% of  10.50MiB at    0.00KiB/s ETA Unknown"
+        assertThat(engine.parseSpeedBytesPerSec(line)).isNull()
+    }
+
+    @Test
+    fun `parseSpeed returns null when line has no speed segment`() {
+        assertThat(engine.parseSpeedBytesPerSec("[youtube] dQw4w9WgXcQ: Downloading webpage")).isNull()
+        assertThat(engine.parseSpeedBytesPerSec("")).isNull()
+    }
+
+    @Test
+    fun `parseSpeed returns null for aria2c style line`() {
+        // aria2c 外部下载器写 `DL:2.1MiB`（没有 /s），本项目没启用它——降级为 null 而非误报
+        val line = "[#7d9f2a 12MiB/50MiB(24%) CN:4 DL:2.1MiB ETA:18s]"
+        assertThat(engine.parseSpeedBytesPerSec(line)).isNull()
+    }
+
+    @Test
+    fun `parseSpeed handles the final summary line`() {
+        // 收尾行没 ETA，库不会回调它，但函数本身要能解析（不崩、不误判）
+        val line = "[download] 100% of 10.50MiB in 00:08 at 1.31MiB/s"
+        assertThat(engine.parseSpeedBytesPerSec(line)).isEqualTo(1373634L)
+    }
+
+    private fun sampleYouTubeItem(
+        title: String = "Sample Title",
+        itemId: String = "dQw4w9WgXcQ",
+        author: String? = "Smith",
+    ) = MediaItem(
+        platform = Platform.YOUTUBE,
+        itemId = itemId,
+        sourceUrl = "https://www.youtube.com/watch?v=$itemId",
+        title = title,
+        author = author?.let { Author(name = it) },
+        mediaType = MediaType.VIDEO,
+    )
 
     private fun defaultOptions() = DownloadOptions()
 }

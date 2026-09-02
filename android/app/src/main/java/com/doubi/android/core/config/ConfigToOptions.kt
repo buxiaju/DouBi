@@ -33,4 +33,7 @@ fun AppConfig.toDownloadOptions(): DownloadOptions = DownloadOptions(
     filenameTemplate = filenameTemplate,
     rateLimit = rateLimit,
     proxy = proxy,
+    // 欠账 #2 已还：path 模板（outputRoot / outputDirTemplate）现在由 Engine 消费
+    outputRoot = outputRoot,
+    outputDirTemplate = outputDirTemplate,
 )
