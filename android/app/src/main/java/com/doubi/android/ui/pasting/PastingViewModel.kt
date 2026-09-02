@@ -125,6 +125,12 @@ class PastingViewModel @Inject constructor(
                         ),
                     )
                 }
+            } catch (e: DownloadRepository.QueueFullException) {
+                // 阶段 5：并发数已满，特殊分支走 QueueFull 状态让 UI 给专门提示
+                Timber.w("Queue full: %d / %d", e.current, e.limit)
+                _state.update {
+                    it.copy(parseStatus = ParseStatus.QueueFull(current = e.current, limit = e.limit))
+                }
             } catch (e: Throwable) {
                 Timber.e(e, "enqueue failed")
                 _state.update {
@@ -144,6 +150,7 @@ class PastingViewModel @Inject constructor(
             if (current.parseStatus is ParseStatus.Enqueued
                 || current.parseStatus is ParseStatus.Unsupported
                 || current.parseStatus is ParseStatus.Failure
+                || current.parseStatus is ParseStatus.QueueFull
             ) {
                 current.copy(parseStatus = ParseStatus.Idle)
             } else {
@@ -159,7 +166,7 @@ class PastingViewModel @Inject constructor(
 
     /**
      * 解析状态。`AwaitingConfirm` 是触发 [com.doubi.android.ui.parse.PromptOptionsDialog]
-     * 显示的入口；`Enqueued` / `Unsupported` / `Failure` 是一次性消息源。
+     * 显示的入口；`Enqueued` / `Unsupported` / `Failure` / `QueueFull` 是一次性消息源。
      */
     sealed class ParseStatus {
         object Idle : ParseStatus()
@@ -171,6 +178,8 @@ class PastingViewModel @Inject constructor(
         ) : ParseStatus()
         data class Unsupported(val reason: String) : ParseStatus()
         data class Enqueued(val taskId: String, val title: String) : ParseStatus()
+        /** 阶段 5：下载队列已满（当前 N / 上限 M） */
+        data class QueueFull(val current: Int, val limit: Int) : ParseStatus()
         data class Failure(val error: String) : ParseStatus()
     }
 }

@@ -49,12 +49,15 @@ fun PastingScreen(
     val state by viewModel.state.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
 
-    // 一次性消息（Unsupported / Enqueued / Failure）→ snackbar 显示后回 Idle
+    // 一次性消息（Unsupported / Enqueued / Failure / QueueFull）→ snackbar 显示后回 Idle
     val unsupportedMsg = stringResource(R.string.pasting_unsupported, "%s")
     val enqueuedMsg = stringResource(R.string.pasting_enqueued, "%s")
     val parseFailedMsg = stringResource(R.string.pasting_parse_failed, "%s")
     val urlEmptyMsg = stringResource(R.string.pasting_url_empty)
     val parsingMsg = stringResource(R.string.pasting_parsing)
+    // 注意：不能直接 stringResource(R.string.pasting_queue_full, "%1$d", "%2$d")，
+    // 因为 Kotlin String literal 会把 "$d" 解析成变量引用。改成读模板 + String.format。
+    val queueFullTemplate = stringResource(R.string.pasting_queue_full)
 
     LaunchedEffect(state.parseStatus) {
         when (val s = state.parseStatus) {
@@ -68,6 +71,10 @@ fun PastingScreen(
             }
             is PastingViewModel.ParseStatus.Enqueued -> {
                 snackbarHostState.showSnackbar(enqueuedMsg.format(s.title.ifBlank { s.taskId }))
+                viewModel.onMessageShown()
+            }
+            is PastingViewModel.ParseStatus.QueueFull -> {
+                snackbarHostState.showSnackbar(queueFullTemplate.format(s.current, s.limit))
                 viewModel.onMessageShown()
             }
             is PastingViewModel.ParseStatus.Failure -> {
