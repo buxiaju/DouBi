@@ -1,3 +1,9 @@
+// 欠账 #6 已还：jacoco 覆盖率（plugin 在根 build.gradle.kts 用 buildscript classpath 引入，
+// 这里 apply。jacoco plugin marker artifact 不在 Gradle Plugin Portal / Google maven，
+// 只能走传统 classpath 方式）
+import org.gradle.testing.jacoco.plugins.JacocoTaskExtension
+import org.gradle.testing.jacoco.tasks.JacocoReport
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -6,6 +12,8 @@ plugins {
     alias(libs.plugins.ksp)
     alias(libs.plugins.hilt)
 }
+
+apply(plugin = "org.gradle.jacoco")
 
 android {
     namespace = "com.doubi.android"
@@ -34,6 +42,8 @@ android {
             isMinifyEnabled = false
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
+            // 欠账 #6 已还：debug build 启用 jacoco 单元测试覆盖率
+            enableUnitTestCoverage = true
         }
         release {
             isMinifyEnabled = true
@@ -71,6 +81,13 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
             excludes += "/META-INF/DEPENDENCIES"
         }
+        // AGP 8.7+ 默认把 .so 按 page-aligned 方式打入（解压后用 mmap），需要关闭
+        // extractNativeLibs。但本项目 AndroidManifest.xml 里 `android:extractNativeLibs="true"`
+        // 仍然保留（防 miniSdk 24 上某些定制系统 load 不动 mmapped .so，且与 ndk 库的旧行为兼容），
+        // 所以这里要显式声明 useLegacyPackaging = true，否则 AGP 会喷 warning。
+        jniLibs {
+            useLegacyPackaging = true
+        }
     }
 
     testOptions {
@@ -78,6 +95,40 @@ android {
             isIncludeAndroidResources = true
             isReturnDefaultValues = true
         }
+    }
+
+    // 欠账 #3 已还：导出 Room schema 到 app/schemas/，并把 app/schemas/ 打进
+    // androidTest 资源——MigrationTestHelper 用它来跑 v1→v2 迁移测试
+    sourceSets {
+        getByName("androidTest").assets.srcDirs("$projectDir/schemas")
+    }
+}
+
+// 欠账 #3 已还：Room schema 导出位置（KSP 选项）
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
+}
+
+// 欠账 #6 已还：jacoco 覆盖率报告（XML + HTML）。
+// 运行：`.\gradlew.bat testDebugUnitTest jacocoTestReport`
+// 报告落在 app/build/reports/jacoco/jacocoTestReport/{html/index.html,jacocoTestReport.xml}
+tasks.withType<Test>().configureEach {
+    extensions.configure(JacocoTaskExtension::class) {
+        // 排除 KSP 生成的 stub（没有覆盖价值）+ 第三方 lib（不在本项目范围内）
+        // JacocoTaskExtension.excludes 是 List<String>?——保险起见用 ?:
+        excludes = (excludes ?: emptyList()) + listOf(
+            "**/R.class",
+            "**/R$*.class",
+            "**/BuildConfig.class",
+            "**/*\$\$serializer*.class",     // kotlinx.serialization 生成的
+            "**/*_Factory*.class",            // Hilt 生成的
+            "**/*_Provide*Factory*.class",
+            "**/*_HiltModules*.class",
+            "**/*_GeneratedInjector*.class",
+            "**/Dagger*Component*.class",
+            "**/Hilt_*.class",
+            "**/*_Impl*.class",                // Room / Hilt impl 类
+        )
     }
 }
 
@@ -136,9 +187,10 @@ dependencies {
     // Logging
     implementation(libs.timber)
 
-    // 下载引擎（v0.2 兑底：JunkFood02/yt-dlp-android fork from Maven Central）
-    // 包名 com.yausername.ytdlp.* 跟原 yausername 实现兼容，yt-dlp + Python 3.8 静态打包
-    // 体积约 30MB。ffmpeg-kit（音频提取 / 视频合并）暂不开，v0.2+ 再考虑。
+    // 下载引擎（阶段 2 兑底：Maven Central 的 junkfood02 youtubedl-android）
+    // Java 包名是 com.yausername.youtubedl_android.*（不是 com.yausername.ytdlp.*）。
+    // 自带 yt-dlp + Python 3.8 静态打包，体积约 30MB。
+    // ffmpeg-kit（HLS / 音频提取 / 视频合并）暂不开——没有它就没有 HLS 兜底方案。
     implementation(libs.ytdlp.android)
     // implementation(libs.ffmpeg.kit)
 
@@ -157,4 +209,87 @@ dependencies {
     androidTestImplementation(libs.truth)
     // 同上：runTest / TestScope 等协程测试工具也得加
     androidTestImplementation(libs.kotlinx.coroutines.test)
+    // 欠账 #3 已还：MigrationTestHelper 用于写 v1→v2 迁移测试；需要把 schemas/
+    // 打进 androidTest 资源（详见 build.gradle.kts 的 sourceSets）
+    androidTestImplementation(libs.room.testing)
+}
+
+// 欠账 #3 已还：Room schema 导出位置（KSP 选项）
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
+}
+
+// 欠账 #6 已还：jacoco 覆盖率。
+// apply(plugin = "org.jacoco") + JacocoTaskExtension 让 :app:testDebugUnitTest 产出 jacoco.exec；
+// 配合下方 jacocoTestReportXml 任务把它转成 XML 给 CI（sonarqube / codecov）吃。
+// AGP 自带 createDebugUnitTestCoverageReport 出 HTML 报告（app/build/reports/coverage/test/debug/）。
+
+tasks.withType<Test>().configureEach {
+    extensions.configure(JacocoTaskExtension::class) {
+        // 排除 KSP 生成的 stub（没有覆盖价值）+ 第三方 lib（不在本项目范围内）
+        excludes = (excludes ?: emptyList()) + listOf(
+            "**/R.class",
+            "**/R$*.class",
+            "**/BuildConfig.class",
+            "**/*\$\$serializer*.class",     // kotlinx.serialization 生成的
+            "**/*_Factory*.class",            // Hilt 生成的
+            "**/*_Provide*Factory*.class",
+            "**/*_HiltModules*.class",
+            "**/*_GeneratedInjector*.class",
+            "**/Dagger*Component*.class",
+            "**/Hilt_*.class",
+            "**/*_Impl*.class",                // Room / Hilt impl 类
+            "**/databinding/**",
+        )
+    }
+}
+
+tasks.register<JacocoReport>("jacocoTestReport") {
+    dependsOn("testDebugUnitTest")
+    group = "verification"
+    description = "把 jacoco.exec 转成 XML 给 CI / sonarqube / codecov 吃"
+
+    // AGP 8.7+ 把 jacoco.exec 落在 build/outputs/unit_test_code_coverage/<variant>UnitTest/<test>UnitTest.exec
+    val execFile = layout.buildDirectory.file(
+        "outputs/unit_test_code_coverage/debugUnitTest/testDebugUnitTest.exec"
+    )
+
+    classDirectories.setFrom(
+        fileTree(layout.buildDirectory.dir("intermediates/javac/debug/classes")) {
+            exclude(
+                "**/R.class",
+                "**/R$*.class",
+                "**/BuildConfig.class",
+                "**/*\$\$serializer*.class",
+                "**/*_Factory*.class",
+                "**/*_Provide*Factory*.class",
+                "**/*_HiltModules*.class",
+                "**/*_GeneratedInjector*.class",
+                "**/Dagger*Component*.class",
+                "**/Hilt_*.class",
+                "**/*_Impl*.class",
+                "**/databinding/**",
+            )
+        },
+        fileTree(layout.buildDirectory.dir("tmp/kotlin-classes/debug")) {
+            exclude(
+                "**/*\$\$serializer*.class",
+                "**/*_Factory*.class",
+                "**/*_Provide*Factory*.class",
+                "**/*_HiltModules*.class",
+                "**/*_GeneratedInjector*.class",
+                "**/Dagger*Component*.class",
+                "**/Hilt_*.class",
+                "**/*_Impl*.class",
+            )
+        },
+    )
+    sourceDirectories.setFrom(files("src/main/java", "src/main/kotlin"))
+    executionData.setFrom(files(execFile))
+
+    reports {
+        xml.required.set(true)
+        html.required.set(false)
+        csv.required.set(false)
+    }
 }

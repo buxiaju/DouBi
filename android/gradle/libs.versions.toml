@@ -23,7 +23,7 @@ hilt-navigation-compose = "1.2.0"
 hilt-work = "1.2.0"
 
 # Room
-room = "2.6.1"
+room = "2.7.2"                            # 2.7+ 起 MigrationTestHelper 稳定可用（androidx.room:room-testing）
 
 # DataStore
 datastore = "1.1.1"
@@ -50,12 +50,16 @@ turbine = "1.2.0"
 truth = "1.4.4"
 androidx-test-ext = "1.2.1"
 espresso = "3.6.1"
+# 覆盖率（欠账 #6 已还）
+jacoco = "0.8.12"                      # 0.8.11+ 兼容 AGP 8.7；0.8.12 修了 Android 15 边缘 case
 
 # 下载引擎
-# v0.2 兑底：换 JunkFood02/yausername/youtubedl-android fork
-# 注意 group 是 `youtubedl-android`（带 e 和 d），不是 `ytdlp-android`——
-# 我之前写错过。包名仍是 com.yausername.ytdlp.*，跟原 yausername 1:1 兼容。
-# 0.18.1 是 2025-11-16 发布的最新 stable（Maven Central）。
+# 阶段 2 兑底：换 JunkFood02 发布到 Maven Central 的 youtubedl-android。
+# 坑 1——group 是 `youtubedl-android`（带 e 和 d），不是 `ytdlp-android`；artifact 是
+#   `library`，不是 `core`。写错会被 Gradle 转去 JitPack 找，返 401。
+# 坑 2——Gradle 坐标归 junkfood02，但 **Java 包名是 com.yausername.youtubedl_android.***
+#   （带 _android 后缀）。不是 com.yausername.ytdlp.*——用后者会报 Unresolved reference。
+# 两个坑的完整记录见 docs/phases/phase-2.md 的坑 2 / 坑 3。
 junkfood02-youtubedl-android = "0.18.1"
 ffmpeg-kit = "6.0-2"                   # mobile-ffmpeg-kit 的 fork（v0.1 暂不开）
 
@@ -94,6 +98,8 @@ hilt-work-compiler = { module = "androidx.hilt:hilt-compiler", version.ref = "hi
 room-runtime = { module = "androidx.room:room-runtime", version.ref = "room" }
 room-ktx = { module = "androidx.room:room-ktx", version.ref = "room" }
 room-compiler = { module = "androidx.room:room-compiler", version.ref = "room" }
+# 欠账 #3 已还：MigrationTestHelper 用于仪器测试写 v1→v2 这种迁移
+room-testing = { module = "androidx.room:room-testing", version.ref = "room" }
 
 # DataStore
 datastore-preferences = { module = "androidx.datastore:datastore-preferences", version.ref = "datastore" }

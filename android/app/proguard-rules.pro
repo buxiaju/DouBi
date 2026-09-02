@@ -11,6 +11,17 @@
 -keep @androidx.room.Entity class * { *; }
 -keep @androidx.room.Dao class * { *; }
 
+# 下载引擎（欠账 #3 part 2，v0.1.0 已还）
+# junkfood02/youtubedl-android 内部通过 Java 反射加载 Python 解释器与 native lib，
+# R8 把内部类名混淆掉会让 release 包启动时 ClassNotFoundException。
+# 整个 com.yausername.youtubedl_android.* 包名（注意 _android 后缀）原样保留。
+-keep class com.yausername.youtubedl_android.** { *; }
+-keep class com.yausername.ytdl.** { *; }
+-keep class com.yausername.ffmpeg.** { *; }   # 阶段 5+ 接 ffmpeg-kit 时也用得上
+-dontwarn com.yausername.youtubedl_android.**
+-dontwarn com.yausername.ytdl.**
+-dontwarn com.yausername.ffmpeg.**
+
 # kotlinx.serialization
 -keepattributes *Annotation*, InnerClasses
 -dontnote kotlinx.serialization.AnnotationsKt
