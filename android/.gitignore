@@ -31,3 +31,7 @@ google-services.json
 captures/
 .externalNativeBuild/
 .kotlin/
+
+# 临时工作区（构建日志、诊断脚本、实验代码）
+# 保留在工作树里方便回看，但不进仓库
+.scratch/

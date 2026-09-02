@@ -45,7 +45,7 @@ Android 版**直接走绝对路径**：
 Room.databaseBuilder(context, DouBiDatabase::class.java, DouBiDatabase.DATABASE_NAME)
 ```
 
-`Context.getDatabasePath("doubi.db")` 解析为 `/data/data/com.doubi.android/databases/doubi.db`，跟随应用卸载一起清。**0.3.1 那个坑直接绕过，不需要数据迁移**。
+`Context.getDatabasePath("doubi.db")` 解析为 `/data/data/com.doubi.android/databases/doubi.db`，跟随应用卸载一起清。**桌面版 0.3.1 那个坑直接绕过，不需要数据迁移**。
 
 ### 2. JSON 字段放 Repository 层，不放 TypeConverter
 
@@ -84,12 +84,45 @@ v0.1 schema v1 没历史负担，从 v1 升 v2 时 Room 会清表重建——dev
 | WAL 模式 | Room 默认 | `PRAGMA journal_mode=WAL` | 等价 |
 | busyTimeout | Room 不暴露（默认 0） | `_BUSY_TIMEOUT_S = 5.0` | Android 单进程基本用不到，但多 Worker 并发时可能撞；阶段 2 评估是否要反射改 |
 
-## 未做的事（明确划在阶段外）
+## 未做的事
+
+### 明确划在阶段外（不打算做）
 
 - `Database.migrate_from_legacy()`（桌面版从 dy_downloader.db 旧库迁）—— Android 端无对应历史数据，不做
 - `migrate.py` 的 `Bili23 task.db` 读取——同上
-- DataStore AppConfig——阶段 1 的下半场，下次开工做
+
+### 已在下半场补上
+
+- DataStore AppConfig——见下文「下半场（阶段 1.5）」，阶段 1 已闭环
 - `MediaItemRow.from_row` / `item_to_json` / `options_to_json` 这套序列化——放 Repository 层，阶段 2 集成 Worker 时一起做
+
+### ⚠️ REUSE-MAP 划归阶段 1 但**至今未落地**（欠账）
+
+[REUSE-MAP.md](../REUSE-MAP.md) 的 `core/` 表把下面几项标为阶段 1，实际阶段 1 只做了 **Room 数据层 + DataStore 配置层**，这些一个都没写：
+
+| 桌面版文件 | 计划落点 | 现状 | 影响 |
+|---|---|---|---|
+| `core/naming.py` | `core/naming/FilenameTemplate.kt` | ❌ 不存在 | `filenameTemplate` 配置项**空转** |
+| `core/storage/file_layout.py` | `core/storage/FileLayout.kt` | ❌ 不存在 | `outputRoot` / `outputDirTemplate` **空转** |
+| `core/registry.py` | `core/pipeline/PipelineRegistry.kt` | ❌ 不存在 | 阶段 4 策略分发前必须补 |
+| `core/pipeline.py` | `core/pipeline/*UseCase.kt` | ❌ 不存在 | 阶段 4 的主体工作 |
+| `core/models.py` | `core/model/*.kt` | ✅ 阶段 2 落地 | 阶段归属漂移（表里写阶段 1） |
+| `core/logger.py` | Timber | ✅ 阶段 2 落地 | 同上 |
+
+**「空转」的具体含义**（阶段 5/6 做设置页前必读）：`YtDlpEngine.kt:80-81` 的落盘路径是硬编的——
+
+```kotlin
+val outDir = File(baseOutputDir, item.platform.key).apply { mkdirs() }   // filesDir/downloads/{platform}
+val outTemplate = File(outDir, "${item.itemId}.%(ext)s").absolutePath    // {itemId}.{ext}
+```
+
+`baseOutputDir` 固定为 `context.filesDir/downloads`（`DownloadRepository.kt:56`）。于是：
+
+- `outputRoot`（默认 `./Downloaded`）——**从未被读取**
+- `outputDirTemplate`（默认 `{platform}/{author}/{media_type}`）——**从未被读取**，实际只用了 `{platform}` 一层。`ConfigToOptions.kt:25` 注释里「路径模板另外算」指的就是这个待办
+- `filenameTemplate`（默认 `{title}_{item_id}`）——映射进了 `DownloadOptions`，但 `YtDlpEngine` 落盘时没用它，实际文件名是 `{itemId}`
+
+这三项在设置页里改了**不会有任何效果**，直到 `FileLayout` + `FilenameTemplate` 补齐。建议在阶段 4（解析）或阶段 5（下载）开工时一并补，别拖到阶段 6 设置页——那时候用户改配置没反应，会被当成 bug 报回来。
 
 ## 桌面版测试的覆盖
 
@@ -101,9 +134,9 @@ v0.1 schema v1 没历史负担，从 v1 升 v2 时 Room 会清表重建——dev
 | `test_storage.py::TestDatabase::test_list_by_author` | `MediaItemDaoTest::listByAuthor_filtersAndOrders` |
 | `test_storage.py::TestDatabase::test_delete_item` | `MediaItemDaoTest::deleteRemovesRow` |
 | `test_storage.py::TestDatabase::test_pending_task_*`（4 个） | 阶段 2 Worker 集成时补 `PendingTaskDaoTest` |
-| `test_storage.py::TestDatabase::test_options_roundtrip` | 阶段 1 下半场（DataStore）补 `ConfigSerializerTest` |
+| `test_storage.py::TestDatabase::test_options_roundtrip` | 阶段 1 下半场已补 `AppConfigDataStoreTest`（DataStore roundtrip） |
 
-**v0.1 Android 端已移植测试数**：6（仪器测试）→ 等阶段 1 下半场 + 阶段 2 完成，目标 30+。
+**阶段 1 上半场已移植测试数**：6（仪器测试，`MediaItemDaoTest`）。下半场 + 阶段 2 完成后的准确口径见文末「阶段 1 测试用例数」。
 
 ## 同步阶段踩过的 3 个坑（Build → 绿 过程实录）
 
@@ -171,7 +204,10 @@ v0.1 schema v1 没历史负担，从 v1 升 v2 时 Room 会清表重建——dev
 
 **未来阶段的清单**（`androidTest` 里）：
 
-### 坑 4：Kotlin `companion object` 嵌套 `object` 的作用域盲区（0.3.1 修）
+- 阶段 2 加 `mockk`（mock `WorkManager` 入口）
+- 阶段 3 加 `espresso`（Compose UI 自动化）
+
+### 坑 4：Kotlin `companion object` 嵌套 `object` 的作用域盲区（阶段 1 下半场修）
 
 **症状**：`compileDebugKotlin` 报一堆 `Unresolved reference 'DEFAULTS'` + 几条看着吓人的 `Return type mismatch: expected 'kotlin.String', actual 'kotlin.String?'`（其实都同根因——`DEFAULTS` 解析失败 → `if/else` 推断不出 `String`）。
 
@@ -214,7 +250,7 @@ Kotlin 文档里这规则的措辞是「default values for primary constructor p
 
 **教训**：在 `data class`（或 `class`）的**主构造器默认值参数**里引用**任何**类成员时，包括 `companion object` 里的，都要用全限定名（包括 `this@ClassName.X` 或者顶层 `X`）。只有「直接放在顶层 `object` 旁边」或「在类体内部（不是构造器参数）」用短名才稳。
 
-### 坑 5：智能转型在 `in setOf(...)` / `isNullOrBlank()` 后不生效（0.3.1 修）
+### 坑 5：智能转型在 `in setOf(...)` / `isNullOrBlank()` 后不生效（阶段 1 下半场修）
 
 **症状**：上一坑修完（`Unresolved reference 'DEFAULTS'` 12 条消失）后，sync 还剩 2 条 `Return type mismatch: expected 'kotlin.String', actual 'kotlin.String?'`，分别指向 `validateDuplicatePolicy` 和 `validateLanguage`。
 
@@ -258,8 +294,6 @@ if (!value.isNullOrBlank() && value in setOf(...)) value
 ```
 
 **教训**：在 Kotlin 里写 `if (x != null && x in collection)` 是惯用法，**别图省事**用 `isNullOrBlank()` / `isNullOrEmpty()` / `in` 替代 null 检查——编译器的 smart cast 不吃这套，会静默退化为 `String?`，跑到运行期才暴露。**所有 nullable 收窄**都走 `x != null` 或 `x is T` 这条直路。
-- 阶段 2 加 `mockk`（mock `WorkManager` 入口）
-- 阶段 3 加 `espresso`（Compose UI 自动化）
 
 ## 下半场（阶段 1.5）：DataStore AppConfig
 
@@ -334,20 +368,38 @@ DataStore 没有 key 字符串到 Preferences.Key 的内省 API（Proto DataStor
 | `test_config_theme.py::TestConfigTheme::test_yaml_optional_fields` | `AppConfigDataStoreTest::nullable fields roundtrip null correctly` |
 | 桌面版没有的 clamp 测试 | `AppConfigTest + DataStoreTest::updateField concurrent_jobs clamps to 1-16`（Android 端补的） |
 
-**v0.1 阶段 1 测试用例数**：
-- 单元测试：22（`AppConfigTest` 12 + `AppConfigDataStoreTest` 10）
-- 仪器测试：6（`MediaItemDaoTest`）
-- 共 **28 用例**
+**阶段 1 测试用例数**（按 `@Test` 实数清点，2026-09-02 核对）：
 
-全部走 JUnit 4 + Truth + runTest，**单测全 JVM 跑**，CI 能直接接。
+| 测试类 | 作用域 | 用例数 |
+|---|---|---|
+| `AppConfigTest` | `src/test/`（JVM） | 13 |
+| `AppConfigDataStoreTest` | `src/test/`（JVM） | 11 |
+| `MediaItemDaoTest` | `src/androidTest/`（设备） | 6 |
+| **合计** | | **30**（单测 24 + 仪器 6） |
+
+全部走 JUnit 4 + Truth + runTest，**单测全 JVM 跑**，CI 能直接接。仪器测试的 6 个用例需要设备/模拟器，**至今未在真机上跑过**。
+
+> **口径说明**：`./gradlew testDebugUnitTest` 报的是 **46**，那是「阶段 1 + 阶段 2 + 模板」的全量单测数（阶段 1 的 24 + 阶段 2 的 21 + AS 生成的 `ExampleUnitTest` 1）。本表只算阶段 1 自己产出的。仪器测试全量是 7（本阶段 6 + 模板 `ExampleInstrumentedTest` 1）。
 
 ### 阶段 1 整体收尾
 
 阶段 1 闭环 = **Room 数据层 + DataStore 配置层**。后续所有阶段（Worker / Compose UI / 设置页）都消费这两个底层。
 
-- 阶段 2：Worker 读 `concurrentJobs` / `engine` / `outputRoot` / `outputDirTemplate` / `filenameTemplate`
+- 阶段 2：Worker 读 `concurrentJobs` / `engine`。**注意**：`outputRoot` / `outputDirTemplate` / `filenameTemplate` 原计划也在阶段 2 消费，实际没有——见上文「REUSE-MAP 划归阶段 1 但至今未落地」，缺 `FileLayout` / `FilenameTemplate` 这两个类
 - 阶段 6：设置页读/写 `theme` / `language` / `notifyOnCompletion` / `promptBeforeDownload` / `duplicatePolicy` / `write*` / `sniff*`
 - 阶段 4：嗅探读 `sniffEnabled` / `sniffDurationSec` / `sniffCaptureTypes` / `maxQuality` / `container` / `resume`
+
+### 验收对账（对照 [PHASES.md §阶段 1](../PHASES.md)）
+
+| 验收门槛 | 结论 | 依据 |
+|---|---|---|
+| Room schema 编译通过 | ✅ | KSP 生成成功，`assembleDebug` 绿 |
+| 迁移测试覆盖 1 → 2 schema 变化 | ❌ **未达成** | 走的是 `fallbackToDestructiveMigration()`，见「关键设计决定 §5」。**阶段 7 切 release 前必须补显式 `Migration`**，否则用户升级会丢历史记录 |
+| DataStore 读写往返 + 非法值回退 | ✅ | `AppConfigDataStoreTest` 11 例，含 roundtrip / null↔空串 / 校验回退 / clamp |
+| 单测覆盖率 ≥ 80% | ⚠️ **未测量** | 项目没接 jacoco，这个门槛从未被验证过。要么阶段 3 接上 `jacocoTestReport`，要么在 PHASES.md 里把这条改成可执行的口径 |
+| 阶段 1 复盘文档 | ✅ | 本文件 |
+
+**结论**：阶段 1 的核心交付（Room + DataStore）闭环可用，但**验收门槛有 1 项未达成、1 项未测量**，两项都已登记到上面的欠账表和 [PHASES.md](../PHASES.md)。
 
 ## 下一步
 
