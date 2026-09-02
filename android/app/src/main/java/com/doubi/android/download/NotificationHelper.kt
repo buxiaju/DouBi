@@ -10,6 +10,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import com.doubi.android.MainActivity
 import com.doubi.android.R
+import com.doubi.android.core.model.Progress
 
 /**
  * 通知助手——前台 Service 进度通知 + 完成通知。
@@ -28,6 +29,22 @@ class NotificationHelper(private val context: Context) {
     init {
         ensureChannel()
     }
+
+    /**
+     * 前台 Service 通知（[Progress] 重载，欠账 #4）。
+     * 文案统一由 [Progress.statusLine] 生成——`下载中 45% · 1.2 MB/s · 剩 03:21`，
+     * 速度 / ETA 缺失时自动退化成 `下载中 45%`，调用方不用自己拼。
+     */
+    fun buildProgressNotification(
+        taskId: String,
+        title: String,
+        progress: Progress,
+    ): android.app.Notification = buildProgressNotification(
+        taskId = taskId,
+        title = title,
+        fraction = progress.fraction,
+        message = progress.statusLine(),
+    )
 
     /**
      * 前台 Service 通知。WorkManager `setForeground()` 调它，30 秒内必须调一次
