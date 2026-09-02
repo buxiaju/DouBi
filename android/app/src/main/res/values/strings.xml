@@ -3,14 +3,34 @@
     <!-- 桌面版对照：app.name -->
     <string name="app_name">豆比下载</string>
 
-    <!-- 主框架 4 页（与桌面版 nav.* 对齐） -->
+    <!-- 底栏 4 个 tab（阶段 3 引入，顺序见 NavRoutes.BOTTOM_NAV_ROUTES） -->
+    <string name="nav_paste">粘贴</string>
     <string name="nav_parse">解析</string>
     <string name="nav_download">下载</string>
     <string name="nav_history">历史</string>
-    <string name="nav_settings">设置</string>
 
-    <!-- 阶段 0 占位 HomeScreen -->
+    <!-- 阶段 3 4 个 Screen 的标题 / 占位 -->
+    <string name="pasting_title">粘贴 URL 下载</string>
+    <string name="pasting_hint">把视频 / 直播链接粘到这里</string>
+    <string name="pasting_action">解析</string>
+    <string name="pasting_disabled">阶段 3 占位：解析按钮阶段 4 启用</string>
+
+    <string name="parsing_title">解析中</string>
+    <string name="parsing_note">阶段 3 占位，阶段 4 接入嗅探</string>
+
+    <string name="downloading_title">下载中</string>
+    <string name="downloading_empty">暂无下载任务</string>
+    <string name="downloading_note">阶段 3 占位，阶段 5 接 Worker 进度</string>
+
+    <string name="history_title">历史下载</string>
+    <string name="history_empty">还没有下载记录</string>
+    <string name="history_note">阶段 3 占位，阶段 6 接 Room 历史查询</string>
+
+    <!-- 阶段 0 留下来的 HomeScreen 占位（阶段 3 仍保留，避免删文件；阶段 7 清理） -->
     <string name="home_placeholder_title">DouBi Android</string>
-    <string name="home_placeholder_subtitle">v%1$s 阶段 0 脚手架</string>
-    <string name="home_placeholder_note">工具链通了，下一步：[android/docs/PHASES.md](android/docs/PHASES.md) 阶段 1。</string>
+    <string name="home_placeholder_subtitle">v%1$s 阶段 3 UI 框架</string>
+    <string name="home_placeholder_note">导航已通：4 个底栏 tab 均可点。详见 [android/docs/PHASES.md](android/docs/PHASES.md) 阶段 4。</string>
+
+    <!-- 阶段 6+ 启用：设置 tab（v0.1 阶段 3 不显示，留 string 仅为对齐桌面版 nav.*） -->
+    <string name="nav_settings">设置</string>
 </resources>
