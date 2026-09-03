@@ -21,9 +21,14 @@ android {
 
     defaultConfig {
         applicationId = "com.doubi.android"
-        // 桌面版 0.3.1 起独立递增；Android 版从 0.1.0 起跳
-        versionCode = 1
-        versionName = "0.1.0"
+        // 桌面版 0.3.1 起独立递增；Android 版独立版本号：
+        // v0.1.0 = 1（阶段 3 收官候选）
+        // v0.2.0 = 2（阶段 4 解析 + 列表）
+        // v0.2.1 = 3（阶段 5 下载 + 进度 + 完成通知）
+        // v0.2.2 = 4（阶段 6 历史 + 设置）
+        // v0.3.0 = 5（阶段 7 商店准备：启动屏 + 隐私政策 + 商店元数据 + bundleRelease）
+        versionCode = 4
+        versionName = "0.2.2"
 
         minSdk = 24
         targetSdk = 35
@@ -52,7 +57,8 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            // 阶段 7 才接签名，阶段 0-6 用 debug 签名足够
+            // 阶段 7：复用 debug keystore 做 release 签名（v0.3.0 上架前请替换
+            // 为 Google Play App Signing 上传的真正签名密钥——见 phase-7.md 收尾清单）
             signingConfig = signingConfigs.getByName("debug")
         }
     }
