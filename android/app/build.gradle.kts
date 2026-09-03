@@ -26,10 +26,10 @@ android {
         // v0.2.0 = 2（阶段 4 解析 + 列表）
         // v0.2.1 = 3（阶段 5 下载 + 进度 + 完成通知）
         // v0.2.2 = 4（阶段 6 历史 + 设置）
-        // v0.4.1 = 7（阶段 9 自用 UX 收尾：自用 keystore 走环境变量 + 「打开保存目录」+ 设置项补全
-        //   + SplashScreen API + SettingsViewModelTest/HistoryViewModelTest 字段级覆盖）
-        versionCode = 7
-        versionName = "0.4.1"
+        // v0.5.0 = 8（阶段 10 headless browser 嗅探：WebViewHolder + WebViewHeadlessSniffer
+        //   + CompositeSniffer 按 AppConfig.sniffHeadless 动态选 http/headless）
+        versionCode = 8
+        versionName = "0.5.0"
 
         minSdk = 24
         targetSdk = 35
