@@ -71,6 +71,9 @@
 | `ui/task_manager.py` | ~400 | `data/repository/DownloadRepository.kt`（融合 Download + TaskManager） | 1, 5 | 🟡 入队 / 状态写库 / 取消 / 队列并发 3 已有，**任务管理**（暂停 / 恢复 / 重下）未做 |
 | `ui/tray.py:TrayController.notify_on_completion` | ~50 | `download/NotificationHelper.notifyByCompletionMode` | 5 | ✅ 阶段 5 落地——三档路由（success / all / summary），cancelled 不发通知 |
 | `core/storage/database.py:Database.record_download` | ~30 | `download/DownloadWorker` Success 路径调 `mediaItemDao.upsert(MediaItemEntity)` | 6 | ✅ 阶段 6 落地——sourceUrl 存进 `extra` JSON 字段（schema 冻结，借 extra 字段） |
+| 桌面版 `[project]` 段（name / version / authors） | `pyproject.toml` ~50 | `app/build.gradle.kts` `defaultConfig.versionCode/versionName` | 7 | ✅ 阶段 7 落地——v0.3.0 同步 `versionCode=5 + versionName="0.3.0"`，commit 起步强制约定（v0.1 阶段 0 起的"tag 跟 versionCode 不同步"老毛病修了） |
+| 桌面版无（PyInstaller 打包） | — | `app/build.gradle.kts` `buildTypes.release.signingConfig = signingConfigs.getByName("debug")`（v0.3.0 临时） | 7 | 🟡 阶段 7 部分——复用 debug keystore 让 `bundleRelease` 跑通，**v0.3.0 上架前必替换**为 Google Play App Signing 上传的签名密钥 |
+| 桌面版 PyInstaller spec | — | `./gradlew :app:bundleRelease` 出 .aab（61.5 MB）+ R8 keep 规则（25 个 com.yausername.* 类保留原名） | 7 | ✅ 阶段 7 落地——`app-release.aab` 准备上 Play |
 | `ui/auth_actions.py` | ~300 | v0.2+（账号登录放 v0.2 起） | v0.2 | ⏸️ 首版不做 |
 | `ui/dialogs/login_dialog.py` | ~200 | v0.2+ | v0.2 | ⏸️ 首版不做 |
 | `ui/dialogs/prompt_options_dialog.py` | ~250 | `ui/parse/PromptOptionsDialog.kt` | 4 | ❌ 未落地 |

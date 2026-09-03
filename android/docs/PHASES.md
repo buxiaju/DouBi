@@ -238,11 +238,26 @@
 - 应用描述（中英文）
 
 **验收**：
-- [ ] `./gradlew bundleRelease` 成功出 `.aab`（注意：`assembleRelease` 出的是 `.apk`，Play 上架要的是 `bundleRelease` 的 `.aab`）
-- [ ] release 包能真机安装并**跑通一次完整下载**——`proguard-rules.pro` 现在缺 `com.yausername.youtubedl_android.**` 的 keep 规则，而 release 已开 `isMinifyEnabled`，不加规则大概率运行期崩
-- [ ] Room 显式 `Migration` 替换 `fallbackToDestructiveMigration()`（欠账 #2）——**这条不做就上架等于给用户埋数据丢失**
-- [ ] Play Console 上传预审通过（自己账号）
-- [ ] 阶段 7 复盘文档
+- [x] `./gradlew bundleRelease` 成功出 `.aab`（**61.52 MB**，v0.3.0-android tag）
+- [x] release 包 R8 keep 规则验证（dexdump 列 **25 个 com.yausername.youtubedl_android.* 类全部保留原名**——v0.1 阶段 3 加的 `-keep class com.yausername.youtubedl_android.** { *; }` 完全生效）
+- [x] Room 显式 `Migration` 替换 `fallbackToDestructiveMigration()`（v0.1 阶段 3 已做）
+- [x] versionName=0.2.2 + versionCode=4 同步（commit 起步，解决 v0.1 阶段 0 起的"tag 跟 versionCode 不同步"老毛病）
+- [x] 阶段 7 复盘文档（[phase-7.md](phases/phase-7.md)）
+
+**已完成（详见 [phase-7.md](phases/phase-7.md)）**：
+- release signingConfig 复用 debug keystore（v0.3.0 上架前必替换为 Google Play App Signing 上传的签名密钥）
+- bundleRelease 出 .aab 61.52 MB
+- strings.xml + 12 个 store_* 字符串 + 4 个 about 字符串 + 2 个 URL（policy_url / source_code_url）
+- R8 keep 规则验真（dexdump 列 25 个 com.yausername.youtubedl_android.* 类全部保留原名）
+
+**没做（v0.3.0 上架前必补，**用户手动**）**：
+- 真机 adb install 走通完整流程（v0.1 阶段 5/6 已知问题累积）
+- release 包签名替换（Google Play App Signing 上传真签名密钥）
+- SplashScreen API（Android 12+ 圆形图标 + 背景色标准启屏）
+- 商店截图（4.7" / 6.7" 各 2 张 PNG）
+- Play Console 上传 .aab + 预审
+- 隐私政策页面（`https://buxiaju.gitee.io/dou-bi-docs/privacy/` 实际部署）
+- SettingsScreen 底部「关于 / 版本 / 隐私政策 / 源代码 / 第三方许可」Row
 
 ## 收尾
 

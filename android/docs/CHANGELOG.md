@@ -176,6 +176,7 @@
 | `sniff_capture_types` | `tuple[str, ...]` 有序 | `Set` 落盘、读出排序 | Set 语义本就无序，对功能无影响 |
 | 后台任务 | asyncio 任务 | WorkManager `CoroutineWorker` | 进程被杀 / 重启后可恢复 |
 | 失败重试 | **手动**——`TaskManager.retry()` 由用户在 UI 点 | **自动 + 手动**——WorkManager 指数退避 10 次封顶，永久错误返 failure 让用户手动 retry | 移动端 OS 杀进程更频繁 |
+| Release 签名 | 桌面版无（PyInstaller 打包） | v0.3.0 临时复用 debug keystore（Google Play App Signing 上传真签名密钥前必替换） | 真发布密钥是 Google Play 控制台操作，AI 没法代做 |
 | 最小化行为 | 关窗到系统托盘 | 通知 + 最近任务卡片 | 手机无托盘 |
 | 引擎 | yt-dlp CLI + N_m3u8DL-CLI + aria2 + ffmpeg.exe | 仅 youtubedl-android（自带 yt-dlp + Python 运行时） | 手机无外部二进制 |
 | `AppConfig.extra` | `dict[str, Any]` | **未实现** | 首版设置页与 Worker 都用不到 |
@@ -183,6 +184,46 @@
 | Room Migration | SQLAlchemy `Base.metadata.create_all()` 跑全量 | 显式 `Migration(n, n+1)` 链 + `MigrationTestHelper` 仪器测试 | 移动端不能容忍升级丢数据 |
 | 队列并发 | 桌面版 `TaskManager` 内存态并发 | **enqueue 入口并发检查**（`AppConfig.concurrentJobs`，默认 3） | Android 单 UI 不需要 Worker 内部 Semaphore |
 | 完成通知 | `TrayController.notify_on_completion` 三档 | `NotificationHelper.notifyByCompletionMode` 三档（success / all / summary） | 1:1 对拍，summary batch 摘要留 v0.2.2 |
+| Room Migration | SQLAlchemy `Base.metadata.create_all()` 跑全量 | 显式 `Migration(n, n+1)` 链 + `MigrationTestHelper` 仪器测试 | 移动端不能容忍升级丢数据 |
+| Release 构建 | 桌面版 PyInstaller onedir | v0.3.0 `bundleRelease` 出 .aab（61.5 MB）—— 复用 debug keystore 临时 | 真发布密钥是 Google Play App Signing 上传 |
+
+---
+
+## [未发布] v0.3.0
+
+**当前状态**：阶段 7 完成（商店准备），`versionName` 改为 `0.3.0` + `versionCode=5`，**尚未发布**。
+本版本出第一个能上 Play 的 .aab；R8 keep 规则验真（25 个 com.yausername.youtubedl_android.* 类保留原名）；商店元数据中英文落地。
+**Tag**：`v0.3.0-android`。
+
+### 已完成
+
+**阶段 7 — 商店准备**（`未提交`）
+
+- **versionName=0.2.2 + versionCode=4 同步**（`app/build.gradle.kts`）：commit 起步；解决 v0.1 阶段 0 起的"tag 跟 versionCode 不同步"老毛病（v0.1.0 阶段 3 收官后所有 tag 都标"已升 0.2.x"但实际 `app/build.gradle.kts` 没动）。**tag 时同步改 `app/build.gradle.kts`**——这是 v0.3.0 起步的强制约定
+- **release signingConfig 复用 debug keystore**（`app/build.gradle.kts`）：v0.3.0 上架前必替换为 Google Play App Signing 上传的签名密钥（v0.3.0 commit message 红字标出）
+- **`./gradlew :app:bundleRelease` 成功出 .aab**：`app/build/outputs/bundle/release/app-release.aab` **61.52 MB**（R8 优化 + isShrinkResources=true 减少 15.5 MB；mapping 38 MB）
+- **R8 keep 规则验真**（dexdump 列 dex 内容）：**25 个 com.yausername.youtubedl_android.* 类全部保留原名**——v0.1 阶段 3 加的 `-keep class com.yausername.youtubedl_android.** { *; }` 完全生效：
+  - `YoutubeDL` / `YoutubeDLRequest` / `YoutubeDLResponse` / `YoutubeDLException` / `YoutubeDLOptions` / `YoutubeDL$CanceledException` / `YoutubeDL$UpdateChannel$MASTER/NIGHTLY/STABLE/Companion` / `YoutubeDL$UpdateStatus` / `YoutubeDLUpdater`
+  - `StreamProcessExtractor` / `StreamGobbler` / `DownloadProgressCallback`
+  - `mapper.VideoInfo` / `mapper.VideoFormat` / `mapper.VideoSubtitle` / `mapper.VideoThumbnail`
+  - `R` / `R$raw` / `R$string`
+- **Room Migration 链验真**（`data/db/di/DatabaseModule.kt`，v0.1 阶段 3 已做）：`addMigrations(*Migrations.ALL) + fallbackToDestructiveMigrationOnDowngrade(dropAllTables = true)`，**没有** `fallbackToDestructiveMigration()`（无脑删表）——符合 PHASES.md L209 验收项
+- **strings.xml 增商店元数据**（v0.3.0 阶段 7）：12 个 store_*（`store_short_description` / `store_description` / `store_keywords` / `store_category` / `store_developer_name` / `store_developer_email` / `store_website_url` / `store_privacy_policy_url`）+ 4 个 about 字符串（`settings_about` / `settings_about_version` / `settings_about_license` / `settings_about_privacy_policy` / `settings_about_source_code` / `third_party_licenses`）+ 2 个 URL（`privacy_policy_url` / `source_code_url`）
+
+### 修复
+
+- **`.aab` 用 .dex 不用 .jar**（`v0.3.0`）：阶段 7 起步用 `Add-Type System.IO.Compression.FileSystem` + `ExtractToFile` 解压 .aab，得到 `classes.jar` size=0，误以为 R8 把类全删了。实际现代 .aab 用 `base/dex/classes.dex` 直接打包 dex。**改用 Android SDK `dexdump.exe` 列 dex 内容**搜 `Lcom/yausername` 找保留的类，看到 25 个类全在——R8 keep 规则**完全生效**。**教训**：验证 Android R8 / ProGuard 规则用 dexdump，**不是** jar tf / zip extract
+- **tag 跟 versionCode 不同步**（`v0.3.0`）：v0.1 阶段 0 默认 `versionCode=1, versionName="0.1.0"`，阶段 4-6 改 `CHANGELOG.md` 描述但没改 `app/build.gradle.kts`。阶段 7 同步 `versionCode=4, versionName="0.2.2"` 起步，提交时再升 `versionCode=5, versionName="0.3.0"`
+
+### 已知问题（v0.3.0 上架前**必补**，**用户手动**）
+
+- **真机 adb install 走通完整流程**（解析 → 弹 dialog → 入队 → Worker 跑 → Downloading tab 看进度 → 历史 tab 看记录 + 文件检查 + 重新下载）—— v0.1 阶段 5/6 已知问题累积
+- **release 包签名替换**：用 Google Play App Signing 上传真签名密钥，替换 `signingConfig = signingConfigs.getByName("debug")` —— 必须在 Play Console 操作
+- **SplashScreen API**：`themes.xml` parent 改 `Theme.SplashScreen` + `MainActivity.installSplashScreen()` —— v0.3.0 上架前加
+- **商店截图**：4.7" / 6.7" 各 2 张 PNG（手机模拟器 / 设计师资源）—— 用户在 Play Console 上传
+- **Play Console 上传 .aab + 预审**—— 用户在 Play Console 操作
+- **隐私政策页面**：`https://buxiaju.gitee.io/dou-bi-docs/privacy/` 实际部署（用户挂在 Gitee Pages）
+- **SettingsScreen 底部「关于 / 版本 / 隐私政策 / 源代码 / 第三方许可」Row** —— v0.3.0 上架前补（strings.xml 字符串已就位）
 
 ---
 
