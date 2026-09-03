@@ -21,6 +21,7 @@ import com.doubi.android.ui.downloading.DownloadingScreen
 import com.doubi.android.ui.history.HistoryScreen
 import com.doubi.android.ui.pasting.PastingScreen
 import com.doubi.android.ui.parsing.ParsingScreen
+import com.doubi.android.ui.settings.SettingsScreen
 
 /**
  * 阶段 3 主导航壳——4 个底栏 tab + NavHost。
@@ -67,6 +68,7 @@ fun AppNavigation(
             composable(NavRoutes.PARSING) { ParsingScreen() }
             composable(NavRoutes.DOWNLOADING) { DownloadingScreen() }
             composable(NavRoutes.HISTORY) { HistoryScreen() }
+            composable(NavRoutes.SETTINGS) { SettingsScreen() }
         }
     }
 }

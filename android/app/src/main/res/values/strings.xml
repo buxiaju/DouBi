@@ -65,4 +65,50 @@
     <string name="downloading_status_completed">已完成</string>
     <string name="downloading_status_failed">失败</string>
     <string name="downloading_status_unknown">未知</string>
+
+    <!-- 阶段 6 启用：HistoryScreen -->
+    <string name="history_count">历史记录：%1$d</string>
+    <string name="history_hint_empty">下载成功后会自动出现在这里</string>
+    <string name="history_file_exists">文件存在</string>
+    <string name="history_file_missing">文件已删除</string>
+    <string name="history_file_missing_label">⚠ 文件不存在（保存目录已被清空？）</string>
+    <string name="history_redownload">重新下载</string>
+    <string name="history_reenqueued">已入队重新下载：%1$s（%2$s）</string>
+    <string name="history_redownload_failed">重新下载失败：%1$s</string>
+
+    <!-- 阶段 6 启用：SettingsScreen（设置 tab，v0.1 阶段 3 占位 string 沿用 nav_settings） -->
+    <string name="settings_title">设置</string>
+    <string name="settings_section_output">输出</string>
+    <string name="settings_output_root">输出根目录</string>
+    <string name="settings_output_root_hint">baseOutputDir 下的子目录名</string>
+    <string name="settings_output_dir_template">目录模板</string>
+    <string name="settings_output_dir_template_hint">{platform}/{author}/{media_type}</string>
+    <string name="settings_filename_template">文件名模板</string>
+    <string name="settings_filename_template_hint">{title}_{item_id}，可空用默认</string>
+    <string name="settings_section_quality">画质 / 容器</string>
+    <string name="settings_max_quality">最高画质</string>
+    <string name="settings_container">容器</string>
+    <string name="settings_concurrent_jobs">同时下载任务数</string>
+    <string name="settings_concurrent_jobs_hint">1 - 16</string>
+    <string name="settings_section_options">附加选项</string>
+    <string name="settings_write_thumbnail">下载缩略图</string>
+    <string name="settings_write_subtitles">下载字幕</string>
+    <string name="settings_write_metadata_json">写入 metadata.json</string>
+    <string name="settings_write_nfo">写入 NFO</string>
+    <string name="settings_write_danmaku">下载弹幕（仅 B 站）</string>
+    <string name="settings_resume">断点续传</string>
+    <string name="settings_prompt_before_download">下载前弹选项</string>
+    <string name="settings_section_network">网络</string>
+    <string name="settings_proxy">代理 URL</string>
+    <string name="settings_proxy_hint">留空走直连</string>
+    <string name="settings_rate_limit">速率限制</string>
+    <string name="settings_rate_limit_hint">如 1M / 500K，留空不限速</string>
+    <string name="settings_section_notify">通知</string>
+    <string name="settings_notify_on_completion">完成通知模式</string>
+    <string name="settings_engine">下载引擎</string>
+    <string name="settings_section_sniff">通用嗅探（v0.2+）</string>
+    <string name="settings_sniff_enabled">启用通用嗅探</string>
+    <string name="settings_sniff_duration_sec">嗅探超时（秒）</string>
+    <string name="settings_sniff_duration_sec_hint">5 - 60</string>
+    <string name="settings_saved">已保存：%1$s</string>
 </resources>
