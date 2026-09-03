@@ -229,15 +229,7 @@ Manifest：
 - [x] Room Migration 链验真（`addMigrations(*Migrations.ALL)` + `fallbackToDestructiveMigrationOnDowngrade`）
 - [x] 阶段 7 复盘文档
 
-### 没做（v0.3.0 上架前必补，**用户手动**）
-
-- [ ] **真机 adb install 走通完整流程**（解析 → 弹 dialog → 入队 → Worker 跑 → Downloading tab 看进度 → 历史 tab 看记录 + 文件检查）—— **v0.3.0 上架前必做**，阶段 5/6 已知问题累积
-- [ ] **release 包签名替换**：用 Google Play App Signing 上传真签名密钥，替换 `signingConfig = signingConfigs.getByName("debug")` —— 必须在 Play Console 操作
-- [ ] **SplashScreen API**：`themes.xml` parent 改 `Theme.SplashScreen` + `MainActivity.installSplashScreen()` —— v0.3.0 上架前加
-- [ ] **商店截图**：4.7" / 6.7" 各 2 张 PNG（手機模拟器 / 设计师资源）—— 用户在 Play Console 上传
-- [ ] **Play Console 上传 .aab + 预审**—— 用户在 Play Console 操作
-- [ ] **隐私政策页面**：`https://buxiaju.gitee.io/dou-bi-docs/privacy/` 实际部署（用户挂在 Gitee Pages）
-- [ ] **About 页 Compose 入口**（v0.1 阶段 0 留的 `nav_settings` string 已用；阶段 7 在 SettingsScreen 底部加「关于 / 版本 / 隐私政策 / 源代码 / 第三方许可」Row —— v0.3.0 上架前补）
+> **v0.4.1 自用策略变更**（2026-09-03）：项目决定**不上架 Play**。v0.3.0 阶段 7 收官时记的「上架前必补 7 项」（真机 adb install / release 签名替换 / SplashScreen API / 商店截图 / Play Console 上传 / 隐私政策页 / About Row）**全部砍掉**——自用场景下用不上。v0.4.1 走 sideload 真机流程 + 本地自用 keystore 走 `~/.gradle/gradle.properties` 环境变量。
 
 ### 文档同步
 

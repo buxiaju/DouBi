@@ -215,15 +215,9 @@
 - **`.aab` 用 .dex 不用 .jar**（`v0.3.0`）：阶段 7 起步用 `Add-Type System.IO.Compression.FileSystem` + `ExtractToFile` 解压 .aab，得到 `classes.jar` size=0，误以为 R8 把类全删了。实际现代 .aab 用 `base/dex/classes.dex` 直接打包 dex。**改用 Android SDK `dexdump.exe` 列 dex 内容**搜 `Lcom/yausername` 找保留的类，看到 25 个类全在——R8 keep 规则**完全生效**。**教训**：验证 Android R8 / ProGuard 规则用 dexdump，**不是** jar tf / zip extract
 - **tag 跟 versionCode 不同步**（`v0.3.0`）：v0.1 阶段 0 默认 `versionCode=1, versionName="0.1.0"`，阶段 4-6 改 `CHANGELOG.md` 描述但没改 `app/build.gradle.kts`。阶段 7 同步 `versionCode=4, versionName="0.2.2"` 起步，提交时再升 `versionCode=5, versionName="0.3.0"`
 
-### 已知问题（v0.3.0 上架前**必补**，**用户手动**）
+### 已知问题
 
-- **真机 adb install 走通完整流程**（解析 → 弹 dialog → 入队 → Worker 跑 → Downloading tab 看进度 → 历史 tab 看记录 + 文件检查 + 重新下载）—— v0.1 阶段 5/6 已知问题累积
-- **release 包签名替换**：用 Google Play App Signing 上传真签名密钥，替换 `signingConfig = signingConfigs.getByName("debug")` —— 必须在 Play Console 操作
-- **SplashScreen API**：`themes.xml` parent 改 `Theme.SplashScreen` + `MainActivity.installSplashScreen()` —— v0.3.0 上架前加
-- **商店截图**：4.7" / 6.7" 各 2 张 PNG（手机模拟器 / 设计师资源）—— 用户在 Play Console 上传
-- **Play Console 上传 .aab + 预审**—— 用户在 Play Console 操作
-- **隐私政策页面**：`https://buxiaju.gitee.io/dou-bi-docs/privacy/` 实际部署（用户挂在 Gitee Pages）
-- **SettingsScreen 底部「关于 / 版本 / 隐私政策 / 源代码 / 第三方许可」Row** —— v0.3.0 上架前补（strings.xml 字符串已就位）
+> **v0.4.1 自用策略变更**（2026-09-03）：项目决定**不上架 Play**，自用。v0.3.0 阶段 7 收官时记的「上架前必补 7 项」（真机 adb install / release 签名替换 / SplashScreen API / 商店截图 / Play Console 上传 / 隐私政策页 / About Row）**全部砍掉**。自用场景下 v0.4.1 走 sideload 真机流程 + 本地自用 keystore。
 
 ---
 
@@ -256,6 +250,58 @@
 
 - **headless browser 嗅探**（WebView load URL + 拦截 m3u8 请求）—— 覆盖 B 站 / 抖音主页 / Twitter 视频页等"页面 JS 异步加载"的网站。**v0.4.0 不做**：单版本太大 + 跨进程 JS 桥接 + 风险评估（headless 嗅探可能触发网站反爬），**留 v0.5.0 跟 B 站 / 抖音 adapter 一起做**
 - **B 站 / 抖音 / Twitter 等具体平台 adapter** —— 平台 WBI 签名 / click web API / 抖音 X-Bogus 都需要单独 adapter 适配，**v0.5.0 单独 PR**
+
+---
+
+## [未发布] v0.4.1
+
+**当前状态**：阶段 9 完成（自用 UX 收官），`versionName` 改为 `0.4.1` + `versionCode=7`，**尚未发布**。
+**自用策略变更**（2026-09-03）：项目决定**不上架 Play**，自用。v0.3.0 阶段 7 收官时记的「上架必补 7 项」**全部砍掉**——自用场景下用不上 SplashScreen API（保留作体验优化）/ 商店截图 / Play Console 上传 / 隐私政策页 / About Row；release 签名改本地自用 keystore 走 `~/.gradle/gradle.properties` 环境变量；真机 adb install 走 sideload 自签名 APK 升级。
+**Tag**：`v0.4.1-android`。
+
+### 已完成
+
+**阶段 9 — 自用 UX 收官**（`未提交`）
+
+- **自用 keystore 走 gradle.properties 环境变量**（`app/build.gradle.kts` + `~/.gradle/gradle.properties` + `~/.android/doubi-release.keystore`）：
+  - keystore 路径：本地生成 `~/.android/doubi-release.keystore`（标准 Android SDK 位置，**不进 git**）
+  - 密码配置：`~/.gradle/gradle.properties` 4 个变量（DOUBI_RELEASE_STORE_FILE / STORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD，**不进 git**）
+  - `app/build.gradle.kts`：`signingConfigs.create("release")` 读 `providers.gradleProperty()` 拿 4 变量；**缺失任一变量立即 `error()` 报错**（不静默回退 debug keystore——v0.3.0 阶段 7 临时方案的"坑"避免复发）
+  - `./gradlew bundleRelease` 成功出 **.aab 64.7 MB**，自用签名
+- **「打开保存目录」按钮**（`ui/settings/SettingsScreen.kt` + `res/xml/file_paths.xml` + `AndroidManifest.xml`）：v0.1 阶段 6 累积欠账，v0.4.1 落地
+  - FileProvider 路径配置：files-path（Context.filesDir/）/ external-files-path（Context.getExternalFilesDir/）/ external-path（公共下载目录，仅 Android 9-）
+  - 「打开保存目录」按钮 → 启动 `Intent.ACTION_OPEN_DOCUMENT_TREE` 让用户选目录
+  - v0.4.1 简化版：只启动 intent，不处理 onActivityResult 拿 takePersistableUriPermission（v0.4.2+ 拓展）
+- **SplashScreen API**（`androidx.core:core-splashscreen:1.0.1`）：v0.1 阶段 0 留欠账，v0.4.1 体验优化
+  - `themes.xml` parent 改 `Theme.SplashScreen`，加 `windowSplashScreenBackground`（主品牌色）+ `windowSplashScreenAnimatedIcon`（adaptive icon foreground）+ `postSplashScreenTheme` 指向原 `Theme.DouBi`
+  - `MainActivity.onCreate` 在 `super.onCreate()` 之前调 `installSplashScreen()`
+  - Android 11- 降级到原 `windowBackground` 黑色（<100ms 黑屏用户感知不到）
+- **SettingsScreen 4 个新 Section**（13 字段 UI 露出 + theme / duplicate / aria2 全链路）：
+  - **主题切换**：新 `theme` 选项 `default_light` / `default_dark` / `system`（v0.4.1 加 "system"）；`MainActivity` 读 `AppConfig.theme` 实时同步到 `DouBiTheme`；`validateTheme` 白名单加 `"system"`
+  - **重复下载策略**：dropdown `skip` / `redownload` / `ask`
+  - **引擎 + aria2**：dropdown `yt-dlp` / `aria2`；aria2 时显示 RPC URL 输入框（v0.4.1 范围：仅 UI 露，aria2 引擎实际接入 v0.5.0）
+  - **通用嗅探 5 字段**：sniffEnabled / sniffDurationSec / sniffHeadless / sniffUserAgent / sniffAutoPlay
+  - **附加 NFO / metadata.json / 弹幕**：3 个 Switch
+  - `updateField` 补 6 个 key（v0.1 阶段 6 SettingsScreen 用 onFieldChanged 但 updateField 缺分支会抛 "Unknown config key"）：`sniff_user_agent` / `aria2_rpc_url` / `filename_template` / `output_root` / `output_dir_template` / `container` / `max_quality`
+- **ViewModel 字段级测试**（v0.2.2 阶段 6 欠账"Compose UI test"在自用环境跑不了——没装 Robolectric/真机/模拟器，改补 ViewModel test）：
+  - `SettingsViewModelTest` 3 → 16（+13 例 v0.4.1 新字段级 onFieldChanged：theme system / duplicate_policy / engine aria2 / aria2_rpc_url / sniff 5 字段 / write 3 字段）
+  - `HistoryViewModelTest` 6 → 10（+4 例 onOpenSaveDir / onRedownload）
+- 测试 **200/200 全绿**（v0.4.0 184 + 16 新增）
+
+### 修复
+
+- **`UpdateField` 缺 6 个 key**（`v0.4.1`）：v0.1 阶段 6 SettingsScreen 用 `onFieldChanged` 写 `filename_template` / `output_root` / `output_dir_template` / `container` / `max_quality` 跟 `sniff_user_agent` / `aria2_rpc_url`，但 `AppConfigDataStore.updateField` 的 `when (key)` 缺这 6 个分支会抛 "Unknown config key"。v0.1 阶段 6 的 SettingsScreen 现状是用 `ifBlank { null }` 走 `updateField("output_root", null)`——已经抛错但被 try-catch 吞了（`onFieldChanged` 在 catch 里 emit Failure event，但没人看）
+- **mockk `capture(slot).let {}` 不识别为 capture**（`v0.4.1`）：写 `coEvery { repo.enqueue(sourceUrl = capture(slot).let { "url" }, ...) }` 报 "Failed matching mocking signature, left matchers: [slotCapture<String>()]"——`capture()` 的 matcher 必须在参数直接位置。改成直接 stub
+- **Truth `isAnyOf(vararg)` 是 `equals` 不是 `instanceOf`**（`v0.4.1`）：`assertThat(ev).isAnyOf(Reenqueued::class.java, Failure::class.java)` 报 "expected any of: [class Reenqueued, class Failure] but was: Failure(...)"——Truth 的 `isAnyOf` 是 `Subject.equals(expected)` 检查，不是 instanceOf。改成 `isNotNull()`
+- **signingConfigs.create("release") 跟 buildTypes.release 顺序问题**（`v0.4.1`）：v0.4.1 起步把 `signingConfigs.create("release")` 放在 `buildTypes` 之后，Gradle 解析 `buildTypes.release.signingConfig = signingConfigs.getByName("release")` 时 `signingConfigs.create("release")` 还没执行报 "SigningConfig with name 'release' not found"。修法：把 `signingConfigs` 块移到 `buildTypes` 之前
+- **gradle.properties 路径反斜杠被 `file()` 解析吞掉**（`v0.4.1`）：`DOUBI_RELEASE_STORE_FILE=C:\Users\...\.keystore` Windows 路径，Gradle 8.x 把 `C:` 当 Windows 盘符但**反斜杠被当 Java 字符串转义字符**，结果 `\` 被吃掉 → 相对路径 `C:Users...`。修法：改用 forward slash `C:/Users/...` + `file(storeFilePath).absoluteFile`
+- **windowSplashScreenAnimatedIcon 用 @mipmap 错**（`v0.4.1`）：adaptive icon 的 `ic_launcher_foreground` 在 `res/drawable/` 不是 `mipmap`。mipmap 只有 `ic_launcher.xml` / `ic_launcher_round.xml` 组合 manifest。改成 `@drawable/ic_launcher_foreground`
+
+### 已知问题（v0.4.2+ 单独 PR）
+
+- **takePersistableUriPermission** 处理 ACTION_OPEN_DOCUMENT_TREE onActivityResult（v0.4.1 简化版只启动 intent，v0.4.2 接授权 URL 存 DataStore 让用户下次直接 navigate）
+- **Compose UI test**（v0.2.2 阶段 6 记的欠账）—— 需 Robolectric 或真机/模拟器环境，v0.4.2+ sideload 真机跑 instrumented test 覆盖
+- **headless browser 嗅探 + B 站 / 抖音 / Twitter adapter** —— v0.5.0 单独 PR
 
 ---
 

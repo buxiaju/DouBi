@@ -6,15 +6,15 @@
 
 ## 当前进度
 
-**阶段 8 完成**（v0.4.0-android 收官候选），`versionName = 0.4.0`，**尚未发布任何版本**。下一步是 v0.5.0（B 站 / 抖音 adapter + headless browser 嗅探）。
+**阶段 9 完成**（v0.4.1-android 收官候选），`versionName = 0.4.1`，**尚未发布任何版本**。下一步是 v0.5.0（B 站 / 抖音 adapter + headless browser 嗅探）。
 
 | | 状态 |
 |---|---|
-| 已完成 | 阶段 0 脚手架 ✅ ｜ 阶段 1 数据层 + 配置 ✅（Room Migration 链已显式化）｜ 阶段 2 下载引擎 ✅（重试退避已加）｜ 阶段 3 UI 框架 ✅（4 占位 tab + Hilt ViewModel）｜ 阶段 4 解析 + 列表 ✅（YouTubeUrl 分类 + MediaFormat + PromptOptionsDialog + DownloadRepository.enqueue 一条龙）｜ 阶段 5 下载 + 进度 + 完成通知 ✅（DownloadingScreen LazyColumn + speed/eta + 队列并发 3 + 三档通知）｜ 阶段 6 历史 + 设置 ✅（HistoryScreen LazyColumn + 文件存在性检查 + SettingsScreen 5 组字段 + 5 底栏 tab）｜ 阶段 7 商店准备 ✅（bundleRelease .aab 61.5 MB + R8 keep 规则验真 25 个类保留原名 + 商店元数据中英文）｜ 阶段 8 通用嗅探 ✅（Sniffer interface + HttpContentTypeSniffer + SniffResult sealed + SnifferModule Hilt 装配 + ParseAndExpandUseCase 集成 Sniffer 路径 + PastingScreen Sniffing 状态提示）|
-| 待完成 | v0.3.0 上架前必补（**用户手动**）：真机 adb install 完整流程 / release 签名替换 / SplashScreen API / 商店截图 / Play Console 上传 + 预审。v0.5.0 单独 PR：headless browser 嗅探 + B 站 / 抖音 / Twitter adapter |
-| 测试 | 单测 **183/183 全绿**（2026-09-02 实跑验证：46 → 64 → 99 → 153 → 158 → 167 → 183，+137 例；v0.4.0 新增 16 例：HttpContentTypeSnifferTest 13 + ParseAndExpandUseCaseTest +3 Sniffer 行为）；仪器测试 10 个**写了但从未在真机执行**；jacoco 报告 LINE 26.5% / METHOD 37.1% / CLASS 24.0%（新 UI/Worker/Repository 增量未单测覆盖是预期，阶段 7 加 Compose UI test + instrumented 拉起来） |
-| 能跑什么 | Run 起来 5 个 tab 底栏可点；粘贴 tab 输入 URL → **任意 http(s) URL 都走通用嗅探**（YouTube 走 yt-dlp / 其他走 Sniffer 嗅探 m3u8/mp4）→ 弹「下载选项」选 format + 容器 / 缩略图 / 字幕 / 续传 / 标题模板 → 入队 Worker；下载中 tab 看实时进度 + 速度 + ETA + 取消；历史 tab 看 Room 记录 + 文件状态 + 重新下载；设置 tab 5 组字段改完即生效；`bundleRelease` 成功出 61.5 MB .aab 准备上 Play |
-| 构建环境 | ⚠️ 命令行必须用 AS 自带 JBR 25，系统 JDK 26 会挂在 `androidJdkImage`（[SETUP.md](docs/SETUP.md)） |
+| 已完成 | 阶段 0 脚手架 ✅ ｜ 阶段 1 数据层 + 配置 ✅（Room Migration 链已显式化）｜ 阶段 2 下载引擎 ✅（重试退避已加）｜ 阶段 3 UI 框架 ✅（4 占位 tab + Hilt ViewModel）｜ 阶段 4 解析 + 列表 ✅（YouTubeUrl 分类 + MediaFormat + PromptOptionsDialog + DownloadRepository.enqueue 一条龙）｜ 阶段 5 下载 + 进度 + 完成通知 ✅（DownloadingScreen LazyColumn + speed/eta + 队列并发 3 + 三档通知）｜ 阶段 6 历史 + 设置 ✅（HistoryScreen LazyColumn + 文件存在性检查 + SettingsScreen 5 组字段 + 5 底栏 tab）｜ 阶段 7 商店准备 ✅（bundleRelease .aab 61.5 MB + R8 keep 规则验真 25 个类保留原名 + 商店元数据中英文）｜ 阶段 8 通用嗅探 ✅（Sniffer interface + HttpContentTypeSniffer + SniffResult sealed + SnifferModule Hilt 装配 + ParseAndExpandUseCase 集成 Sniffer 路径 + PastingScreen Sniffing 状态提示）｜ 阶段 9 自用 UX 收官 ✅（自用 keystore 走 gradle.properties 环境变量 + 「打开保存目录」+FileProvider + SplashScreen API + SettingsScreen 4 个新 Section 13 字段 + ViewModel 字段级测试 +16 例）|
+| 待完成 | v0.4.2+ 单独 PR：takePersistableUriPermission（保存目录授权）/ Compose UI test（需 Robolectric 或真机）。v0.5.0 单独 PR：headless browser 嗅探 + B 站 / 抖音 / Twitter adapter |
+| 测试 | 单测 **200/200 全绿**（2026-09-03 实跑验证：46 → 64 → 99 → 153 → 158 → 167 → 183 → 200，+154 例；v0.4.1 新增 16 例：SettingsViewModelTest +13 字段级 onFieldChanged + HistoryViewModelTest +4 onOpenSaveDir/onRedownload）；仪器测试 10 个**写了但从未在真机执行**（v0.4.1 改补 ViewModel 字段级测试覆盖 UI 改动回归——自用环境没装 Robolectric/真机/模拟器） |
+| 能跑什么 | Run 起来 5 个 tab 底栏可点；粘贴 tab 输入 URL → **任意 http(s) URL 都走通用嗅探**（YouTube 走 yt-dlp / 其他走 Sniffer 嗅探 m3u8/mp4）→ 弹「下载选项」选 format + 容器 / 缩略图 / 字幕 / 续传 / 标题模板 → 入队 Worker；下载中 tab 看实时进度 + 速度 + ETA + 取消；历史 tab 看 Room 记录 + 文件状态 + 重新下载；设置 tab **13+ 字段改完即生效**（含主题切换、重复下载策略、引擎 aria2、通用嗅探 5 字段、附加 NFO/JSON/弹幕）；`bundleRelease` 成功出 **64.7 MB .aab**（自用 keystore 签名） |
+| 构建环境 | ⚠️ 命令行必须用 AS 自带 JBR 25，系统 JDK 26 会挂在 `androidJdkImage`（[SETUP.md](docs/SETUP.md)）⚠️ release 签名走 `~/.gradle/gradle.properties` 环境变量，**keystore 不进 git**——换电脑需重新生成 |
 
 **v0.1.0 收官前已还 7 笔欠账**：
 - #1 失败重试（`setBackoffCriteria` EXPONENTIAL + `Result.retry()`，10 次封顶）

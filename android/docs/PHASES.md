@@ -251,18 +251,11 @@
 - strings.xml + 12 个 store_* 字符串 + 4 个 about 字符串 + 2 个 URL（policy_url / source_code_url）
 - R8 keep 规则验真（dexdump 列 25 个 com.yausername.youtubedl_android.* 类全部保留原名）
 
-**没做（v0.3.0 上架前必补，**用户手动**）**：
-- 真机 adb install 走通完整流程（v0.1 阶段 5/6 已知问题累积）
-- release 包签名替换（Google Play App Signing 上传真签名密钥）
-- SplashScreen API（Android 12+ 圆形图标 + 背景色标准启屏）
-- 商店截图（4.7" / 6.7" 各 2 张 PNG）
-- Play Console 上传 .aab + 预审
-- 隐私政策页面（`https://buxiaju.gitee.io/dou-bi-docs/privacy/` 实际部署）
-- SettingsScreen 底部「关于 / 版本 / 隐私政策 / 源代码 / 第三方许可」Row
+> **v0.4.1 自用策略变更**（2026-09-03）：项目决定**不上架 Play**。v0.3.0 阶段 7 收官时记的「上架前必补 7 项」**全部砍掉**——自用场景下用不上 SplashScreen API / 商店截图 / Play Console 上传 / 隐私政策页 / About Row。v0.4.1 走 sideload 真机流程 + 本地自用 keystore。
 
 ## 收尾
 
-阶段 7 完成 → 提 Play Console 审核 → 1-3 天过审 → 上线 v0.1.0。
+阶段 7 完成 → v0.4.1 自用策略：sideload 真机 + 本地 keystore，不上 Play。
 
 之后进入迭代期（v0.2 / v0.3），按需扩 B 站 / 抖音 / 通用嗅探（参考 [REUSE-MAP.md](REUSE-MAP.md)）。
 
