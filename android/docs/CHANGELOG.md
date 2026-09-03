@@ -305,6 +305,61 @@
 
 ---
 
+## [未发布] v0.5.0
+
+**当前状态**：阶段 10 完成（headless browser 嗅探，WebView 集成），`versionName` 改为 `0.5.0` + `versionCode=8`，**尚未发布**。
+本版本把 v0.4.0 阶段 8 计划留到 v0.5.0 的 headless browser 嗅探落地——任意 http(s) URL 通过 WebView loadUrl + shouldInterceptRequest 拦截 m3u8/mp4 URL，覆盖 B 站 / 抖音 / 微博主页"JS 异步加载"网站。
+**Tag**：`v0.5.0-android`。
+
+### 已完成
+
+**阶段 10 — headless browser 嗅探**（`未提交`）
+
+- **WebViewHolder 单例**（`core/sniffer/WebViewHolder.kt`）：共享不可见 WebView
+  - `@ApplicationContext` 注入 + `@Singleton` 作用域
+  - 0 size `ViewGroup.LayoutParams(0, 0)` + `visibility = View.GONE`（attach 到 view hierarchy 但实际不渲染——WebView 必须 attach 才能 loadUrl）
+  - `by lazy` 初始化（避免冷启动阻塞 Application.onCreate）
+  - `Mutex.withLock { ... }` 串行化多 sniff 任务（WebView 是单线程组件不能并发 loadUrl）
+  - 共享 WebView 常驻 ~30-50MB（v0.5.1+ 优化：idle 30s 后 release / re-create）
+- **WebViewHeadlessSniffer 实现 Sniffer interface**（`core/sniffer/WebViewHeadlessSniffer.kt`）：
+  - `WebView.loadUrl(url)` + `shouldInterceptRequest` 拦截 m3u8/mp4/webm/mpd/m4s URL
+  - 5s 超时（`AppConfig.sniffDurationSec` 5-60s）+ `onPageFinished` + 1s 缓冲触发提前结束
+  - 命中 → `SniffResult.Media(finalUrl=interceptedUrl, contentType=推 .ext)`
+  - 5s 内未命中 → `SniffResult.NotMedia(reason="WebView 5s 内未拦截到 m3u8/mp4/webm")`
+  - 异常 → `SniffResult.Error(message, cause)`
+- **CompositeSniffer 切换器**（`core/sniffer/CompositeSniffer.kt`）：
+  - 按 `AppConfig.sniffHeadless` 动态选 [HttpContentTypeSniffer]（v0.4.0 行为）还是 [WebViewHeadlessSniffer]（v0.5.0 新增）
+  - 内部 `@Named("http")` 跟 `@Named("headless")` 注入两个 Sniffer
+  - `@Binds` 绑到无 @Named 的 `Sniffer` interface，**ParseAndExpandUseCase 不动**（v0.4.0 阶段 8 写的 contract 保留）
+- **SnifferModule 重构**（`core/sniffer/di/SnifferModule.kt`）：
+  - v0.4.0 阶段 8 的 1 个 `@Binds` 拆成 3 个：
+    - `@Binds HttpContentTypeSniffer → @Named("http") Sniffer`
+    - `@Binds WebViewHeadlessSniffer → @Named("headless") Sniffer`
+    - `@Binds CompositeSniffer → Sniffer`（v0.4.0 阶段 8 的默认 binding 保留）
+- **CompositeSnifferTest 4 例**（v0.5.0 新增）：
+  - `sniff with sniffHeadless true invokes headless sniffer`
+  - `sniff with sniffHeadless false invokes http sniffer`
+  - `sniff propagates Error from headless sniffer when headless true`
+  - `sniff propagates NotMedia from http sniffer when headless false`
+- **204/204 单测全绿**（v0.4.1 200 + 4 新增）
+- **APK 体积**：`assembleDebug` 增量 +2 MB（WebView 集成：libwebviewchromium_loader.so ~3 MB + libwebviewchromium_plat_support.so ~1.5 MB + v8 snapshot ~1 MB）
+
+### 修复
+
+- **`@Synchronized` 不能用在 suspend 函数**（`v0.5.0`）：v0.5.0 起步 `WebViewHolder.withLock` 标 `@Synchronized` + `suspend fun` 编译报 "Suspension functions can only be called within coroutine body"——`@Synchronized` 编译时锁普通函数不能跨越 suspend point。**修法**：换 `kotlinx.coroutines.sync.Mutex` + `withLock`
+- **`@SuppressLint` 不能用在 lazy property delegate**（`v0.5.0`）：v0.5.0 `WebViewHolder` 标 `@SuppressLint("SetJavaScriptEnabled") val webView: WebView by lazy { ... }` 编译报 "This annotation is not applicable to target 'member property with delegate'"。**修法**：把 `@SuppressLint` 放到 lazy block 内部
+
+### 已知问题（v0.5.1+ 单独 PR）
+
+- **WebViewHeadlessSniffer 自身单测**（需要 Robolectric 或真机/模拟器）—— v0.5.0 范围只测 CompositeSniffer 切换契约
+- **m3u8 内容解析**：拦截到 m3u8 URL 后解析 HLS playlist 拿 .ts 分片 URL 列表（v0.5.0 直接返回 m3u8 URL 给 yt-dlp-android 处理）
+- **WebViewHolder idle 30s 后 release / re-create**（v0.5.0 单例常驻 30-50MB）
+- **WebViewClient callback 1-3s 阻塞 Main 线程的 ANR 风险测试**
+- **BilibiliAdapter**（WBI 签名 / click web API）—— v0.5.1+ 单独 PR
+- **抖音 adapter**（X-Bogus）—— v0.5.2+ 单独 PR
+
+---
+
 ## 维护约定
 
 - 每个阶段收尾时，把该阶段的 Added / Fixed 补进「未发布」段，并在 [`phases/`](phases/) 写复盘文档
