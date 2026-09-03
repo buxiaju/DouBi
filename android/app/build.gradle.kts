@@ -26,9 +26,9 @@ android {
         // v0.2.0 = 2（阶段 4 解析 + 列表）
         // v0.2.1 = 3（阶段 5 下载 + 进度 + 完成通知）
         // v0.2.2 = 4（阶段 6 历史 + 设置）
-        // v0.3.0 = 5（阶段 7 商店准备：启动屏 + 隐私政策 + 商店元数据 + bundleRelease）
-        versionCode = 4
-        versionName = "0.2.2"
+        // v0.3.0 = 5（阶段 7 商店准备：bundleRelease + R8 keep 验真 + 商店元数据）
+        versionCode = 5
+        versionName = "0.3.0"
 
         minSdk = 24
         targetSdk = 35
