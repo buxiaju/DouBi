@@ -111,4 +111,49 @@
     <string name="settings_sniff_duration_sec">嗅探超时（秒）</string>
     <string name="settings_sniff_duration_sec_hint">5 - 60</string>
     <string name="settings_saved">已保存：%1$s</string>
+
+    <!-- 阶段 7 启用：About / 隐私政策 -->
+    <string name="settings_section_about">关于</string>
+    <string name="settings_about">关于豆比下载</string>
+    <string name="settings_about_version">版本：%1$s (%2$d)</string>
+    <string name="settings_about_license">开源许可</string>
+    <string name="settings_about_privacy_policy">隐私政策</string>
+    <string name="settings_about_source_code">源代码</string>
+    <!-- 隐私政策 URL：阶段 7 占位挂在 Gitee Pages；真发布前请创建 dou-bi/dou-bi-docs 仓库并挂 Jekyll/Hugo 静态站点 -->
+    <string name="privacy_policy_url" translatable="false">https://buxiaju.gitee.io/dou-bi-docs/privacy/</string>
+    <!-- 源代码 URL：阶段 7 占位指向 Gitee 主仓 README -->
+    <string name="source_code_url" translatable="false">https://gitee.com/buxiaju/dou-bi</string>
+    <!-- 第三方开源许可 -->
+    <string name="third_party_licenses">第三方开源许可</string>
+
+    <!-- 阶段 7 启用：商店元数据（Google Play / Gitee 上架用）-->
+    <!-- 短描述：≤ 80 字符。Play 控制台必填。 -->
+    <string name="store_short_description" translatable="false">豆比下载 — 简洁、高效、跨平台视频下载工具</string>
+    <!-- 长描述：≤ 4000 字符。Play 控制台必填。-->
+    <string name="store_description" translatable="false">豆比下载（DouBi Downloader）是一款基于 yt-dlp 的 Android 视频下载工具。
+
+核心功能：
+• 一键下载 YouTube 普通视频、Shorts、Live
+• 支持通用 m3u8 / mp4 直链
+• 实时进度条 + 下载速度 + 预计剩余时间
+• 自定义画质（1080p / 720p / 480p / best）
+• 断点续传、自动重试（最多 10 次）
+• 历史记录管理 + 一键重新下载
+• 实时配置生效（改完立即生效，无需重启）
+
+特色：
+• 100% 本地运行，所有数据存储在 app 私有目录
+• 基于 Material 3 设计，浅色 / 深色主题自适应
+• 不上传任何用户数据，不含广告，不含追踪
+
+开源项目，源代码：</string>
+    <!-- 关键词：用逗号分隔，Play 控制台可选 -->
+    <string name="store_keywords" translatable="false">下载,视频,youtube,yt-dlp,豆比,m3u8,mp4</string>
+    <!-- 类别 -->
+    <string name="store_category" translatable="false">工具</string>
+    <!-- 开发者 -->
+    <string name="store_developer_name" translatable="false">不侠居</string>
+    <string name="store_developer_email" translatable="false">2919203805@qq.com</string>
+    <string name="store_website_url" translatable="false">https://gitee.com/buxiaju/dou-bi</string>
+    <string name="store_privacy_policy_url" translatable="false">https://buxiaju.gitee.io/dou-bi-docs/privacy/</string>
 </resources>
