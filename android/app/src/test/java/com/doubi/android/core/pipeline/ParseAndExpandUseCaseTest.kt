@@ -5,11 +5,15 @@ import com.doubi.android.core.model.MediaFormat
 import com.doubi.android.core.model.MediaItem
 import com.doubi.android.core.model.MediaType
 import com.doubi.android.core.model.Platform
+import com.doubi.android.core.sniffer.SniffResult
+import com.doubi.android.core.sniffer.Sniffer
 import com.doubi.android.engine.ytdlp.YtDlpEngine
 import com.doubi.android.engine.ytdlp.YtDlpEngine.ProbeResult
 import com.google.common.truth.Truth.assertThat
 import io.mockk.coEvery
+import io.mockk.coVerify
 import io.mockk.mockk
+import io.mockk.slot
 import kotlinx.coroutines.test.runTest
 import org.junit.Test
 
@@ -27,7 +31,10 @@ import org.junit.Test
 class ParseAndExpandUseCaseTest {
 
     private val engine: YtDlpEngine = mockk()
-    private val useCase = ParseAndExpandUseCase(engine)
+    // v0.4.0 新增：Sniffer 注入。mockk(relaxed = false) 显式 stub 避免 v0.2.2 阶段 6
+    // 修过的 "relaxed 模式 every 块被忽略" 的坑。
+    private val sniffer: Sniffer = mockk()
+    private val useCase = ParseAndExpandUseCase(engine, sniffer)
 
     // ---- YouTube ----
 
@@ -101,6 +108,13 @@ class ParseAndExpandUseCaseTest {
         val formats = listOf(formatOf("best", height = 1080, ext = "mp4"))
         coEvery { engine.probeWithFormats("https://example.com/stream.m3u8") } returns
             ProbeResult(sample, formats)
+        coEvery { sniffer.sniff("https://example.com/stream.m3u8") } returns
+            SniffResult.Media(
+                contentType = "application/vnd.apple.mpegurl",
+                finalUrl = "https://example.com/stream.m3u8",
+                contentLength = 1234L,
+                isHls = true,
+            )
 
         val r = useCase("https://example.com/stream.m3u8")
         assertThat(r).isInstanceOf(ParseResult.DirectLink::class.java)
@@ -111,7 +125,7 @@ class ParseAndExpandUseCaseTest {
 
     @Test
     fun `direct mp4 URL with no formats falls back to DirectLink with null format`() = runTest {
-        // 直链嗅探失败 → item 是 fallback，formats 是空
+        // 直链嗅探成功（sniffer 识别为 mp4）→ item 是 fallback，formats 是空
         val fallback = sampleItem(
             title = "https://example.com/video.mp4",  // 兜底：title == url
             platform = Platform.GENERIC,
@@ -119,6 +133,12 @@ class ParseAndExpandUseCaseTest {
         )
         coEvery { engine.probeWithFormats("https://example.com/video.mp4") } returns
             ProbeResult(fallback, emptyList())
+        coEvery { sniffer.sniff("https://example.com/video.mp4") } returns
+            SniffResult.Media(
+                contentType = "video/mp4",
+                finalUrl = "https://example.com/video.mp4",
+                contentLength = null,
+            )
 
         val r = useCase("https://example.com/video.mp4")
         assertThat(r).isInstanceOf(ParseResult.DirectLink::class.java)
@@ -135,6 +155,12 @@ class ParseAndExpandUseCaseTest {
         )
         coEvery { engine.probeWithFormats("https://example.com/stream") } returns
             ProbeResult(sample, audioOnly)
+        coEvery { sniffer.sniff("https://example.com/stream") } returns
+            SniffResult.Media(
+                contentType = "video/mp4",
+                finalUrl = "https://example.com/stream",
+                contentLength = null,
+            )
 
         val r = useCase("https://example.com/stream")
         assertThat(r).isInstanceOf(ParseResult.DirectLink::class.java)
@@ -154,6 +180,12 @@ class ParseAndExpandUseCaseTest {
         )
         coEvery { engine.probeWithFormats("https://example.com/stream") } returns
             ProbeResult(sample, mixed)
+        coEvery { sniffer.sniff("https://example.com/stream") } returns
+            SniffResult.Media(
+                contentType = "video/mp4",
+                finalUrl = "https://example.com/stream",
+                contentLength = null,
+            )
 
         val r = useCase("https://example.com/stream")
         val d = r as ParseResult.DirectLink
@@ -162,7 +194,7 @@ class ParseAndExpandUseCaseTest {
 
     @Test
     fun `fallback direct link uses URL hashCode as itemId when probe returns URL as title`() = runTest {
-        // 嗅探失败：item.title == url（fallbackMediaItem 的行为）
+        // 嗅探成功（mp4）→ item.title == url（fallbackMediaItem 的行为）
         val fallback = sampleItem(
             title = "https://example.com/video.mp4",
             platform = Platform.GENERIC,
@@ -171,11 +203,69 @@ class ParseAndExpandUseCaseTest {
         )
         coEvery { engine.probeWithFormats("https://example.com/video.mp4") } returns
             ProbeResult(fallback, emptyList())
+        coEvery { sniffer.sniff("https://example.com/video.mp4") } returns
+            SniffResult.Media(
+                contentType = "video/mp4",
+                finalUrl = "https://example.com/video.mp4",
+                contentLength = null,
+            )
 
         val r = useCase("https://example.com/video.mp4")
         val d = r as ParseResult.DirectLink
         // 兜底分支：itemId 是 url hashCode
         assertThat(d.item.itemId).isEqualTo("https://example.com/video.mp4".hashCode().toString())
+    }
+
+    // ---- v0.4.0 Sniffer 行为 ----
+
+    @Test
+    fun `sniffer NotMedia (HTML page) returns Unsupported without yt-dlp fallback`() = runTest {
+        // Sniffer 明确说不是 media（HTML 页面）→ 直接 Unsupported，不调 yt-dlp
+        coEvery { sniffer.sniff("https://example.com/page.html") } returns
+            SniffResult.NotMedia(
+                statusCode = 200,
+                contentType = "text/html",
+                reason = "HEAD Content-Type is not media: text/html",
+            )
+
+        val r = useCase("https://example.com/page.html")
+        assertThat(r).isInstanceOf(ParseResult.Unsupported::class.java)
+        val u = r as ParseResult.Unsupported
+        assertThat(u.reason).contains("text/html")
+        // 不应该调 yt-dlp
+        coVerify(exactly = 0) { engine.probeWithFormats(any()) }
+    }
+
+    @Test
+    fun `sniffer Error (network failure) falls back to yt-dlp probe`() = runTest {
+        // Sniffer 网络错误（DNS / SSL / 超时）→ 降级让 yt-dlp 自己嗅探
+        coEvery { sniffer.sniff("https://example.com/stream.m3u8") } returns
+            SniffResult.Error("DNS 解析失败", cause = null)
+        val sample = sampleItem(
+            title = "https://example.com/stream.m3u8",
+            platform = Platform.GENERIC,
+            sourceUrl = "https://example.com/stream.m3u8",
+        )
+        coEvery { engine.probeWithFormats("https://example.com/stream.m3u8") } returns
+            ProbeResult(sample, listOf(formatOf("best", height = 1080)))
+
+        val r = useCase("https://example.com/stream.m3u8")
+        // 降级路径 → DirectLink
+        assertThat(r).isInstanceOf(ParseResult.DirectLink::class.java)
+    }
+
+    @Test
+    fun `sniffer 404 NotMedia returns Unsupported with status code in reason`() = runTest {
+        coEvery { sniffer.sniff("https://example.com/missing.m3u8") } returns
+            SniffResult.NotMedia(
+                statusCode = 404,
+                contentType = null,
+                reason = "HTTP 404",
+            )
+
+        val r = useCase("https://example.com/missing.m3u8")
+        assertThat(r).isInstanceOf(ParseResult.Unsupported::class.java)
+        assertThat((r as ParseResult.Unsupported).reason).contains("404")
     }
 
     // ---- Unsupported / 边界 ----
