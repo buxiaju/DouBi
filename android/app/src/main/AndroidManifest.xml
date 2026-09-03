@@ -55,6 +55,19 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 阶段 9 v0.4.1：FileProvider 声明（res/xml/file_paths.xml 配置可分享路径）
+             - 「打开保存目录」按钮启动 ACTION_OPEN_DOCUMENT_TREE 时用
+             - 「分享单文件」功能用（v0.5.0+ 拓展） -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 
 </manifest>

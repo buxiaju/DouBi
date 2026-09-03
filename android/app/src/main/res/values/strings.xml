@@ -114,6 +114,12 @@
     <string name="settings_sniff_duration_sec_hint">5 - 60</string>
     <string name="settings_saved">已保存：%1$s</string>
 
+    <!-- 阶段 9 v0.4.1 启用：FileProvider + 「打开保存目录」按钮（C1） -->
+    <string name="settings_section_general">通用</string>
+    <string name="settings_open_save_dir">打开保存目录</string>
+    <string name="settings_open_save_dir_hint">选一个目录授权后系统文件管理器能浏览 DouBi 下载的文件</string>
+    <string name="settings_no_app_to_open_dir">没有可用的文件管理器</string>
+
     <!-- 阶段 7 启用：About / 隐私政策 -->
     <string name="settings_section_about">关于</string>
     <string name="settings_about">关于豆比下载</string>

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  阶段 9 v0.4.1：FileProvider 路径配置。
+
+  桌面版对照：桌面版无 FileProvider（直接 PyInstaller 自包含 FS），
+  Android 端从 Android 7+ 起 file:// URI 调起其他 App 抛 FileUriExposedException，
+  必须用 FileProvider(content://) 才能分享文件给外部 App。
+
+  路径配置：
+  - files-path：Context.filesDir/，应用私有目录
+    对应 "打开保存目录" 按钮启动的 ACTION_OPEN_DOCUMENT_TREE 流程
+    （用户授权后 takePersistableUriPermission 存的目录树 URL 解析后
+    映射回 Context.filesDir/downloads/<platform>/<author>/<media_type>）
+  - external-files-path：Context.getExternalFilesDir()，应用私有外部存储
+    （Android 10+ scoped storage 唯一可写路径）
+
+  v0.4.1 范围：
+  - 「打开保存目录」按钮：启动 ACTION_OPEN_DOCUMENT_TREE 让用户选目录授权
+  - 第一次授权后存 URL 到 DataStore，后续 navigate
+
+  v0.4.1 不做：
+  - takePersistableUriPermission + 目录树 navigate（v0.5.0 单独 PR）
+-->
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 应用私有内部存储：Context.filesDir/ -->
+    <files-path name="files" path="." />
+    <!-- 应用私有外部存储：Context.getExternalFilesDir()/ -->
+    <external-files-path name="external_files" path="." />
+    <!-- 公共下载目录（仅 Android 9-，Android 10+ scoped storage 限制） -->
+    <external-path name="external" path="Download/DouBi" />
+</paths>
