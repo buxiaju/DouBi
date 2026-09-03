@@ -10,10 +10,10 @@
 
 | | 状态 |
 |---|---|
-| 已完成 | 阶段 0 脚手架 ✅ ｜ 阶段 1 数据层 + 配置 ✅（Room Migration 链已显式化）｜ 阶段 2 下载引擎 ✅（重试退避已加）｜ 阶段 3 UI 框架 ✅（4 占位 tab + Hilt ViewModel）｜ 阶段 4 解析 + 列表 ✅（YouTubeUrl 分类 + MediaFormat + PromptOptionsDialog + DownloadRepository.enqueue 一条龙）｜ 阶段 5 下载 + 进度 + 完成通知 ✅（DownloadingScreen LazyColumn + speed/eta + 队列并发 3 + 三档通知）|
-| 待完成 | 阶段 6 历史 + 设置 ｜ 7 商店准备 |
-| 测试 | 单测 **158/158 全绿**（2026-09-02 实跑验证：46 → 64 → 99 → 153 → 158，+112 例）；仪器测试 10 个**写了但从未在真机执行**；jacoco 报告 LINE 30.7% / METHOD 42.1% / CLASS 29.0%（新 UI/Worker 增量未单测覆盖是预期，阶段 6 加 Compose UI test + instrumented 拉起来） |
-| 能跑什么 | Run 起来 4 个 tab 底栏可点；粘贴 tab 输入 URL → 解析 → 弹「下载选项」选 format + 容器 / 缩略图 / 字幕 / 续传 / 标题模板 → 入队 Worker；下载中 tab 看实时进度 + 速度 + ETA + 取消；`assembleDebug` 0 警告通过，APK 77.05 MB 含 4 ABI JNI 库 |
+| 已完成 | 阶段 0 脚手架 ✅ ｜ 阶段 1 数据层 + 配置 ✅（Room Migration 链已显式化）｜ 阶段 2 下载引擎 ✅（重试退避已加）｜ 阶段 3 UI 框架 ✅（4 占位 tab + Hilt ViewModel）｜ 阶段 4 解析 + 列表 ✅（YouTubeUrl 分类 + MediaFormat + PromptOptionsDialog + DownloadRepository.enqueue 一条龙）｜ 阶段 5 下载 + 进度 + 完成通知 ✅（DownloadingScreen LazyColumn + speed/eta + 队列并发 3 + 三档通知）｜ 阶段 6 历史 + 设置 ✅（HistoryScreen LazyColumn + 文件存在性检查 + SettingsScreen 5 组字段 + 5 底栏 tab）|
+| 待完成 | 阶段 7 商店准备 |
+| 测试 | 单测 **167/167 全绿**（2026-09-02 实跑验证：46 → 64 → 99 → 153 → 158 → 167，+121 例）；仪器测试 10 个**写了但从未在真机执行**；jacoco 报告 LINE 26.5% / METHOD 37.1% / CLASS 24.0%（新 UI/Worker/Repository 增量未单测覆盖是预期，阶段 7 加 Compose UI test + instrumented 拉起来） |
+| 能跑什么 | Run 起来 5 个 tab 底栏可点；粘贴 tab 输入 URL → 解析 → 弹「下载选项」选 format + 容器 / 缩略图 / 字幕 / 续传 / 标题模板 → 入队 Worker；下载中 tab 看实时进度 + 速度 + ETA + 取消；历史 tab 看 Room 记录 + 文件状态 + 重新下载；设置 tab 5 组字段改完即生效；`assembleDebug` 0 警告通过，APK 77.07 MB 含 4 ABI JNI 库 |
 | 构建环境 | ⚠️ 命令行必须用 AS 自带 JBR 25，系统 JDK 26 会挂在 `androidJdkImage`（[SETUP.md](docs/SETUP.md)） |
 
 **v0.1.0 收官前已还 7 笔欠账**：

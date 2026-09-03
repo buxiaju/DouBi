@@ -208,10 +208,21 @@
 - 重新下载功能 → 复用 phase 2 的 Worker 入口
 
 **验收**：
-- [ ] 历史列表按时间倒序
-- [ ] 「文件已删除」检测（与桌面版 `test_task_manager.py::test_restore` 对齐）
-- [ ] 设置改完立即生效（不用重启，桌面版 `config.py` 有「需重启」限制）
-- [ ] 阶段 6 复盘文档
+- [x] 历史列表按时间倒序
+- [x] 「文件已删除」检测（与桌面版 `test_task_manager.py::test_restore` 对齐，弱版：目录非空即存在）
+- [x] 设置改完立即生效（不用重启，桌面版 `config.py` 有「需重启」限制）
+- [x] 阶段 6 复盘文档（[phase-6.md](phases/phase-6.md)）
+
+**已完成（详见 [phase-6.md](phases/phase-6.md)）**：
+- DownloadWorker Success 路径补 `mediaItemDao.upsert(MediaItemEntity)`（v0.1 阶段 2 没写，给历史 tab 用）
+- sourceUrl 存进 `extra` JSON 字段（schema 冻结，借 extra 字段）
+- HistoryViewModel 订阅 `MediaItemDao.listRecentFlow()` + `Dispatchers.IO` 后台检查 `lastSaveDir` 文件存在
+- HistoryScreen LazyColumn + 文件状态图标 + 重新下载按钮 + Snackbar 反馈
+- SettingsViewModel 订阅 `AppConfigDataStore.observe()` + `updateField()` 单字段原子写
+- SettingsScreen LazyColumn 5 组 SectionCard（输出 / 画质容器 / 附加 / 网络 / 通知）
+- AppNavigation 加 SETTINGS 路由 + BottomNavItem 加 Settings icon
+- 单测 158 → 167 全绿（+9：HistoryViewModelTest 6 + SettingsViewModelTest 3）
+- assembleDebug 0 警告通过，APK 77.07 MB（+0.02 MB）
 
 ## 阶段 7：商店准备
 

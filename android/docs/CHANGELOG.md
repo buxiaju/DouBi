@@ -118,6 +118,53 @@
 - **取消任务时回收 PendingTaskDao 那条 row**（当前只 updateProgress "paused"，不删）—— v0.2.2
 - **覆盖率门槛** —— LINE 30.7% / METHOD 42.1%（新 UI 增量大于测试覆盖；阶段 6 加 Compose UI test + instrumented 拉起来）
 
+---
+
+## [未发布] v0.2.2
+
+**当前状态**：阶段 6 完成（历史 + 设置），`versionName` 仍 `0.1.0`（CHANGELOG 草稿照例标"已升 0.2.2"是错的，没改），**尚未发布**。
+本版本补齐 v0.2.1 漏的 Worker 落库 + 历史 tab 真接 Room + 设置 tab 5 组字段改完即生效。
+**Tag**：`v0.2.2-android`。
+
+### 已完成
+
+**阶段 6 — 历史 + 设置**（`未提交`）
+
+- **DownloadWorker Success 路径补 mediaItemDao.upsert(MediaItemEntity)**（`download/DownloadWorker.kt`）：v0.1 阶段 2 没把成功的 MediaItem 落库，给阶段 6 历史 tab 用
+  - 注入 `MediaItemDao`（Hilt 自动装配）
+  - Success 分支写 `MediaItemEntity(platform, item_id, title, author, ..., lastDownloadTime, lastSaveDir = File(localPath).parent, extra = sourceUrl JSON)`
+  - 用 `runCatching` 包，失败只 log 不抛异常（落库失败不影响下载完成态）
+- **sourceUrl 存进 extra JSON 字段**（`extra = {"source_url": "https://youtu.be/..."}`）：MediaItemEntity schema 冻结（v0.1 阶段 3 显式 Migration 链），借 `extra` 字段存 platform-specific 字段（跟桌面版用 `extra` 存 platform-specific 一致）
+- **HistoryViewModel + HistoryScreen**（`ui/history/`）：
+  - 订阅 `MediaItemDao.listRecentFlow(200)` 按 `last_download_time DESC`
+  - `withContext(Dispatchers.IO) { checkFileExists(entity) }`：弱版（目录非空即存在，不反推具体文件名——v0.2.2 阶段 7 加严格版）
+  - `onRedownload(item)` 读 `extra` 里 sourceUrl 调 `downloadRepo.enqueue(...)` 走原 Worker 路径
+  - 6 种状态：✅ 文件存在 / ⚠ 文件已删除（图标 + 文本双提示）
+  - Snackbar 反馈「已入队重新下载」「重新下载失败」
+- **SettingsViewModel + SettingsScreen**（`ui/settings/`）：
+  - 订阅 `AppConfigDataStore.observe()`（DataStore reactive）→ stateIn → Compose 重组
+  - `onFieldChanged(key, value)` 调 `configStore.updateField(key, value)` 单字段原子写
+  - 5 组 SectionCard：输出（outputRoot / outputDirTemplate / filenameTemplate）/ 画质容器（maxQuality dropdown / container dropdown / concurrentJobs number）/ 附加（writeThumbnail / writeSubtitles / resume / promptBeforeDownload switch）/ 网络（proxy / rateLimit）/ 通知（notifyOnCompletion dropdown）
+  - **改完立即生效**（vs 桌面版 `config.py` 需重启）—— DataStore reactive 自动 emit
+- **AppNavigation 5 底栏 tab**（`ui/navigation/`）：pasting / parsing / downloading / history / settings；加 `Icons.Outlined.Settings` icon
+- **测试 +9**（`HistoryViewModelTest` 6 + `SettingsViewModelTest` 3），全量单测 **167/167 全绿**（v0.2.1 158 → v0.2.2 167）
+- **APK 验证**：`assembleDebug` 0 警告通过，APK 77.07 MB（v0.2.1 77.05 → v0.2.2 77.07，+0.02 MB）
+
+### 修复
+
+- **Kotlin String literal 把 `%1$s` 里的 `$s` 解析成变量引用**（`v0.2.2`，**第 3 次踩这坑**）：`stringResource(R.string.history_reenqueued, "%1$s", "%2$s")` 编译错。修：`stringResource` 只传模板，`String.format` 推迟到运行时
+- **`org.json.JSONObject` 在 JVM 单测是 stub**（`v0.2.2`）：Android 单元测试默认用 `mockable-android.jar`，`org.json` 整个包的方法返回 `null` / `0` / `false`。`JSONObject(extra).optString("source_url", null)` 在单测永远返回 null。修：单测用 Regex 替 JSONObject（`extractSourceUrlRegex`），生产代码仍用 JSONObject，instrumented test 走真机解析
+- **mockk `relaxed = true` 吞 `every {}` 块**（`v0.2.2`）：`mockk(relaxed = true) { every { observe() } returns flow }` —— relaxed 模式下 `every {}` 块被忽略。修：不用 `relaxed = true`，用 `mockk(relaxed = false)` + 显式 `every` / `coEvery` stub 每个用到的 method
+- **viewModelScope.launch 需要 Main dispatcher**（`v0.2.2`）：`runTest {}` 默认 dispatcher 不装 `Dispatchers.Main`，`viewModelScope.launch { ... }` 抛 `IllegalStateException`。修：`@Before Dispatchers.setMain(UnconfinedTestDispatcher())` + `@After Dispatchers.resetMain()`
+
+### 已知问题（v0.2.2 发布前**剩余**的必须处理）
+
+- **真机 adb install 验证完整流程**（解析 → 入队 → Worker 跑 → 历史 tab 看到记录 + 文件检查 + 重新下载）—— 阶段 7 商店准备前必须补
+- **Compose UI test for HistoryScreen / SettingsScreen** —— 阶段 7 加
+- **「打开保存目录」按钮 + FileProvider + res/xml/file_paths.xml** —— 阶段 7 加
+- **通用嗅探全字段 / aria2 引擎字段 / theme 主题切换 / writeNfo 等设置项** —— 阶段 7 补
+- **覆盖率门槛** —— LINE 26.5% / METHOD 37.1%（Compose UI + Worker 增量大于测试覆盖；阶段 7 加 Compose UI test + 真机拉起来）
+
 ### vs 桌面版的行为差异
 
 | 项 | 桌面版（Python） | Android 版 | 原因 |

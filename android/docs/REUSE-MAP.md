@@ -66,10 +66,11 @@
 | `ui/workers.py` | ~200 | `data/repository/DownloadRepository.kt` + WorkManager | 1, 2 | ✅ 阶段 2 落地 |
 | `ui/pages/parse.py` | ~1000 | `ui/parse/ParseScreen.kt` + `ParseViewModel.kt` | 4 | ✅ 阶段 4 落地（`PastingScreen` + `PromptOptionsDialog` + `ParseAndExpandUseCase`，名字差异：Android 用 Pasting 不用 Parse） |
 | `ui/pages/download.py` | ~600 | `ui/downloading/DownloadingScreen.kt` + `DownloadingViewModel.kt` | 5 | ✅ 阶段 5 落地——`LazyColumn` 渲染 `TaskRow`（title / 进度条 / `Progress.statusLine()` / 取消按钮 / 6 种 `DisplayStatus` 颜色） |
-| `ui/pages/history.py` | ~300 | `ui/history/HistoryScreen.kt` | 6 | ❌ 未落地 |
-| `ui/pages/settings.py` | ~400 | `ui/settings/SettingsScreen.kt` | 6 | ❌ 未落地 |
+| `ui/pages/history.py` | ~300 | `ui/history/HistoryScreen.kt` + `HistoryViewModel.kt` | 6 | ✅ 阶段 6 落地——`LazyColumn` 渲染 `MediaItemEntity`（按 `last_download_time DESC`）+ 文件存在性检查（弱版：目录非空即存在）+ 重新下载 |
+| `ui/pages/settings.py` | ~400 | `ui/settings/SettingsScreen.kt` + `SettingsViewModel.kt` | 6 | ✅ 阶段 6 落地——`LazyColumn` 5 组 `SectionCard`（输出 / 画质容器 / 附加 / 网络 / 通知），DataStore reactive 改完立即生效（vs 桌面版需重启） |
 | `ui/task_manager.py` | ~400 | `data/repository/DownloadRepository.kt`（融合 Download + TaskManager） | 1, 5 | 🟡 入队 / 状态写库 / 取消 / 队列并发 3 已有，**任务管理**（暂停 / 恢复 / 重下）未做 |
 | `ui/tray.py:TrayController.notify_on_completion` | ~50 | `download/NotificationHelper.notifyByCompletionMode` | 5 | ✅ 阶段 5 落地——三档路由（success / all / summary），cancelled 不发通知 |
+| `core/storage/database.py:Database.record_download` | ~30 | `download/DownloadWorker` Success 路径调 `mediaItemDao.upsert(MediaItemEntity)` | 6 | ✅ 阶段 6 落地——sourceUrl 存进 `extra` JSON 字段（schema 冻结，借 extra 字段） |
 | `ui/auth_actions.py` | ~300 | v0.2+（账号登录放 v0.2 起） | v0.2 | ⏸️ 首版不做 |
 | `ui/dialogs/login_dialog.py` | ~200 | v0.2+ | v0.2 | ⏸️ 首版不做 |
 | `ui/dialogs/prompt_options_dialog.py` | ~250 | `ui/parse/PromptOptionsDialog.kt` | 4 | ❌ 未落地 |
