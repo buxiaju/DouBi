@@ -227,6 +227,38 @@
 
 ---
 
+## [未发布] v0.4.0
+
+**当前状态**：阶段 8 完成（通用嗅探），`versionName` 改为 `0.4.0` + `versionCode=6`，**尚未发布**。
+本版本把 v0.1 阶段 4 写的"通用 m3u8 / mp4 直链"升级为"任意 http(s) URL 通用嗅探"——用户贴任何视频直链都能解析，**Sniffer 嗅探到 media 后才让 Engine 下载**，避免 yt-dlp 拿 HTML 页面去嗅探浪费 15s+。
+**Tag**：`v0.4.0-android`。
+
+### 已完成
+
+**阶段 8 — 通用嗅探**（`未提交`）
+
+- **Sniffer interface + SniffResult sealed**（`core/sniffer/Sniffer.kt` + `SniffResult.kt`）：1:1 对拍桌面版 `src/doubi/core/sniffer.py:Sniffer`。`SniffResult.Media`（带 `contentType` / `finalUrl` / `contentLength` / `isHls`）/ `NotMedia`（带 `statusCode` / `reason`）/ `Error`（带 `cause`）三分支，sealed 让 ParseAndExpandUseCase 显式处理每个分支
+- **HttpContentTypeSniffer**（`core/sniffer/HttpContentTypeSniffer.kt`）：OkHttp `HEAD` 请求 + `isMediaContentType` 判定（覆盖 `video/_` / `audio/_` / `application/vnd.apple.mpegurl` / `application/x-mpegurl` / `application/octet-stream` / `binary/octet-stream`）。OkHttp client 走 `SnifferModule` 提供的 10s connect / 10s read / `followRedirects=true` / `followSslRedirects=true` 配置
+- **SnifferModule Hilt 装配**（`core/sniffer/di/SnifferModule.kt`）：`@Provides @Singleton fun provideOkHttpClient()` 10s connect / 10s read + followRedirects；`@Binds abstract fun bindSniffer(impl: HttpContentTypeSniffer): Sniffer`。**v0.1 阶段 1 加进 dependencies 的 OkHttp 第一次真用上**
+- **ParseAndExpandUseCase 集成 Sniffer 路径**：YouTube ❌ → youtube 域名非视频 ❌ → **Sniffer 嗅探** → Media(DirectLink) / NotMedia(Unsupported) / Error(降级 yt-dlp)。Sniffer Error 时降级让 yt-dlp 自己嗅探，保留 v0.1 阶段 4 兜底路径
+- **PastingScreen 加 Sniffing 状态**（`ui/pasting/PastingViewModel.kt` + `PastingScreen.kt`）：新 `ParseStatus.Sniffing` object；UI 用 `isLoading` 合并 Parsing + Sniffing 显示 CircularProgressIndicator，但 loadingText 区分（"解析中…" vs "嗅探中…"）。`onParseClicked()` 调 use case 前先按 URL 预判（YouTube → Parsing，其他 → Sniffing）让用户看到正确提示
+- **单测 16 例新增**（v0.3.0 167 → v0.4.0 183）：
+  - `HttpContentTypeSnifferTest` 13 例：mp4 / m3u8 / webm / octet-stream / audio / 混合大小写 Content-Type / HTML 页面 NotMedia / 404 / 500 / SocketTimeout / UnknownHost / 重定向链 finalUrl / x-mpegurl variant
+  - `ParseAndExpandUseCaseTest` +3 例：`sniffer NotMedia (HTML page) returns Unsupported` / `sniffer Error (network failure) falls back to yt-dlp probe` / `sniffer 404 NotMedia returns Unsupported with status code`
+
+### 修复
+
+- **OkHttp 4.x `Response.close()` 在 body=null 时抛 IllegalStateException**（`v0.4.0`）：mockk `every { resp.close() } returns Unit` 注册时会真执行一次 close 测返回值，OkHttp 4.12 的 `Response.close()` 在 builder 没设 body 时抛 `response is not eligible for a body and must not be closed`。**修法**：Sniffer 用 `try { ... } finally { headResp.body?.close() }` 手动 null-safe close，测试不要 stub `close()`
+- **Sniffer 构造器 `.newBuilder()...build()` 二次配置导致 mock 注入难**（`v0.4.0`）：原本想在 Sniffer 内再次配置超时 / 重定向，让 OkHttp client 跟生产环境的 Retrofit 区分。但 mock 注入的 OkHttpClient `newBuilder()` 是 final method，mockk relaxed=true 才能模拟，**测试要写更复杂的 stub**。**修法**：去掉 Sniffer 内的 `newBuilder()` 二次配置，所有超时 / 重定向统一由 `SnifferModule.provideOkHttpClient()` 配
+- **Kotlin 注释 `video/_` 跟 `audio/_` 嵌套触发**（`v0.4.0`）：注释里 `video/_` + `/` 触发了 Kotlin 注释的**嵌套**语义（Kotlin 跟 Java 不同——Java `/_ _/` 不允许嵌套，Kotlin 允许 `/_ 外层_/_ 内层_/`）。第一个 `*/` 关闭内层注释，外层没人关，整个文件都被当作注释块。**修法**：KSP 报错说 "L80 Missing '}'" 跟 "L103 Unclosed comment"——把注释里所有 `video/_` / `audio/_` 改写成 `video_(any)` / `audio_(any)`。**第 3 次踩** Kotlin 注释嵌套坑（前两次 v0.1 阶段 1/2）
+
+### 已知问题（v0.4.0 不做，留 v0.5.0+）
+
+- **headless browser 嗅探**（WebView load URL + 拦截 m3u8 请求）—— 覆盖 B 站 / 抖音主页 / Twitter 视频页等"页面 JS 异步加载"的网站。**v0.4.0 不做**：单版本太大 + 跨进程 JS 桥接 + 风险评估（headless 嗅探可能触发网站反爬），**留 v0.5.0 跟 B 站 / 抖音 adapter 一起做**
+- **B 站 / 抖音 / Twitter 等具体平台 adapter** —— 平台 WBI 签名 / click web API / 抖音 X-Bogus 都需要单独 adapter 适配，**v0.5.0 单独 PR**
+
+---
+
 ## 维护约定
 
 - 每个阶段收尾时，把该阶段的 Added / Fixed 补进「未发布」段，并在 [`phases/`](phases/) 写复盘文档

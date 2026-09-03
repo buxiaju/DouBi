@@ -17,7 +17,8 @@
 | 4 | 解析 + 列表 | 粘贴 URL → 解析 → 表格展示候选 → 选清晰度 | ⬜ 未开始 | 1.5 周 |
 | 5 | 下载 + 进度 + 完成通知 | 接 phase 2 的 Worker；进度条实时更新；完成弹系统通知 | ⬜ 未开始 | 1 周 |
 | 6 | 历史 + 设置 | 历史列表真实查询；设置项可改可保存 | ⬜ 未开始 | 1 周 |
-| 7 | 商店准备 | ProGuard/R8 规则、签名配置、隐私政策页、图标 | ⬜ 未开始 | 1 周 |
+| 7 | 商店准备 | ProGuard/R8 规则、签名配置、隐私政策页、图标 | ✅ 完成（v0.3.0） | 1 周 |
+| 8 | 通用嗅探 | 任意 http(s) URL 嗅探 m3u8/mp4；OkHttp + Content-Type 判定 | ✅ 完成（v0.4.0） | 1 周 |
 
 **预计总工期**：6-8 周一人（不含商店审核 1-3 天）
 
@@ -264,3 +265,41 @@
 阶段 7 完成 → 提 Play Console 审核 → 1-3 天过审 → 上线 v0.1.0。
 
 之后进入迭代期（v0.2 / v0.3），按需扩 B 站 / 抖音 / 通用嗅探（参考 [REUSE-MAP.md](REUSE-MAP.md)）。
+
+---
+
+## 阶段 8：通用嗅探 ✅ 完成（v0.4.0）
+
+**目标**：v0.1 阶段 4 写的"通用 m3u8 / mp4 直链"是写死的——只有用户贴 `.m3u8` / `.mp4` 结尾的 URL 才走 DirectLink，其他全部走 yt-dlp 兜底。本阶段把"直链判定"从**扩展名匹配**升级为**HTTP 嗅探**：任意 http(s) URL 先发 HEAD 看 Content-Type，识别为 m3u8 / mp4 / webm / octet-stream → DirectLink；其他 → NotMedia 或 yt-dlp 兜底。
+
+1:1 对拍桌面版 `src/doubi/core/sniffer.py:HttpContentTypeSniffer`（v0.4.0 简版——**不做 headless browser**）。
+
+**为什么拆成 v0.4.0 通用嗅探 + v0.5.0 B 站/抖音 两版**：
+- v0.4.0 只用 OkHttp HEAD（HTTP 层），10s connect / 10s read，**单版本可控**
+- v0.5.0 要做 headless browser（WebView load URL + 拦截 m3u8 请求），需要 WebView 集成 + 跨进程 JS 桥接 + 风险评估（headless 嗅探可能触发网站反爬）——单版本太大，跟 B 站 / 抖音 adapter 一起做
+- B 站 / 抖音 / Twitter 等具体平台 adapter（平台 WBI 签名 / click web API / 抖音 X-Bogus）也放 v0.5.0
+
+**预计工期**：1 周
+
+**验收项**：
+- [x] Sniffer interface + SniffResult sealed 落地
+- [x] HttpContentTypeSniffer OkHttp HEAD 实现（10s 超时 + follow redirects）
+- [x] SnifferModule Hilt 装配
+- [x] ParseAndExpandUseCase 集成 Sniffer 路径（YouTube ❌ → youtube 域名非视频 ❌ → Sniffer → Media / NotMedia / Error 降级）
+- [x] PastingScreen Sniffing 状态提示（"嗅探中…" 区别 Parsing "解析中…"）
+- [x] 单测 HttpContentTypeSniffer 13 例 + ParseAndExpandUseCase +3 例
+- [x] 阶段 8 复盘文档（[phase-8.md](phases/phase-8.md)）
+
+**已完成（详见 [phase-8.md](phases/phase-8.md)）**：
+- Sniffer interface + SniffResult sealed（Media / NotMedia / Error 三分支）
+- HttpContentTypeSniffer（OkHttp HEAD + isMediaContentType 覆盖 video/_ / audio/_ / m3u8 / octet-stream）
+- SnifferModule Hilt 装配（provide OkHttpClient 10s connect / 10s read + followRedirects）
+- ParseAndExpandUseCase 集成 Sniffer 路径：YouTube ❌ → youtube 域名非视频 ❌ → Sniffer → Media(DirectLink) / NotMedia(Unsupported) / Error(降级 yt-dlp)
+- PastingScreen Sniffing 状态提示（"嗅探中…" 区别 Parsing "解析中…"）
+- 单测 16 例新增（HttpContentTypeSnifferTest 13 + ParseAndExpandUseCaseTest +3）
+
+### 不做（留 v0.5.0+）
+
+- headless browser 嗅探（WebView load URL + 拦截 m3u8 请求）—— 覆盖 B 站 / 抖音主页 / Twitter 视频页等"页面 JS 异步加载"的网站
+- B 站 / 抖音 / Twitter 等具体平台 adapter（平台 WBI 签名 / click web API / 抖音 X-Bogus）
+- 容器展开（YouTube playlist / 抖音合集 / B 站收藏夹）—— v0.5.0+ 用 desktop 同样的 `expand` 接口扩展
