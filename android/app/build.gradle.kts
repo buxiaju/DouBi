@@ -42,6 +42,42 @@ android {
         }
     }
 
+    // 阶段 9 v0.4.1：自用 release keystore 走 gradle.properties 环境变量。
+    // keystore 跟密码**本地**生成，**不进 git**——用户在 `~/.gradle/gradle.properties`
+    // 配 `DOUBI_RELEASE_STORE_FILE` / `DOUBI_RELEASE_STORE_PASSWORD` /
+    // `DOUBI_RELEASE_KEY_ALIAS` / `DOUBI_RELEASE_KEY_PASSWORD` 四个变量。
+    //
+    // 生成 keystore（一次性）：
+    //   $ANDROID_JBR/bin/keytool -genkey -v \
+    //     -keystore ~/.android/doubi-release.keystore \
+    //     -alias doubi -keyalg RSA -keysize 2048 -validity 10000 \
+    //     -storepass <password> -keypass <password> \
+    //     -dname "CN=DouBi,O=Self-Use,C=CN"
+    //
+    // 缺失任何一个变量 → build 立即报错（不静默回退 debug keystore）。
+    signingConfigs {
+        create("release") {
+            val storeFilePath = providers.gradleProperty("DOUBI_RELEASE_STORE_FILE")
+                .orElse(providers.environmentVariable("DOUBI_RELEASE_STORE_FILE"))
+                .orNull
+                ?: error("release keystore 未配置：在 ~/.gradle/gradle.properties 设 DOUBI_RELEASE_STORE_FILE（路径）")
+            // Windows 反斜杠会被 file() 当转义字符吃掉，强制走 absoluteFile 转绝对路径
+            storeFile = file(storeFilePath).absoluteFile
+            storePassword = providers.gradleProperty("DOUBI_RELEASE_STORE_PASSWORD")
+                .orElse(providers.environmentVariable("DOUBI_RELEASE_STORE_PASSWORD"))
+                .orNull
+                ?: error("release keystore 密码未配置：在 ~/.gradle/gradle.properties 设 DOUBI_RELEASE_STORE_PASSWORD")
+            keyAlias = providers.gradleProperty("DOUBI_RELEASE_KEY_ALIAS")
+                .orElse(providers.environmentVariable("DOUBI_RELEASE_KEY_ALIAS"))
+                .orNull
+                ?: error("release key alias 未配置：在 ~/.gradle/gradle.properties 设 DOUBI_RELEASE_KEY_ALIAS")
+            keyPassword = providers.gradleProperty("DOUBI_RELEASE_KEY_PASSWORD")
+                .orElse(providers.environmentVariable("DOUBI_RELEASE_KEY_PASSWORD"))
+                .orNull
+                ?: error("release key 密码未配置：在 ~/.gradle/gradle.properties 设 DOUBI_RELEASE_KEY_PASSWORD")
+        }
+    }
+
     buildTypes {
         debug {
             isMinifyEnabled = false
@@ -57,9 +93,12 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            // 阶段 7：复用 debug keystore 做 release 签名（v0.3.0 上架前请替换
-            // 为 Google Play App Signing 上传的真正签名密钥——见 phase-7.md 收尾清单）
-            signingConfig = signingConfigs.getByName("debug")
+            // 阶段 9 v0.4.1 自用策略：release 签名读 ~/.gradle/gradle.properties 里的
+            // 自用 keystore 信息。keystore 跟密码**不进 git**——本地生成。
+            //
+            // 缺失时的行为：build 报「找不到 release keystore」错误，不静默回退到
+            // debug keystore（v0.3.0 阶段 7 的临时方案，自用场景下不再需要）。
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 
