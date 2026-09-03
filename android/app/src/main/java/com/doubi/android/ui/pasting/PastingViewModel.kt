@@ -8,6 +8,7 @@ import com.doubi.android.core.model.MediaFormat
 import com.doubi.android.core.model.MediaItem
 import com.doubi.android.core.pipeline.ParseAndExpandUseCase
 import com.doubi.android.core.pipeline.ParseResult
+import com.doubi.android.core.platform.youtube.YouTubeUrl
 import com.doubi.android.data.config.AppConfigDataStore
 import com.doubi.android.data.repository.DownloadRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -27,9 +28,10 @@ import javax.inject.Inject
  *
  * 状态机（[ParseStatus]）：
  * - `Idle`         —— 初始 / 反馈消息消费后
- * - `Parsing`      —— onParseClicked 调 use case 中
+ * - `Parsing`      —— onParseClicked 调 use case 中，URL 命中 YouTube
+ * - `Sniffing`     —— 阶段 8 v0.4.0：URL 非 YouTube，Sniffer 嗅探中（HEAD 10s 超时上限）
  * - `AwaitingConfirm(item, formats, seedOptions)` —— 解析成功，等用户在 Dialog 里选
- * - `Unsupported(reason)` —— 不支持的 URL（不是 http(s) / YouTube 频道 / 空串）
+ * - `Unsupported(reason)` —— 不支持的 URL（不是 http(s) / YouTube 频道 / 空串 / 非 m3u8/mp4）
  * - `Enqueued(taskId)` —— 入队成功，UI 用 snackbar 一次性反馈
  * - `Failure(error)` —— use case 抛异常 / 入队失败
  *
@@ -58,7 +60,15 @@ class PastingViewModel @Inject constructor(
             }
             return
         }
-        _state.update { it.copy(parseStatus = ParseStatus.Parsing) }
+        // 阶段 8 v0.4.0：根据 URL 类型预判是 Parsing（YouTube）还是 Sniffing（其他）。
+        // UI 用这个状态切提示文字（"正在解析..." vs "正在嗅探..."）。YouTube 路径
+        // 不走 Sniffer（v0.4.0 范围），所以 UI 文字也应该不一样。
+        val initialStatus = if (YouTubeUrl.toWatchUrlOrNull(url) != null) {
+            ParseStatus.Parsing
+        } else {
+            ParseStatus.Sniffing
+        }
+        _state.update { it.copy(parseStatus = initialStatus) }
         viewModelScope.launch {
             try {
                 val result = parseAndExpand(url)
@@ -171,6 +181,8 @@ class PastingViewModel @Inject constructor(
     sealed class ParseStatus {
         object Idle : ParseStatus()
         object Parsing : ParseStatus()
+        /** 阶段 8 v0.4.0：URL 非 YouTube，Sniffer 嗅探中。UI 提示"正在嗅探..."。 */
+        object Sniffing : ParseStatus()
         data class AwaitingConfirm(
             val item: MediaItem,
             val formats: List<MediaFormat>,

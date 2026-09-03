@@ -55,9 +55,22 @@ fun PastingScreen(
     val parseFailedMsg = stringResource(R.string.pasting_parse_failed, "%s")
     val urlEmptyMsg = stringResource(R.string.pasting_url_empty)
     val parsingMsg = stringResource(R.string.pasting_parsing)
+    // 阶段 8 v0.4.0：Sniffing 状态提示。Sniffer 在嗅探非 YouTube URL（HEAD 10s 上限），
+    // 跟 Parsing 区别开让用户知道"为啥这条 URL 卡了一会"。
+    val sniffingMsg = stringResource(R.string.pasting_sniffing)
     // 注意：不能直接 stringResource(R.string.pasting_queue_full, "%1$d", "%2$d")，
     // 因为 Kotlin String literal 会把 "$d" 解析成变量引用。改成读模板 + String.format。
     val queueFullTemplate = stringResource(R.string.pasting_queue_full)
+
+    // 阶段 8 v0.4.0：Loading 状态合集。Parsing（YouTube） + Sniffing（其他 URL）都是
+    // "等 use case 返回"中——共享一个 CircularProgressIndicator，仅文案不同。
+    val isLoading = state.parseStatus is PastingViewModel.ParseStatus.Parsing ||
+        state.parseStatus is PastingViewModel.ParseStatus.Sniffing
+    val loadingText = if (state.parseStatus is PastingViewModel.ParseStatus.Sniffing) {
+        sniffingMsg
+    } else {
+        parsingMsg
+    }
 
     LaunchedEffect(state.parseStatus) {
         when (val s = state.parseStatus) {
@@ -103,22 +116,21 @@ fun PastingScreen(
                 onValueChange = viewModel::onUrlChanged,
                 label = { Text(stringResource(R.string.pasting_hint)) },
                 singleLine = true,
-                enabled = state.parseStatus !is PastingViewModel.ParseStatus.Parsing,
+                enabled = !isLoading,
                 modifier = Modifier.fillMaxWidth(),
             )
             Button(
                 onClick = { viewModel.onParseClicked() },
-                enabled = state.url.isNotBlank()
-                    && state.parseStatus !is PastingViewModel.ParseStatus.Parsing,
+                enabled = state.url.isNotBlank() && !isLoading,
             ) {
-                if (state.parseStatus is PastingViewModel.ParseStatus.Parsing) {
+                if (isLoading) {
                     CircularProgressIndicator(
                         modifier = Modifier
                             .padding(end = 8.dp)
                             .fillMaxWidth(0.1f),
                         strokeWidth = 2.dp,
                     )
-                    Text(parsingMsg)
+                    Text(loadingText)
                 } else {
                     Text(stringResource(R.string.pasting_action))
                 }

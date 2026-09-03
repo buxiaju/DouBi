@@ -49,6 +49,8 @@
 
     <!-- 阶段 4 启用：PastingScreen 反馈消息 -->
     <string name="pasting_parsing">解析中…</string>
+    <!-- 阶段 8 v0.4.0 启用：Sniffer 嗅探中（非 YouTube URL 走通用嗅探） -->
+    <string name="pasting_sniffing">嗅探中…</string>
     <string name="pasting_unsupported">不支持的链接：%1$s</string>
     <string name="pasting_enqueued">已入队：%1$s</string>
     <string name="pasting_parse_failed">解析失败：%1$s</string>
