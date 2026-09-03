@@ -29,6 +29,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -82,12 +83,42 @@ fun SettingsScreen(
     }
 
     val config = state.config
+    val context = LocalContext.current
+    val noAppMsg = stringResource(R.string.settings_no_app_to_open_dir)
     Box(modifier = modifier.fillMaxSize()) {
         LazyColumn(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
             modifier = Modifier.fillMaxSize(),
         ) {
+            item { SectionHeader(stringResource(R.string.settings_section_general)) }
+            item {
+                ActionRow(
+                    label = stringResource(R.string.settings_open_save_dir),
+                    hint = stringResource(R.string.settings_open_save_dir_hint),
+                    buttonText = stringResource(R.string.settings_open_save_dir),
+                    onClick = {
+                        // 阶段 9 v0.4.1：启动系统文件选择器让用户授权 DouBi 下载目录。
+                        // ACTION_OPEN_DOCUMENT_TREE 是 Android 5+ 标准 API，无需权限。
+                        // v0.4.1 简化版：只启动 intent，不处理 onActivityResult 拿 takePersistableUriPermission
+                        // （v0.5.0+ 拓展 navigate）。即使用户没授权，下完文件后他能用系统文件管理器
+                        // 浏览 /sdcard/Android/data/com.doubi.android/files/Downloads/ 也行。
+                        val intent = android.content.Intent(
+                            android.content.Intent.ACTION_OPEN_DOCUMENT_TREE,
+                        ).apply {
+                            flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                        }
+                        try {
+                            context.startActivity(intent)
+                        } catch (e: android.content.ActivityNotFoundException) {
+                            android.widget.Toast.makeText(
+                                context, noAppMsg, android.widget.Toast.LENGTH_SHORT,
+                            ).show()
+                        }
+                    },
+                )
+            }
+
             item { SectionHeader(stringResource(R.string.settings_section_output)) }
             item {
                 TextFieldRow(
@@ -199,6 +230,138 @@ fun SettingsScreen(
                     value = config.notifyOnCompletion,
                     options = listOf("success", "all", "summary"),
                     onValueChange = { viewModel.onFieldChanged("notify_on_completion", it) },
+                )
+            }
+
+            // ---- 阶段 9 v0.4.1：主题切换 ----
+            item { SectionHeader(stringResource(R.string.settings_section_theme)) }
+            item {
+                // 把显示文字提到 Composable 顶层（lambda 内不能调 stringResource）
+                val themeSystemText = stringResource(R.string.settings_theme_system)
+                val themeLightText = stringResource(R.string.settings_theme_light)
+                val themeDarkText = stringResource(R.string.settings_theme_dark)
+                DropdownRow(
+                    label = stringResource(R.string.settings_theme),
+                    value = themeDisplay(config.theme),
+                    options = listOf(themeSystemText, themeLightText, themeDarkText),
+                    onValueChange = { display ->
+                        val key = when (display) {
+                            themeLightText -> "default_light"
+                            themeDarkText -> "default_dark"
+                            else -> "system"
+                        }
+                        viewModel.onFieldChanged("theme", key)
+                    },
+                )
+            }
+
+            // ---- 阶段 9 v0.4.1：重复下载策略 ----
+            item { SectionHeader(stringResource(R.string.settings_section_duplicate)) }
+            item {
+                val dupSkipText = stringResource(R.string.settings_duplicate_skip)
+                val dupRedownloadText = stringResource(R.string.settings_duplicate_redownload)
+                val dupAskText = stringResource(R.string.settings_duplicate_ask)
+                DropdownRow(
+                    label = stringResource(R.string.settings_duplicate_policy),
+                    value = duplicateDisplay(config.duplicatePolicy),
+                    options = listOf(dupSkipText, dupRedownloadText, dupAskText),
+                    onValueChange = { display ->
+                        val key = when (display) {
+                            dupRedownloadText -> "redownload"
+                            dupAskText -> "ask"
+                            else -> "skip"
+                        }
+                        viewModel.onFieldChanged("duplicate_policy", key)
+                    },
+                )
+            }
+
+            // ---- 阶段 9 v0.4.1：附加 NFO / metadata.json / 弹幕 ----
+            item { SectionHeader(stringResource(R.string.settings_section_attach_extra)) }
+            item {
+                SwitchRow(
+                    label = stringResource(R.string.settings_write_nfo),
+                    checked = config.writeNfo,
+                    onCheckedChange = { viewModel.onFieldChanged("write_nfo", it) },
+                )
+            }
+            item {
+                SwitchRow(
+                    label = stringResource(R.string.settings_write_metadata_json),
+                    checked = config.writeMetadataJson,
+                    onCheckedChange = { viewModel.onFieldChanged("write_metadata_json", it) },
+                )
+            }
+            item {
+                SwitchRow(
+                    label = stringResource(R.string.settings_write_danmaku),
+                    checked = config.writeDanmaku,
+                    onCheckedChange = { viewModel.onFieldChanged("write_danmaku", it) },
+                )
+            }
+
+            // ---- 阶段 9 v0.4.1：下载引擎（含 aria2 占位）----
+            item { SectionHeader(stringResource(R.string.settings_engine)) }
+            item {
+                DropdownRow(
+                    label = stringResource(R.string.settings_engine),
+                    value = config.engine,
+                    options = listOf("yt-dlp", "aria2"),
+                    onValueChange = { viewModel.onFieldChanged("engine", it) },
+                )
+            }
+            if (config.engine == "aria2") {
+                item {
+                    TextFieldRow(
+                        label = stringResource(R.string.settings_aria2_rpc_url),
+                        value = config.aria2RpcUrl,
+                        onValueChange = { viewModel.onFieldChanged("aria2_rpc_url", it.ifBlank { null }) },
+                        hint = stringResource(R.string.settings_aria2_rpc_url_hint),
+                    )
+                }
+            }
+
+            // ---- 阶段 9 v0.4.1：通用嗅探（5 字段）----
+            item { SectionHeader(stringResource(R.string.settings_section_sniff)) }
+            item {
+                SwitchRow(
+                    label = stringResource(R.string.settings_sniff_enabled),
+                    checked = config.sniffEnabled,
+                    onCheckedChange = { viewModel.onFieldChanged("sniff_enabled", it) },
+                )
+            }
+            item {
+                TextFieldRow(
+                    label = stringResource(R.string.settings_sniff_duration_sec),
+                    value = config.sniffDurationSec.toString(),
+                    onValueChange = { v ->
+                        val n = v.toIntOrNull() ?: return@TextFieldRow
+                        viewModel.onFieldChanged("sniff_duration_sec", n)
+                    },
+                    hint = stringResource(R.string.settings_sniff_duration_sec_hint),
+                    keyboardType = KeyboardType.Number,
+                )
+            }
+            item {
+                SwitchRow(
+                    label = stringResource(R.string.settings_sniff_headless),
+                    checked = config.sniffHeadless,
+                    onCheckedChange = { viewModel.onFieldChanged("sniff_headless", it) },
+                )
+            }
+            item {
+                TextFieldRow(
+                    label = stringResource(R.string.settings_sniff_user_agent),
+                    value = config.sniffUserAgent,
+                    onValueChange = { viewModel.onFieldChanged("sniff_user_agent", it) },
+                    hint = stringResource(R.string.settings_sniff_user_agent_hint),
+                )
+            }
+            item {
+                SwitchRow(
+                    label = stringResource(R.string.settings_sniff_auto_play),
+                    checked = config.sniffAutoPlay,
+                    onCheckedChange = { viewModel.onFieldChanged("sniff_auto_play", it) },
                 )
             }
         }
@@ -315,4 +478,73 @@ private fun DropdownRow(
             }
         }
     }
+}
+
+/**
+ * 阶段 9 v0.4.1 启用：「打开保存目录」按钮行。
+ *
+ * 跟 [SwitchRow] / [DropdownRow] 不一样：纯动作按钮，不绑字段。点击调 onClick
+ * 启动 Intent（如 ACTION_OPEN_DOCUMENT_TREE 打开系统文件选择器）。
+ */
+@Composable
+private fun ActionRow(
+    label: String,
+    hint: String,
+    buttonText: String,
+    onClick: () -> Unit,
+) {
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+        ),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 4.dp),
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                if (hint.isNotBlank()) {
+                    Text(
+                        text = hint,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            TextButton(onClick = onClick) {
+                Text(buttonText)
+            }
+        }
+    }
+}
+
+/**
+ * 阶段 9 v0.4.1 启用：把 AppConfig.theme 内部 key 翻译成 UI 显示文字。
+ *
+ * AppConfig 内部用 `"default_light"` / `"default_dark"` / `"system"`（v0.4.1 引入
+ * "system"），UI 用本地化字符串。未知值（v0.1 老配置 / 用户瞎写）回退到
+ * "跟随系统"——保守默认值。
+ */
+@Composable
+private fun themeDisplay(key: String): String = when (key) {
+    "default_light" -> stringResource(R.string.settings_theme_light)
+    "default_dark" -> stringResource(R.string.settings_theme_dark)
+    else -> stringResource(R.string.settings_theme_system)
+}
+
+/**
+ * 阶段 9 v0.4.1 启用：把 AppConfig.duplicatePolicy 内部 key 翻译成 UI 显示文字。
+ */
+@Composable
+private fun duplicateDisplay(key: String): String = when (key) {
+    "redownload" -> stringResource(R.string.settings_duplicate_redownload)
+    "ask" -> stringResource(R.string.settings_duplicate_ask)
+    else -> stringResource(R.string.settings_duplicate_skip)
 }

@@ -99,6 +99,8 @@ class AppConfigDataStore(
                 "proxy" -> prefs[ConfigKeys.PROXY] = (value as? String) ?: ""
                 "rate_limit" -> prefs[ConfigKeys.RATE_LIMIT] = (value as? String) ?: ""
                 "aria2_secret" -> prefs[ConfigKeys.ARIA2_SECRET] = (value as? String) ?: ""
+                "aria2_rpc_url" -> prefs[ConfigKeys.ARIA2_RPC_URL] = (value as? String) ?: DEFAULTS.aria2RpcUrl
+                "sniff_user_agent" -> prefs[ConfigKeys.SNIFF_USER_AGENT] = (value as? String) ?: ""
                 "sniff_capture_types" -> {
                     @Suppress("UNCHECKED_CAST")
                     prefs[ConfigKeys.SNIFF_CAPTURE_TYPES] =
@@ -114,6 +116,11 @@ class AppConfigDataStore(
                 "write_metadata_json" -> prefs[ConfigKeys.WRITE_METADATA_JSON] = value as Boolean
                 "prompt_before_download" -> prefs[ConfigKeys.PROMPT_BEFORE_DOWNLOAD] = value as Boolean
                 "resume" -> prefs[ConfigKeys.RESUME] = value as Boolean
+                "filename_template" -> prefs[ConfigKeys.FILENAME_TEMPLATE] = (value as? String) ?: DEFAULTS.filenameTemplate
+                "output_root" -> prefs[ConfigKeys.OUTPUT_ROOT] = (value as? String) ?: DEFAULTS.outputRoot
+                "output_dir_template" -> prefs[ConfigKeys.OUTPUT_DIR_TEMPLATE] = (value as? String) ?: DEFAULTS.outputDirTemplate
+                "container" -> prefs[ConfigKeys.CONTAINER] = (value as? String) ?: DEFAULTS.container
+                "max_quality" -> prefs[ConfigKeys.MAX_QUALITY] = (value as? String) ?: DEFAULTS.maxQuality
                 else -> throw IllegalArgumentException("Unknown config key: $key")
             }
         }

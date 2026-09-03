@@ -64,13 +64,15 @@ object ConfigValidator {
         else DEFAULTS.language
 
     /**
-     * 主题白名单。v0.1 Android 端只支持 2 套（default_light / default_dark），
-     * 阶段 3 扩到 7 套（与桌面版 ui/theme.py 对齐）后再放宽。
+     * 主题白名单。阶段 9 v0.4.1 扩展 3 套（default_light / default_dark / system）：
+     * - `default_light` 强制亮色
+     * - `default_dark` 强制暗色
+     * - `system` 跟系统（`isSystemInDarkTheme()`）
      * 桌面版 `theme` 是字符串但 `resolve_theme` 容忍未知值（找不到时回退默认）；
      * Android 端在「未知值」和「保留字符串」之间折中——未知值立即回退，不让
      * 选了个不存在的 theme 把 UI 染成空样式。
      */
     fun validateTheme(value: String?): String =
-        if (value != null && value in setOf("default_light", "default_dark")) value
+        if (value != null && value in setOf("default_light", "default_dark", "system")) value
         else DEFAULTS.theme
 }

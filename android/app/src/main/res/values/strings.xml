@@ -120,6 +120,25 @@
     <string name="settings_open_save_dir_hint">选一个目录授权后系统文件管理器能浏览 DouBi 下载的文件</string>
     <string name="settings_no_app_to_open_dir">没有可用的文件管理器</string>
 
+    <!-- 阶段 9 v0.4.1 启用：主题 / 重复策略 / aria2 / 通用嗅探 5 字段 -->
+    <string name="settings_sniff_headless">启用 headless 浏览器（v0.5.0+）</string>
+    <string name="settings_sniff_user_agent">嗅探 User-Agent</string>
+    <string name="settings_sniff_user_agent_hint">空 = 默认 UA</string>
+    <string name="settings_sniff_auto_play">嗅探到 media 后自动入队</string>
+    <string name="settings_section_theme">主题</string>
+    <string name="settings_theme">主题方案</string>
+    <string name="settings_theme_system">跟随系统</string>
+    <string name="settings_theme_light">浅色</string>
+    <string name="settings_theme_dark">深色</string>
+    <string name="settings_section_duplicate">重复下载</string>
+    <string name="settings_duplicate_policy">策略</string>
+    <string name="settings_section_attach_extra">附加文件</string>
+    <string name="settings_duplicate_skip">跳过（默认）</string>
+    <string name="settings_duplicate_redownload">覆盖</string>
+    <string name="settings_duplicate_ask">每次询问</string>
+    <string name="settings_aria2_rpc_url">aria2 RPC URL</string>
+    <string name="settings_aria2_rpc_url_hint">如 http://127.0.0.1:6800/jsonrpc</string>
+
     <!-- 阶段 7 启用：About / 隐私政策 -->
     <string name="settings_section_about">关于</string>
     <string name="settings_about">关于豆比下载</string>
