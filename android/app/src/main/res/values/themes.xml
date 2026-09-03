@@ -1,7 +1,25 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <!-- 阶段 0：基础主题（系统 Material 3）。阶段 3 在 ui/theme/ 写自定义 Color.kt 后会换掉。 -->
-    <style name="Theme.DouBi" parent="android:Theme.Material.Light.NoActionBar">
+    <!-- 阶段 9 v0.4.1：SplashScreen API（Android 12+ 圆形图标 + 背景色标准启屏）。
+         parent 用 androidx.core:core-splashscreen 的 Theme.SplashScreen，自动覆盖
+         windowBackground 等。postSplashScreenTheme 指向原本的 Theme.DouBi 真主题。
+
+         阶段 0 起步：parent = android:Theme.Material.Light.NoActionBar
+         阶段 7：SplashScreen 留空，只在 commit message 标"v0.3.0 上架前加"
+         阶段 9 v0.4.1：自用策略下加 SplashScreen（自用也享受 Android 12+ 启屏标准） -->
+    <style name="Theme.DouBi" parent="Theme.SplashScreen">
+        <!-- SplashScreen 启屏：背景色 = 主品牌色，icon = app launcher foreground
+             （drawable 不是 mipmap——ic_launcher_foreground.xml 在 res/drawable/） -->
+        <item name="windowSplashScreenBackground" tools:targetApi="s">@color/splash_background</item>
+        <item name="windowSplashScreenAnimatedIcon" tools:targetApi="s">@drawable/ic_launcher_foreground</item>
+        <!-- 启屏结束后切到 Theme.DouBi.PostSplash -->
+        <item name="postSplashScreenTheme" tools:targetApi="s">@style/Theme.DouBi.PostSplash</item>
+    </style>
+
+    <!-- 阶段 9 v0.4.1：SplashScreen 结束后切到这个主题——就是原本的 Theme.DouBi 内容
+         （v0.1 阶段 0 的 android:Theme.Material.Light.NoActionBar + statusBarColor transparent
+         + windowLightStatusBar）。 -->
+    <style name="Theme.DouBi.PostSplash" parent="android:Theme.Material.Light.NoActionBar">
         <item name="android:statusBarColor" tools:targetApi="l">@android:color/transparent</item>
         <item name="android:windowLightStatusBar" tools:targetApi="m">true</item>
     </style>

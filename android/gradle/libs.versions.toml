@@ -6,6 +6,10 @@ ksp = "2.0.21-1.0.27"                  # KSP 须与 Kotlin 对齐
 
 # AndroidX
 core-ktx = "1.13.1"
+# 阶段 9 v0.4.1：SplashScreen API（Android 12+ 圆形图标 + 背景色标准启屏）
+core-splashscreen = "1.0.1"
+# 阶段 9 v0.4.1：SplashScreen API（Android 12+ 圆形图标 + 背景色标准启屏）
+core-splashscreen = "1.0.1"
 appcompat = "1.7.0"
 activity-compose = "1.9.3"
 lifecycle = "2.8.7"
@@ -66,6 +70,10 @@ ffmpeg-kit = "6.0-2"                   # mobile-ffmpeg-kit 的 fork（v0.1 暂�
 [libraries]
 # AndroidX core
 androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "core-ktx" }
+# 阶段 9 v0.4.1：SplashScreen API
+androidx-core-splashscreen = { module = "androidx.core:core-splashscreen", version.ref = "core-splashscreen" }
+# 阶段 9 v0.4.1：SplashScreen API
+androidx-core-splashscreen = { module = "androidx.core:core-splashscreen", version.ref = "core-splashscreen" }
 androidx-appcompat = { module = "androidx.appcompat:appcompat", version.ref = "appcompat" }
 androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "activity-compose" }
 

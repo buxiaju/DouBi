@@ -3,4 +3,8 @@
     <!-- 阶段 3 才做自定义主题色。阶段 0 用 Material 3 默认。 -->
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
+    <!-- 阶段 9 v0.4.1：SplashScreen 启屏背景色 = 主品牌色（Material You primary 兜底）。
+         跟 themes.xml 的 `windowSplashScreenBackground` 配对。
+         Android 12+ 启屏标准：背景色 + 圆形 icon 居中（adaptive icon 自动圆形 mask）。 -->
+    <color name="splash_background">#FF1A73E8</color>
 </resources>

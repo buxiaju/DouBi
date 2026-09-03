@@ -180,6 +180,8 @@ tasks.withType<Test>().configureEach {
 dependencies {
     // AndroidX core
     implementation(libs.androidx.core.ktx)
+    // 阶段 9 v0.4.1：SplashScreen API（Android 12+ 圆形图标 + 背景色标准启屏）
+    implementation(libs.androidx.core.splashscreen)
     implementation(libs.androidx.appcompat)
     implementation(libs.androidx.activity.compose)
 
