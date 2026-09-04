@@ -1,6 +1,6 @@
 # 桌面版 → Android 版 一对一映射
 
-> **活文档**，随阶段推进更新。**状态列口径**（2026-09-02 按实际代码核对）：
+> **活文档**，随阶段推进更新。**状态列口径**（2026-09-04 按实际代码核对）：
 > ✅ 已落地 ｜ 🟡 部分落地 ｜ ❌ 未落地 ｜ ⏸️ 明确不做
 
 ## 规则
@@ -23,7 +23,7 @@
 |---|---|---|---|---|
 | `core/models.py` | ~200 | `core/model/MediaItem.kt` / `DownloadOptions.kt` / `DownloadResult.kt` / `Progress.kt` / `Platform.kt` / `MediaType.kt` / `Author.kt` | 1 | ✅ 阶段 3 补齐（欠账 #4 已还）—— `Progress` 加 `speedBytesPerSec` / `etaSeconds` 字段 + `statusLine()` / `formatSpeed()` / `formatEta()`，并修了「progress 回调是 0-100 百分比」的量纲 bug（之前会被 `coerceIn(0f, 1f)` 截成满格）。**还顺带发现并修了一个旧 bug**：原 YtDlpEngine 把 `progress / 100` 漏写 |
 | `core/pipeline.py` | ~600 | `core/pipeline/ParseAndExpandUseCase.kt` / `DownloadUseCase.kt` / `DownloadPipeline.kt` | 1, 2, 4 | ⚠️ **阶段 4 部分还 + 阶段 8 升级**——`ParseAndExpandUseCase` 落地（解析 + 选 format + 弹 PromptOptionsDialog 入队）；v0.4.0 集成 Sniffer 路径（YouTube ❌ → youtube 域名非视频 ❌ → Sniffer → Media / NotMedia / Error 降级 yt-dlp）。`DownloadUseCase` / `DownloadPipeline` / `PipelineRegistry` 留 v0.2+ 阶段 5/6 |
-| `core/sniffer.py` | ~250 | `core/sniffer/Sniffer.kt` + `SniffResult.kt` + `HttpContentTypeSniffer.kt` + `core/sniffer/di/SnifferModule.kt` | 8 | ✅ **阶段 8 落地**——`HttpContentTypeSniffer` OkHttp HEAD 实现（10s connect / 10s read + followRedirects）；`isMediaContentType` 覆盖 `video/_` / `audio/_` / `application/vnd.apple.mpegurl` / `application/x-mpegurl` / `application/octet-stream` / `binary/octet-stream`。**v0.4.0 不做 headless browser**（v0.5.0 单独 PR） |
+| `core/sniffer.py` | ~250 | `core/sniffer/Sniffer.kt` + `SniffResult.kt` + `HttpContentTypeSniffer.kt` + `WebViewHolder.kt` + `WebViewHeadlessSniffer.kt` + `CompositeSniffer.kt` + `core/sniffer/di/SnifferModule.kt` | 8, 10 | ✅ **阶段 8 + 阶段 10 落地**——v0.4.0 阶段 8 `HttpContentTypeSniffer` OkHttp HEAD 实现（10s connect / 10s read + followRedirects）；v0.5.0 阶段 10 `WebViewHeadlessSniffer` WebView 集成（`WebViewHolder` 单例 0 size + GONE 不可见 + `Mutex.withLock` 串行化；`WebView.loadUrl` + `shouldInterceptRequest` 拦截 m3u8/mp4/webm/mpd/m4s + 5s 超时 + `onPageFinished` 提前结束）；`CompositeSniffer` 按 `AppConfig.sniffHeadless` 动态选 http / headless；`isMediaContentType` 覆盖 `video/_` / `audio/_` / `application/vnd.apple.mpegurl` / `application/x-mpegurl` / `application/octet-stream` / `binary/octet-stream`。**v0.5.0 不做 m3u8 内容解析 + WebViewHeadlessSniffer 自身单测**（v0.5.1+ 单独 PR） |
 | `core/naming.py` | ~150 | `engine/ytdlp/YtDlpEngine.sanitizeFilename()` + `renderTemplate()` + `renderPathTemplate()` | 1 | ✅ 阶段 3 落地（合并到 Engine，不再单列 `core/naming/`）—— `{title}` / `{item_id}` / `{platform}` / `{author}` / `{media_type}` 全支持，author 为空降级 `_`，9 个非法字符全替 `_` |
 | `core/registry.py` | ~50 | `core/pipeline/PipelineRegistry.kt` | 1 | ❌ 未落地，阶段 4 策略分发前必须补 |
 | `platforms/youtube/url.py` | ~80 | `core/platform/youtube/YouTubeUrl.kt` | 4 | ✅ 阶段 4 落地——`classify_youtube_url` 1:1 对拍 VIDEO / SHORTS / LIVE / EMBED / UNSUPPORTED；`to_watch_url` 归一化到 `https://www.youtube.com/watch?v=ID` |
@@ -91,6 +91,7 @@
 | 桌面版文件 | 用例数 | Android 版落点 | 实际进度 |
 |---|---|---|---|
 | `tests/test_pipeline_smoke.py` | 28 | 阶段 1、4 落地 | ❌ 0（`core/pipeline/` 还不存在） |
+| `tests/test_sniffer.py`（v0.4.0 新增，桌面版 `core/sniffer.py` 对应单测） | ~25 | 阶段 8 + 10 落地 | ✅ 17（`HttpContentTypeSnifferTest` 13 + `CompositeSnifferTest` 4） |
 | `tests/test_pipeline_retry.py` | 16 | 阶段 2 + 3 落地 | ✅ 13（`DownloadWorkerTest` 13 例 `isTransientFailure` 判据）—— 欠账 #3 阶段 3 已还 |
 | `tests/test_bilibili_adapter.py` | 56 | v0.2+ | ⏸️ 首版不做 |
 | `tests/test_douyin_adapter.py` | 43 | v0.2+ | ⏸️ 首版不做 |
@@ -109,13 +110,13 @@
 
 **v0.1 落地用例数估算**：约 280 个（已剔除 server / mcp / bilibili / douyin / tray / 部分 ui_polish）。
 
-**当前实际**（2026-09-02 按 `@Test` 实数清点）：
+**当前实际**（2026-09-04 按 `@Test` 实数清点）：
 
 | 口径 | 数量 |
 |---|---|
-| 单元测试（`src/test/`，JVM，全绿） | **46**（业务 45 + AS 模板 1） |
-| 仪器测试（`src/androidTest/`，**从未执行**） | **7**（业务 6 + AS 模板 1） |
-| 相对 ~280 估算的进度 | 约 **18%** |
+| 单元测试（`src/test/`，JVM，**204/204 全绿**） | **204**（业务 203 + AS 模板 1） |
+| 仪器测试（`src/androidTest/`，**从未执行**） | **10**（业务 9 + AS 模板 1） |
+| 相对 ~280 估算的进度 | 约 **73%** |
 
 其中 `ModelTest` 10 例是 Android 端自加的（桌面版没有对应的 `test_models.py`），不计入上面的移植映射。
 

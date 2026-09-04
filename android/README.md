@@ -6,14 +6,14 @@
 
 ## 当前进度
 
-**阶段 9 完成**（v0.4.1-android 收官候选），`versionName = 0.4.1`，**尚未发布任何版本**。下一步是 v0.5.0（B 站 / 抖音 adapter + headless browser 嗅探）。
+**阶段 10 完成**（v0.5.0-android 收官候选），`versionName = 0.5.0`，**尚未发布任何版本**。下一步是 v0.5.1+（WebViewHeadlessSniffer 自身单测 + m3u8 内容解析 + BilibiliAdapter）。
 
 | | 状态 |
 |---|---|
-| 已完成 | 阶段 0 脚手架 ✅ ｜ 阶段 1 数据层 + 配置 ✅（Room Migration 链已显式化）｜ 阶段 2 下载引擎 ✅（重试退避已加）｜ 阶段 3 UI 框架 ✅（4 占位 tab + Hilt ViewModel）｜ 阶段 4 解析 + 列表 ✅（YouTubeUrl 分类 + MediaFormat + PromptOptionsDialog + DownloadRepository.enqueue 一条龙）｜ 阶段 5 下载 + 进度 + 完成通知 ✅（DownloadingScreen LazyColumn + speed/eta + 队列并发 3 + 三档通知）｜ 阶段 6 历史 + 设置 ✅（HistoryScreen LazyColumn + 文件存在性检查 + SettingsScreen 5 组字段 + 5 底栏 tab）｜ 阶段 7 商店准备 ✅（bundleRelease .aab 61.5 MB + R8 keep 规则验真 25 个类保留原名 + 商店元数据中英文）｜ 阶段 8 通用嗅探 ✅（Sniffer interface + HttpContentTypeSniffer + SniffResult sealed + SnifferModule Hilt 装配 + ParseAndExpandUseCase 集成 Sniffer 路径 + PastingScreen Sniffing 状态提示）｜ 阶段 9 自用 UX 收官 ✅（自用 keystore 走 gradle.properties 环境变量 + 「打开保存目录」+FileProvider + SplashScreen API + SettingsScreen 4 个新 Section 13 字段 + ViewModel 字段级测试 +16 例）|
-| 待完成 | v0.4.2+ 单独 PR：takePersistableUriPermission（保存目录授权）/ Compose UI test（需 Robolectric 或真机）。v0.5.0 单独 PR：headless browser 嗅探 + B 站 / 抖音 / Twitter adapter |
-| 测试 | 单测 **200/200 全绿**（2026-09-03 实跑验证：46 → 64 → 99 → 153 → 158 → 167 → 183 → 200，+154 例；v0.4.1 新增 16 例：SettingsViewModelTest +13 字段级 onFieldChanged + HistoryViewModelTest +4 onOpenSaveDir/onRedownload）；仪器测试 10 个**写了但从未在真机执行**（v0.4.1 改补 ViewModel 字段级测试覆盖 UI 改动回归——自用环境没装 Robolectric/真机/模拟器） |
-| 能跑什么 | Run 起来 5 个 tab 底栏可点；粘贴 tab 输入 URL → **任意 http(s) URL 都走通用嗅探**（YouTube 走 yt-dlp / 其他走 Sniffer 嗅探 m3u8/mp4）→ 弹「下载选项」选 format + 容器 / 缩略图 / 字幕 / 续传 / 标题模板 → 入队 Worker；下载中 tab 看实时进度 + 速度 + ETA + 取消；历史 tab 看 Room 记录 + 文件状态 + 重新下载；设置 tab **13+ 字段改完即生效**（含主题切换、重复下载策略、引擎 aria2、通用嗅探 5 字段、附加 NFO/JSON/弹幕）；`bundleRelease` 成功出 **64.7 MB .aab**（自用 keystore 签名） |
+| 已完成 | 阶段 0 脚手架 ✅ ｜ 阶段 1 数据层 + 配置 ✅ ｜ 阶段 2 下载引擎 ✅ ｜ 阶段 3 UI 框架 ✅ ｜ 阶段 4 解析 + 列表 ✅ ｜ 阶段 5 下载 + 进度 + 完成通知 ✅ ｜ 阶段 6 历史 + 设置 ✅ ｜ 阶段 7 商店准备 ✅ ｜ 阶段 8 通用嗅探 ✅（HTTP HEAD 嗅探 m3u8/mp4/webm）｜ 阶段 9 自用 UX 收官 ✅（自用 keystore + 「打开保存目录」+FileProvider + SplashScreen API + 设置项补全 13 字段 + ViewModel 字段级测试 +16 例）｜ **阶段 10 headless browser 嗅探** ✅（WebViewHolder 单例 + WebViewHeadlessSniffer WebView 集成 + CompositeSniffer 按 `AppConfig.sniffHeadless` 动态选 http/headless + SnifferModule @Named 双 binding + CompositeSnifferTest 4 例）|
+| 待完成 | v0.5.1+ 单独 PR：WebViewHeadlessSniffer 自身单测（需 Robolectric）/ m3u8 内容解析 / WebViewHolder idle 30s 后 release / ANR 风险测试。v0.5.2+：BilibiliAdapter（WBI 签名 / click web API）。v0.5.3+：抖音 adapter（X-Bogus） |
+| 测试 | 单测 **204/204 全绿**（2026-09-04 实跑验证：46 → 64 → 99 → 153 → 158 → 167 → 183 → 200 → 204，+158 例；v0.4.1 +16 例：SettingsViewModelTest +13 字段级 onFieldChanged + HistoryViewModelTest +4 onOpenSaveDir/onRedownload；v0.5.0 +4 例：CompositeSnifferTest sniffHeadless 切换契约）；仪器测试 10 个**写了但从未在真机执行**（v0.4.1 改补 ViewModel 字段级测试；v0.5.0 WebViewHeadlessSniffer 自身单测留 v0.5.1+ Robolectric） |
+| 能跑什么 | Run 起来 5 个 tab 底栏可点；粘贴 tab 输入 URL → **任意 http(s) URL**（含 B 站 / 抖音 / 微博主页"JS 异步加载"网站，v0.5.0 WebView 集成）→ 弹「下载选项」选 format + 容器 / 缩略图 / 字幕 / 续传 / 标题模板 → 入队 Worker；下载中 tab 看实时进度 + 速度 + ETA + 取消；历史 tab 看 Room 记录 + 文件状态 + 重新下载；设置 tab **13+ 字段改完即生效**（含主题切换、重复下载策略、引擎 aria2、通用嗅探 5 字段、附加 NFO/JSON/弹幕）；`assembleDebug` 成功出 ~78 MB APK（v0.5.0 WebView 集成 Chromium native lib 增量 +2 MB）；`bundleRelease` 成功出 **64.7 MB .aab**（自用 keystore 签名） |
 | 构建环境 | ⚠️ 命令行必须用 AS 自带 JBR 25，系统 JDK 26 会挂在 `androidJdkImage`（[SETUP.md](docs/SETUP.md)）⚠️ release 签名走 `~/.gradle/gradle.properties` 环境变量，**keystore 不进 git**——换电脑需重新生成 |
 
 **v0.1.0 收官前已还 7 笔欠账**：
