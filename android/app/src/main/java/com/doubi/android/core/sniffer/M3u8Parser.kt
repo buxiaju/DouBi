@@ -66,6 +66,55 @@ class M3u8Parser @Inject constructor() {
     }
 
     /**
+     * v0.5.3 阶段 13 递归解析 master → media。
+     *
+     * [parse] 只解析一层（master → 第一个 variant m3u8 URL，**不**下 body 解析子 m3u8）。
+     * v0.5.3 加 [parseRecursive]：当 [parse] 返 [M3u8Result.Variant] 时，用 [fetchBody]
+     * 拉变体子 m3u8 body 再调 [parse]，直到返 [M3u8Result.Segment] /
+     * [M3u8Result.Passthrough] / 达到 [MAX_RECURSION_DEPTH] 上限。
+     *
+     * **典型场景**：
+     * ```
+     * master.m3u8        #EXT-X-STREAM-INF BANDWIDTH=2000000 → 720p/index.m3u8
+     *                      ↓ fetchBody("...720p/index.m3u8")
+     *                      ↓ body
+     *                      ↓ parse 返 Segment → segment0.ts
+     * ```
+     *
+     * **降级语义**（fail-safe，跟 [parse] 一致）：
+     * - [fetchBody] 返 null（网络失败 / 404）→ 保留当前 variant URL，**不**递归
+     * - 达到 [MAX_RECURSION_DEPTH]（5 层）→ 返 [M3u8Result.Passthrough]，保留当前 URL
+     * - 循环引用（master1 → master2 → master1）→ 达到 depth 上限自然终止
+     *
+     * **fetchBody 契约**：suspend 函数，传入 URL 返 body 字符串（或 null）。调用方
+     * （[WebViewHeadlessSniffer]）用 OkHttp 实现（`withContext(Dispatchers.IO)` 跑 GET）；
+     * 测试用 stub 函数（需 `runBlocking` 包）。
+     */
+    suspend fun parseRecursive(
+        body: String,
+        baseUrl: String,
+        fetchBody: suspend (String) -> String?,
+    ): M3u8Result {
+        var currentBody = body
+        var currentUrl = baseUrl
+
+        repeat(MAX_RECURSION_DEPTH) {
+            when (val parsed = parse(currentBody, currentUrl)) {
+                is M3u8Result.Segment -> return parsed
+                is M3u8Result.Passthrough -> return parsed
+                is M3u8Result.Variant -> {
+                    val nextBody = fetchBody(parsed.url) ?: return parsed
+                    currentBody = nextBody
+                    currentUrl = parsed.url
+                }
+            }
+        }
+
+        // depth 耗尽 —— 防止循环引用 / 异常深度的 master
+        return M3u8Result.Passthrough(currentUrl)
+    }
+
+    /**
      * 解析 master playlist：找第一个 `#EXT-X-STREAM-INF` 后面跟着的非 # 行（variant URL）。
      */
     private fun parseMaster(lines: List<String>, baseUrl: String): M3u8Result {
@@ -106,5 +155,14 @@ class M3u8Parser @Inject constructor() {
     private companion object {
         const val EXTM3U = "#EXTM3U"
         const val EXT_X_STREAM_INF = "#EXT-X-STREAM-INF"
+
+        /**
+         * v0.5.3 阶段 13：递归解析 master → media 的最大深度。
+         *
+         * 真实场景下 master → media 是 **2 层**（master.m3u8 → variant.m3u8 → media.m3u8
+         * → .ts）；少数场景多层（intermediate master + variant list）。5 层足够覆盖
+         * 99%+ 真实情况，也防循环引用死循环。
+         */
+        const val MAX_RECURSION_DEPTH = 5
     }
 }
