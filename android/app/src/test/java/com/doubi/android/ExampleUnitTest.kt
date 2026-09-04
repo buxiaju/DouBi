@@ -11,7 +11,7 @@ class ExampleUnitTest {
     @Test
     fun `version name is set`() {
         assertThat(BuildConfig.VERSION_NAME).isNotEmpty()
-        // 阶段 0 锁 v0.1.0；阶段 7 升到 v0.3.0；阶段 8 升到 v0.4.0；阶段 9 升到 v0.4.1；阶段 10 升到 v0.5.0；阶段 11 升到 v0.5.1；阶段 12 升到 v0.5.2；阶段 13 升到 v0.5.3；阶段 14 升到 v0.5.4
+        // 阶段 0 锁 v0.1.0；阶段 7 升到 v0.3.0；阶段 8 升到 v0.4.0；阶段 9 升到 v0.4.1；阶段 10 升到 v0.5.0；阶段 11 升到 v0.5.1；阶段 12 升到 v0.5.2；阶段 13 升到 v0.5.3；阶段 14 升到 v0.5.4；阶段 15 升到 v0.5.5
         // 改 asserts 测当前 major.minor——v0.5.x 阶段是 0.5
         assertThat(BuildConfig.VERSION_NAME).startsWith("0.5")
     }

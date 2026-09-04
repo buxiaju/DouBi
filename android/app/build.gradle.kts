@@ -37,8 +37,11 @@ android {
         // v0.5.4 = 12（阶段 14 B 站 / 抖音 platform foundation：BilibiliUrl + WbiSigner
         //   + DouyinUrl + XBogusSigner + PlatformRegistry + PlatformModule Hilt；
         //   XBogusSigner 是 placeholder（v0.5.5+ 实装真算法）；单测 221 → 258）
-        versionCode = 12
-        versionName = "0.5.4"
+        // v0.5.5 = 13（阶段 15 X-Bogus 真算法 part 1：抽 RC4 cipher + CustomBase64
+        //   工具 + XBogusSigner 升级用 RC4 + a_bogus 字母表编码；get_chaos 仍 stub
+        //   v0.5.6+ 实装；单测 258 → 269）
+        versionCode = 13
+        versionName = "0.5.5"
 
         minSdk = 24
         targetSdk = 35
