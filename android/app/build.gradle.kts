@@ -40,8 +40,11 @@ android {
         // v0.5.5 = 13（阶段 15 X-Bogus 真算法 part 1：抽 RC4 cipher + CustomBase64
         //   工具 + XBogusSigner 升级用 RC4 + a_bogus 字母表编码；get_chaos 仍 stub
         //   v0.5.6+ 实装；单测 258 → 269）
-        versionCode = 13
-        versionName = "0.5.5"
+        // v0.5.6 = 14（阶段 16 B 站 / 抖音 API 客户端：BilibiliApiClient（WBI 签名）
+        //   + DouyinApiClient（X-Bogus 仍 stub）+ JSON 解析用 regex 避开 org.json
+        //   stub；单测 269 → 279）
+        versionCode = 14
+        versionName = "0.5.6"
 
         minSdk = 24
         targetSdk = 35
