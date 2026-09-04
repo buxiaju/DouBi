@@ -6,47 +6,54 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import timber.log.Timber
 import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * 阶段 10 v0.5.0 headless browser 嗅探（WebView 集成）。
+ * 阶段 10 v0.5.0 / 阶段 12 v0.5.2：headless browser 嗅探（WebView 集成）。
  *
- * **思路**：WebView loadUrl → JS 异步加载 → `shouldInterceptRequest` 拦截
- * 所有 .m3u8 / .mp4 / .webm 请求 → 第一个命中即返回 `SniffResult.Media(finalUrl, ...)`。
- * v0.4.0 阶段 8 阶段 [HttpContentTypeSniffer] 只能嗅探"直链"
- * （m3u8/mp4 在 HTTP response 头部直接暴露），v0.5.0 WebViewHeadlessSniffer
- * 覆盖"B 站 / 抖音 / Twitter 主页 / Vue SPA"等"JS 异步加载"网站。
+ * **v0.5.0 阶段 10 baseline**：
+ * - `WebView.loadUrl(url)` + 临时 `WebViewClient.shouldInterceptRequest` 拦截
+ *   m3u8/mp4/webm/mpd/m4s URL
+ * - 5s 超时（写死，v0.4.0 阶段 8 加的 `sniffDurationSec` 配置 v0.5.0 没用上）
+ * - 命中 → `SniffResult.Media(finalUrl=interceptedUrl, contentType=推 .ext)`
+ * - 5s 内未命中 → `NotMedia(reason="WebView 5s 内未拦截到 m3u8/mp4/webm")`
+ * - 异常 → `Error(message, cause)`
  *
- * **不是真正 headless**（Android 端 WebView 必须在 Main 线程 + attach 到
- * view hierarchy）—— 实际是"invisible WebView"。桌面版
- * `src/doubi/core/sniffer.py:WebViewHeadlessSniffer` 用 Playwright 真
- * headless（Python），Android 端 v0.5.0 走 WebView 简化方案。
+ * **v0.5.2 阶段 12 增强**（m3u8 内容解析）：
+ * - 拦截到 m3u8 URL 后，**额外**调 [M3u8Parser] 解析：master playlist 拿第一个
+ *   variant 子 m3u8 URL，media playlist 拿第一个 .ts/.m4s segment URL
+ * - 把 finalUrl 替换成解析后的 URL —— Engine (yt-dlp) 直接下 .ts，**省一次 m3u8 body
+ *   HTTP round-trip**
+ * - m3u8 解析失败 / 非 m3u8 媒体（mp4 / webm）→ 保留原 URL
+ * - 解析流程是 `withContext(Dispatchers.IO)` 跑 OkHttp GET，避免阻塞 Main 线程
  *
- * **超时**：5s 默认（`AppConfig.sniffDurationSec` 5-60s）。5s 内任意
- * m3u8/mp4 命中 → Media；5s 啥都没拦截到 → NotMedia；异常 → Error。
- *
- * **v0.5.0 简化**：
- * - 单例共享 WebView（[WebViewHolder]）—— 多个 sniff 任务串行排队
- * - 拦截策略：URL 路径含 `.m3u8` / `.mp4` / `.webm` / `.mpd` / `.m4s` / 任意 query 形如 `type=mp4` 命中
- * - **不解析 m3u8 内容**（v0.5.0 只返回第一个 m3u8 URL；m3u8 → mp4 解析留 v0.5.1+）
- * - **不拿 title**（WebView 拿到 title 后再调 yt-dlp 拿 title，v0.5.0 简化直接用 URL 当 title）
+ * **v0.5.0 简化保留**（v0.5.2 不做）：
+ * - 单例共享 WebView（v0.5.1 阶段 11 做的 idle 30s release）
+ * - 拦截策略：URL 路径含 `.m3u8` / `.mp4` / `.webm` / `.mpd` / `.m4s` + query 形如
+ *   `type=mp4` / `mime=video`
+ * - 不递归解析 m3u8（master → 第一个 variant .m3u8 URL，不下 body 解析子 m3u8；
+ *   递归留 v0.5.3+）
+ * - 不解析 m3u8 v7+ HLS encryption（`#EXT-X-KEY`）—— 保留原 m3u8 URL 让 Engine 解析
  *
  * **风险**：
- * - WebView 第一次创建加载 Chromium native lib 慢（~30MB APK 增量）——
- *   v0.5.0 范围接受，v0.5.1+ 测冷启动影响
- * - 单例常驻 ~30-50MB 内存——v0.5.0 简化方案，v0.5.1+ idle release
- * - shouldInterceptRequest 是同步阻塞回调——复杂页面可能 1-3s 阻塞 Main 线程，
- *   v0.5.0 接受，v0.5.1+ 测 ANR 风险
+ * - 解析后的 URL 可能是子 m3u8（master playlist 的 variant）—— 仍要 Engine 再下 body
+ *   解析。省的不是 m3u8 HTTP round-trip，是把"先下 m3u8 body 决定下啥"提前到 sniffer 阶段
+ * - 10s OkHttp timeout（[SnifferModule] 共享 client）+ 5s WebView sniff 窗口 = 15s 最坏。
+ *   m3u8 body 一般几 KB，10s timeout 远超实际需要
  */
 @Singleton
 class WebViewHeadlessSniffer @Inject constructor(
     private val holder: WebViewHolder,
+    private val okHttpClient: OkHttpClient,
+    private val m3u8Parser: M3u8Parser,
 ) : Sniffer {
 
     override suspend fun sniff(url: String): SniffResult = withContext(Dispatchers.Main) {
-        try {
+        val rawResult = try {
             holder.withLock { webView ->
                 sniffOnMainThread(webView, url)
             }
@@ -54,6 +61,9 @@ class WebViewHeadlessSniffer @Inject constructor(
             Timber.w(e, "WebViewHeadlessSniffer failed: %s", url)
             SniffResult.Error("WebView 嗅探失败：${e.message ?: e.javaClass.simpleName}", e)
         }
+
+        // v0.5.2 阶段 12：m3u8 内容解析增强（只对 isHls 的 Media 走）
+        enhanceM3u8IfNeeded(rawResult)
     }
 
     /**
@@ -132,6 +142,66 @@ class WebViewHeadlessSniffer @Inject constructor(
     }
 
     /**
+     * v0.5.2 阶段 12 m3u8 内容解析增强。
+     *
+     * 仅对 [SniffResult.Media] 且 `isHls = true` 的结果生效——其它类型原样返回。
+     *
+     * 流程：
+     * 1. 拿原始 finalUrl（m3u8 URL）
+     * 2. `Dispatchers.IO` 跑 OkHttp GET 拿 m3u8 body
+     * 3. [M3u8Parser] 解析 → Variant / Segment / Passthrough
+     * 4. Variant / Segment → 替换 finalUrl；Passthrough → 保留原 finalUrl
+     *
+     * **降级**：fetch 失败 / parse 抛异常 → 保留原 finalUrl，不影响 Media 返回。
+     */
+    private suspend fun enhanceM3u8IfNeeded(result: SniffResult): SniffResult {
+        if (result !is SniffResult.Media || !result.isHls) return result
+
+        return try {
+            val body = fetchM3u8Body(result.finalUrl) ?: return result
+            when (val parsed = m3u8Parser.parse(body, result.finalUrl)) {
+                is M3u8Result.Variant -> {
+                    Timber.d("m3u8 master → variant: %s", parsed.url)
+                    result.copy(finalUrl = parsed.url)
+                }
+                is M3u8Result.Segment -> {
+                    Timber.d("m3u8 media → segment: %s", parsed.url)
+                    result.copy(finalUrl = parsed.url)
+                }
+                is M3u8Result.Passthrough -> {
+                    Timber.d("m3u8 passthrough: keep original %s", result.finalUrl)
+                    result
+                }
+            }
+        } catch (e: Throwable) {
+            Timber.w(e, "m3u8 enhance failed for %s, keep original", result.finalUrl)
+            result  // 降级：保留原 finalUrl
+        }
+    }
+
+    /**
+     * 拉 m3u8 body。失败返 null。
+     *
+     * `withContext(Dispatchers.IO)` 切到 IO 线程——OkHttp `execute()` 是 blocking call，
+     * 不能在 Main 线程跑。
+     */
+    private suspend fun fetchM3u8Body(url: String): String? = withContext(Dispatchers.IO) {
+        try {
+            val request = Request.Builder().url(url).build()
+            okHttpClient.newCall(request).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    Timber.w("m3u8 body fetch not 2xx: %s %s", resp.code, url)
+                    return@use null
+                }
+                resp.body?.string()
+            }
+        } catch (e: Throwable) {
+            Timber.w(e, "m3u8 body fetch failed for %s", url)
+            null
+        }
+    }
+
+    /**
      * 判断 URL 是不是 media。**v0.5.0 简化**：用 URL 后缀 + query 参数。
      * 桌面版 Python 走 mimetypes.guess_type + 完整 Content-Type header（更准）。
      *
@@ -139,7 +209,8 @@ class WebViewHeadlessSniffer @Inject constructor(
      * - 路径含 `.m3u8` / `.mp4` / `.webm` / `.mpd` / `.m4s`
      * - query 含 `type=mp4` / `mime=video` / `contenttype=video`
      *
-     * 不命中：m3u8 里的 .ts 分片（v0.5.0 不解析 m3u8 内容；v0.5.1+ 解析）
+     * 不命中：m3u8 里的 .ts 分片（v0.5.0 不解析 m3u8 内容；v0.5.2 改为调 [M3u8Parser] 解析
+     * 而不是拦截 .ts URL——见 [enhanceM3u8IfNeeded]）
      */
     private fun isMediaUrl(url: String): Boolean {
         val path = url.substringBefore('?').lowercase()
