@@ -28,8 +28,10 @@ android {
         // v0.2.2 = 4（阶段 6 历史 + 设置）
         // v0.5.0 = 8（阶段 10 headless browser 嗅探：WebViewHolder + WebViewHeadlessSniffer
         //   + CompositeSniffer 按 AppConfig.sniffHeadless 动态选 http/headless）
-        versionCode = 8
-        versionName = "0.5.0"
+        // v0.5.1 = 9（阶段 11 WebViewHolder idle 30s release：抽出 WebViewFactory
+        //   + 单例常驻 ~30-50MB 在 idle 30s 后释放；单测 204 → 209）
+        versionCode = 9
+        versionName = "0.5.1"
 
         minSdk = 24
         targetSdk = 35
