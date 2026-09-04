@@ -13,7 +13,7 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * 阶段 10 v0.5.0 / 阶段 12 v0.5.2：headless browser 嗅探（WebView 集成）。
+ * 阶段 10 v0.5.0 / 阶段 12 v0.5.2 / 阶段 13 v0.5.3：headless browser 嗅探（WebView 集成）。
  *
  * **v0.5.0 阶段 10 baseline**：
  * - `WebView.loadUrl(url)` + 临时 `WebViewClient.shouldInterceptRequest` 拦截
@@ -23,27 +23,34 @@ import javax.inject.Singleton
  * - 5s 内未命中 → `NotMedia(reason="WebView 5s 内未拦截到 m3u8/mp4/webm")`
  * - 异常 → `Error(message, cause)`
  *
- * **v0.5.2 阶段 12 增强**（m3u8 内容解析）：
- * - 拦截到 m3u8 URL 后，**额外**调 [M3u8Parser] 解析：master playlist 拿第一个
+ * **v0.5.2 阶段 12 增强**（m3u8 内容解析，单层）：
+ * - 拦截到 m3u8 URL 后，**额外**调 [M3u8Parser.parse] 解析：master playlist 拿第一个
  *   variant 子 m3u8 URL，media playlist 拿第一个 .ts/.m4s segment URL
  * - 把 finalUrl 替换成解析后的 URL —— Engine (yt-dlp) 直接下 .ts，**省一次 m3u8 body
  *   HTTP round-trip**
  * - m3u8 解析失败 / 非 m3u8 媒体（mp4 / webm）→ 保留原 URL
  * - 解析流程是 `withContext(Dispatchers.IO)` 跑 OkHttp GET，避免阻塞 Main 线程
  *
- * **v0.5.0 简化保留**（v0.5.2 不做）：
+ * **v0.5.3 阶段 13 增强**（递归 master → media）：
+ * - v0.5.2 只解析一层：master → 第一个 variant m3u8 URL（仍要 Engine 再下 body 解析）
+ * - v0.5.3 改用 [M3u8Parser.parseRecursive]：master → variant m3u8 → media playlist
+ *   → .ts 一路递归下来，把 finalUrl 替换成 .ts segment URL
+ * - 递归上限 [M3u8Parser.MAX_RECURSION_DEPTH]=5，循环引用（master1 → master2 → master1）
+ *   自然终止
+ * - 跟 v0.5.2 一样 fail-safe：任何环节失败保留当前 URL
+ *
+ * **v0.5.0 简化保留**（v0.5.3 不做）：
  * - 单例共享 WebView（v0.5.1 阶段 11 做的 idle 30s release）
  * - 拦截策略：URL 路径含 `.m3u8` / `.mp4` / `.webm` / `.mpd` / `.m4s` + query 形如
  *   `type=mp4` / `mime=video`
- * - 不递归解析 m3u8（master → 第一个 variant .m3u8 URL，不下 body 解析子 m3u8；
- *   递归留 v0.5.3+）
  * - 不解析 m3u8 v7+ HLS encryption（`#EXT-X-KEY`）—— 保留原 m3u8 URL 让 Engine 解析
+ * - 不实现多 variant 选择 UI（带宽/分辨率）—— v0.5.3 仍默认拿第一个 variant
  *
  * **风险**：
- * - 解析后的 URL 可能是子 m3u8（master playlist 的 variant）—— 仍要 Engine 再下 body
- *   解析。省的不是 m3u8 HTTP round-trip，是把"先下 m3u8 body 决定下啥"提前到 sniffer 阶段
- * - 10s OkHttp timeout（[SnifferModule] 共享 client）+ 5s WebView sniff 窗口 = 15s 最坏。
- *   m3u8 body 一般几 KB，10s timeout 远超实际需要
+ * - 10s OkHttp timeout（[SnifferModule] 共享 client）+ 5s WebView sniff 窗口 = 15s 最坏
+ *   单层；递归场景 master + variant + media 三层，**最坏 30s+**——实测 HLS 通常 < 5s，
+ *   但极端情况需要兜底
+ * - fail-safe 完备：fetch 失败 / 解析失败 / 循环引用 → 全部保留当前 finalUrl
  */
 @Singleton
 class WebViewHeadlessSniffer @Inject constructor(
@@ -142,34 +149,47 @@ class WebViewHeadlessSniffer @Inject constructor(
     }
 
     /**
-     * v0.5.2 阶段 12 m3u8 内容解析增强。
+     * v0.5.2 阶段 12 m3u8 内容解析增强（v0.5.3 阶段 13 升级为递归）。
      *
      * 仅对 [SniffResult.Media] 且 `isHls = true` 的结果生效——其它类型原样返回。
      *
+     * **v0.5.3 升级**：从 v0.5.2 的 `m3u8Parser.parse`（单层）改为
+     * `m3u8Parser.parseRecursive`（递归 master → variant → media → segment）。
+     *
      * 流程：
      * 1. 拿原始 finalUrl（m3u8 URL）
-     * 2. `Dispatchers.IO` 跑 OkHttp GET 拿 m3u8 body
-     * 3. [M3u8Parser] 解析 → Variant / Segment / Passthrough
-     * 4. Variant / Segment → 替换 finalUrl；Passthrough → 保留原 finalUrl
+     * 2. [M3u8Parser.parseRecursive] 传入 lambda 作为 `fetchBody`——
+     *    lambda 用 `withContext(Dispatchers.IO)` 跑 OkHttp GET 拉 m3u8 body
+     * 3. parseRecursive 递归：master → variant → media → segment
+     * 4. Segment / Variant → 替换 finalUrl；Passthrough / 异常 → 保留原 finalUrl
      *
-     * **降级**：fetch 失败 / parse 抛异常 → 保留原 finalUrl，不影响 Media 返回。
+     * **降级**（fail-safe，跟 v0.5.2 一致）：
+     * - 任何层级 fetch 失败 → 保留当前层 URL（**不**抛异常）
+     * - 达到 [M3u8Parser.MAX_RECURSION_DEPTH]（5 层）→ 返 Passthrough 保留当前 URL
+     * - 整个 enhance 抛异常 → 保留原 finalUrl
      */
     private suspend fun enhanceM3u8IfNeeded(result: SniffResult): SniffResult {
         if (result !is SniffResult.Media || !result.isHls) return result
 
         return try {
-            val body = fetchM3u8Body(result.finalUrl) ?: return result
-            when (val parsed = m3u8Parser.parse(body, result.finalUrl)) {
-                is M3u8Result.Variant -> {
-                    Timber.d("m3u8 master → variant: %s", parsed.url)
+            // 第一次 fetch 原始 m3u8 body；fetchBody 失败 → 降级保留原 finalUrl
+            val initialBody = fetchM3u8Body(result.finalUrl) ?: return result
+            // fetchBody lambda：M3u8Parser.parseRecursive 在 Variant 时回调拉子 m3u8 body
+            // （suspend lambda —— parseRecursive 签名是 suspend (String) -> String?）
+            val fetchBody: suspend (String) -> String? = { url -> fetchM3u8Body(url) }
+            when (val parsed = m3u8Parser.parseRecursive(initialBody, result.finalUrl, fetchBody)) {
+                is M3u8Result.Segment -> {
+                    Timber.d("m3u8 recursive → segment: %s", parsed.url)
                     result.copy(finalUrl = parsed.url)
                 }
-                is M3u8Result.Segment -> {
-                    Timber.d("m3u8 media → segment: %s", parsed.url)
+                is M3u8Result.Variant -> {
+                    // fetchBody 返 null（网络失败）→ 保留当前 variant URL 作为 finalUrl
+                    // Engine (yt-dlp) 拿到这个 .m3u8 URL 后自己再下 body 解析
+                    Timber.d("m3u8 recursive fetchBody null → variant: %s", parsed.url)
                     result.copy(finalUrl = parsed.url)
                 }
                 is M3u8Result.Passthrough -> {
-                    Timber.d("m3u8 passthrough: keep original %s", result.finalUrl)
+                    Timber.d("m3u8 recursive → passthrough: keep original %s", result.finalUrl)
                     result
                 }
             }
