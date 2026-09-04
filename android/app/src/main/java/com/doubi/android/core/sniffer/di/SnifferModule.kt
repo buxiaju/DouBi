@@ -1,8 +1,10 @@
 package com.doubi.android.core.sniffer.di
 
 import com.doubi.android.core.sniffer.CompositeSniffer
+import com.doubi.android.core.sniffer.DefaultWebViewFactory
 import com.doubi.android.core.sniffer.HttpContentTypeSniffer
 import com.doubi.android.core.sniffer.Sniffer
+import com.doubi.android.core.sniffer.WebViewFactory
 import com.doubi.android.core.sniffer.WebViewHeadlessSniffer
 import dagger.Binds
 import dagger.Module
@@ -71,4 +73,13 @@ abstract class SnifferBindingModule {
     @Binds
     @Singleton
     abstract fun bindCompositeSniffer(impl: CompositeSniffer): Sniffer
+
+    /**
+     * 阶段 11 v0.5.1：[WebViewHolder] 用的 [WebViewFactory] 工厂接口绑到
+     * [DefaultWebViewFactory] 默认实现。抽工厂是为了让 WebViewHolder 单测可以
+     * mockk 工厂验证创建/复用/release 契约。
+     */
+    @Binds
+    @Singleton
+    abstract fun bindWebViewFactory(impl: DefaultWebViewFactory): WebViewFactory
 }
