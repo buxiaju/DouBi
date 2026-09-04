@@ -460,6 +460,52 @@
 
 ---
 
+## [未发布] v0.5.3
+
+**当前状态**：阶段 13 完成（m3u8 递归解析），`versionName` 改为 `0.5.3` + `versionCode=11`，**尚未发布**。
+本版本把 v0.5.2 阶段 12 收官时记的「不递归解析 master → media」欠账（[phase-12.md](phases/phase-12.md) 决定 2）落地——[M3u8Parser.parseRecursive] 一路递归 master → variant → media → segment，[WebViewHeadlessSniffer] 集成调用。
+**Tag**：`v0.5.3-android`。
+
+### 已完成
+
+**阶段 13 — m3u8 递归解析**（`未提交`）
+
+- **M3u8Parser.parseRecursive 新增**（`core/sniffer/M3u8Parser.kt`）：`suspend fun parseRecursive(body, baseUrl, fetchBody: suspend (String) -> String?): M3u8Result`
+  - 第一次 `parse(body, baseUrl)` —— master → first variant .m3u8 URL
+  - fetchBody(variant.url) 拉子 m3u8 body → 递归
+  - 直到返 Segment / Passthrough / 达到 MAX_RECURSION_DEPTH=5
+  - **降级语义**（fail-safe）：fetchBody 返 null（网络失败）→ 返当前 Variant URL；达到 depth 上限 → 返 Passthrough(currentUrl)
+- **M3u8ParserTest 4 例新增**（`M3u8ParserTest.kt`）：
+  - `parseRecursive resolves master to media segment via fetchBody`——multi-level master 解析到 .ts
+  - `parseRecursive stops at media playlist on first call`——起始就是 media → 不递归
+  - `parseRecursive returns Variant when fetchBody returns null`——网络失败降级
+  - `parseRecursive stops at MAX_RECURSION_DEPTH on loop reference`——循环引用降级
+- **WebViewHeadlessSniffer 集成**（`core/sniffer/WebViewHeadlessSniffer.kt`）：
+  - `enhanceM3u8IfNeeded` 改用 `parseRecursive` 替 `parse`
+  - fetchBody lambda：`suspend (String) -> String? = { url -> fetchM3u8Body(url) }`——复用 v0.5.2 的 fetchM3u8Body
+  - 初始 body 先 fetch（`fetchM3u8Body(result.finalUrl)`），失败返原 result
+  - parseRecursive 返 Segment → 替换 finalUrl；返 Variant → 保留当前 variant URL 当 finalUrl；返 Passthrough → 保留原 finalUrl
+- **221/221 单测全绿**（v0.5.2 217 + 4 新增）
+- **APK 验证**：`assembleDebug` 通过，APK 78 MB 不变（M3u8Parser 新增 30 行 + WebViewHeadlessSniffer inline 改造）
+
+### 修复
+
+- **suspend lambda 跨越 Kotlin 编译器边界**（`v0.5.3`）：[parseRecursive] 签名是 `fetchBody: (String) -> String?`（非 suspend）时，`val fetchBody = { url -> fetchM3u8Body(url) }` 编译报 "Suspension functions can only be called within coroutine body"。**修法**：[parseRecursive] 改 `suspend fun` + fetchBody 改 `suspend (String) -> String?`；测试 4 例用 `runBlocking` 包
+- **parseRecursive 第一层 body 传递错误**（`v0.5.3`）：第一版 `parseRecursive("", result.finalUrl, fetchBody)` 传 `""` body，`parse("")` 直接返 Passthrough（空 body 不合法 m3u8）退出，根本不进 master 检测。**修法**：先 `fetchM3u8Body(result.finalUrl)` 拿 initialBody，失败返原 result；非 null 时调 `parseRecursive(initialBody, originalUrl, fetchBody)`
+- **测试用 `runBlocking` 而不是 `runTest`**（`v0.5.3`）：v0.5.3 测试只测 [parseRecursive] 纯逻辑——`parseRecursive` 内部没有 `delay()` 或协程调度，**不需要** TestDispatcher 控制虚拟时间。`runBlocking` 创建匿名协程并阻塞到完成，对纯逻辑测试最直接
+
+### 已知问题（v0.5.4+ 单独 PR）
+
+- **m3u8 v7+ HLS encryption**（`#EXT-X-KEY`）—— v0.5.3 仍是 v0.5.2 简化方案
+- **多 variant 选择 UI**（带宽/分辨率）—— v0.5.3 仍默认拿第一个；v0.5.4+ 可加 `PromptOptionsDialog` variant radio
+- **WebViewHeadlessSniffer 自身单测**（v0.5.0 留的欠账，需要 Robolectric）
+- **ANR 风险测试**（shouldInterceptRequest 1-3s 阻塞 Main 线程）
+- **DefaultWebViewFactory 0 size / GONE / JS enabled 配置的 instrumented test 覆盖**
+- **BilibiliAdapter**（WBI 签名 / click web API）
+- **抖音 adapter**（X-Bogus）
+
+---
+
 ## 维护约定
 
 - 每个阶段收尾时，把该阶段的 Added / Fixed 补进「未发布」段，并在 [`phases/`](phases/) 写复盘文档

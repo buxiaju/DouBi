@@ -23,6 +23,7 @@
 | 10 | headless browser 嗅探 | WebView 集成；覆盖 B 站/抖音/微博主页 JS 异步加载 | ✅ 完成（v0.5.0） | 1 周 |
 | 11 | WebViewHolder idle release | 单例常驻 ~30-50MB 在 30s 后自动释放；抽 WebViewFactory 让单测可写 | ✅ 完成（v0.5.1） | 1-2 天 |
 | 12 | m3u8 内容解析 | 抽 M3u8Parser + WebViewHeadlessSniffer 集成；master → first variant、media → first segment | ✅ 完成（v0.5.2） | 1-2 天 |
+| 13 | m3u8 递归解析 | M3u8Parser.parseRecursive 一路递归 master → variant → media → segment；MAX_RECURSION_DEPTH=5 | ✅ 完成（v0.5.3） | 1-2 天 |
 
 **预计总工期**：6-8 周一人（不含商店审核 1-3 天）
 
@@ -357,6 +358,37 @@
 - 递归解析 master → media（v0.5.2 只一层；变体子 m3u8 仍要 Engine 自己解析）
 - m3u8 v7+ HLS encryption（`#EXT-X-KEY`）—— 保留原 m3u8 URL 让 Engine 解析
 - 多 variant 选择 UI（带宽/分辨率）—— v0.5.2 默认拿第一个；v0.5.3+ 可加 `PromptOptionsDialog` variant radio
+- `WebViewHeadlessSniffer` 自身单测（v0.5.0 留的欠账，需要 Robolectric）
+- ANR 风险测试（v0.5.0 留的欠账）
+- `DefaultWebViewFactory` 0 size / GONE / JS enabled 配置的 instrumented test 覆盖
+- BilibiliAdapter / 抖音 adapter（新功能）
+
+## 阶段 13：m3u8 递归解析 ✅ 完成（v0.5.3）
+
+**目标**：v0.5.2 阶段 12 收官时记的「不递归解析 master → media」欠账（[phase-12.md](phases/phase-12.md) 决定 2）落地——[M3u8Parser.parseRecursive] 一路递归 master → variant → media → segment。
+
+**预计工期**：1-2 天
+
+**验收**：
+- [x] `M3u8Parser.parseRecursive` 新增方法：`suspend fun (body, baseUrl, fetchBody: suspend (String) -> String?): M3u8Result`
+- [x] `MAX_RECURSION_DEPTH = 5` 防循环引用
+- [x] fetchBody null 降级返 Variant（不抛异常，保留当前 URL 让调用方决定）
+- [x] `M3u8ParserTest` 4 例递归路径（multi-level / 直接 media / fetchBody null / 循环引用）
+- [x] `WebViewHeadlessSniffer.enhanceM3u8IfNeeded` 改用 `parseRecursive`，suspend lambda fetchBody 闭包
+- [x] 单测 **221/221 全绿**（v0.5.2 217 + 4 新增）
+- [x] `assembleDebug` 通过
+- [x] 阶段 13 复盘文档（[phase-13.md](phases/phase-13.md)）
+
+**已完成（详见 [phase-13.md](phases/phase-13.md)）**：
+- `M3u8Parser.parseRecursive`（suspend 函数 + 5 层 depth 护栏 + fetchBody null 返 Variant 降级）
+- `M3u8ParserTest` 4 例 `parseRecursive` 测试（用 `runBlocking` 包 suspend lambda）
+- `WebViewHeadlessSniffer.enhanceM3u8IfNeeded` 改用 `parseRecursive`：先 fetch 初始 body，失败返原 result；递归过程 fetchBody lambda 包 `fetchM3u8Body` 复用现有逻辑
+- 0 新依赖：fetchBody 内部仍走 [SnifferModule.provideOkHttpClient]
+
+### 不做（v0.5.4+ 单独 PR）
+
+- m3u8 v7+ HLS encryption（`#EXT-X-KEY`）—— v0.5.3 仍是 v0.5.2 简化方案
+- 多 variant 选择 UI（带宽/分辨率）—— v0.5.3 仍默认拿第一个
 - `WebViewHeadlessSniffer` 自身单测（v0.5.0 留的欠账，需要 Robolectric）
 - ANR 风险测试（v0.5.0 留的欠账）
 - `DefaultWebViewFactory` 0 size / GONE / JS enabled 配置的 instrumented test 覆盖
