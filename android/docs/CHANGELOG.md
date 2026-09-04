@@ -550,6 +550,52 @@
 
 ---
 
+## [未发布] v0.5.5
+
+**当前状态**：阶段 15 完成（X-Bogus 真算法 part 1），`versionName` 改为 `0.5.5` + `versionCode=13`，**尚未发布**。
+本版本把 v0.5.4 阶段 14 留的「XBogusSigner 是 placeholder」欠账**部分**落地——抽 [RC4] cipher + [CustomBase64] utility 升级 [XBogusSigner] 走真算法路径（RC4 + a_bogus 字母表编码）。`get_chaos(params, ua)` 仍 stub（v0.5.6+ 实装）。
+**Tag**：`v0.5.5-android`。
+
+### 已完成
+
+**阶段 15 — X-Bogus 真算法 part 1**（`未提交`）
+
+- **[RC4] cipher utility**（`core/util/RC4.kt`）：公开 RC4 KSA + PRGA 实现
+  - `encrypt(data, key): ByteArray` —— 字节数组进出
+  - 公开 test vector 验证：`Key`+`Plaintext` → `BBF316E8D940AF0AD3` ✓
+  - `a_bogus` 算法用 RC4 with key=[131]
+- **[CustomBase64] utility**（`core/util/CustomBase64.kt`）：自定义 Base64 编码
+  - 64 字符字母表参数化（**不**写死，方便测试 + 未来字母表改了只改参数）
+  - `encode(data, alphabet): String` —— 字节数组 → 字符串
+  - standard base64 字母表 `Man` → `TWFu` ✓（验证算法正确性）
+  - `a_bogus` 字母表 `Dkdpgh2ZmsQB80/MfvV36XI1R45-WUAlEixNLwoqYTOPuzKFjJnry79HbGcaStCe` `[0x41,0x42,0x43]` → `f6sp` ✓
+- **[XBogusSigner] 升级**（`platforms/douyin/XBogusSigner.kt`）：从 v0.5.4 SHA-256 placeholder 升级到 v0.5.5 RC4 + a_bogus 字母表编码
+  - `sign(url, userAgent, timestamp): String` —— 走完整算法路径
+  - `RC4_KEY = [131]` + `A_BOGUS_ALPHABET` + `SIGNATURE_LENGTH = 44` 写成 `companion object` 常量
+  - 输出长度 20 字符（v0.5.4）→ 44 字符（v0.5.5）——SHA-256 32 字节 → RC4 → 44 字符 a_bogus base64
+  - **get_chaos 仍 stub**（v0.5.6+ 实装真 JS 执行）
+- **269/269 单测全绿**（v0.5.4 258 + 11 新增：RC4Test 5 + CustomBase64Test 6）
+- **APK 验证**：`assembleDebug` 通过，APK 78 MB 不变（core/util/ + XBogusSigner 重构 inline）
+
+### 修复
+
+- **`byteArrayOf(131)` 不合法**（`v0.5.5`）：Kotlin `byteArrayOf` 只接受 `Byte`，131 是 Int。**修法**：`byteArrayOf(131.toByte())`。**教训**：Kotlin 强类型，`byteArrayOf(Int)` 不合法
+- **`(Int xor Int) → Int`，赋给 `Byte` 字段类型错**（`v0.5.5`）：bitwise operation 结果总是 Int。**修法**：`.toByte()` 显式转。**教训**：bitwise op 赋给 byte 字段要 `.toByte()`
+- **手算 bit segment 算错**（`v0.5.5`）：第一版 CustomBase64Test 期望 `"p2dk"`，实际 `"f6sp"`——手算 `[0x41,0x42,0x43]` 6-bit 段时错位。**修法**：用计算器验 bit segment。**教训**：手算 bit 段容易错位
+- **test 函数名带 `()` 编译错**（`v0.5.5`）：Kotlin function name backtick 包时，括号会跟 call syntax 冲突。**修法**：测试名不写括号
+- **Truth `isIn(String)` 不存在**（`v0.5.5`）：Truth `Subject.isIn` 只接受 `Iterable<T>`，`String` 不是。**修法**：用 Kotlin `in` operator
+
+### 已知问题（v0.5.6+ 单独 PR）
+
+- **真 get_chaos 实装**（执行抖音 webmssdk.js 拿 ~110 字节大数组）—— v0.5.5 stub 走抖音 web API 仍会被 -352 风控
+- **B 站 / 抖音 API 客户端**（OkHttp + Retrofit + WBI / X-Bogus 签名）
+- **Engine 集成**（`PlatformAdapter : Engine` interface）
+- **UI 集成**（`PromptOptionsDialog` 清晰度选择 + 合集）
+- **m3u8 v7+ HLS encryption** / **多 variant 选择 UI**
+- **WebViewHeadlessSniffer 自身单测** / **ANR 风险测试** / **DefaultWebViewFactory 0 size / GONE / JS enabled 配置的 instrumented test**
+
+---
+
 ## 维护约定
 
 - 每个阶段收尾时，把该阶段的 Added / Fixed 补进「未发布」段，并在 [`phases/`](phases/) 写复盘文档

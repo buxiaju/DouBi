@@ -25,6 +25,7 @@
 | 12 | m3u8 内容解析 | 抽 M3u8Parser + WebViewHeadlessSniffer 集成；master → first variant、media → first segment | ✅ 完成（v0.5.2） | 1-2 天 |
 | 13 | m3u8 递归解析 | M3u8Parser.parseRecursive 一路递归 master → variant → media → segment；MAX_RECURSION_DEPTH=5 | ✅ 完成（v0.5.3） | 1-2 天 |
 | 14 | B 站 / 抖音 platform foundation | BilibiliUrl + WbiSigner + DouyinUrl + XBogusSigner(placeholder) + PlatformRegistry + Hilt | ✅ 完成（v0.5.4） | 1 周 |
+| 15 | X-Bogus 真算法 part 1 | 抽 RC4 + CustomBase64 utility + XBogusSigner 升级走 RC4 + a_bogus 字母表编码（get_chaos 仍 stub v0.5.6+ 实装）| ✅ 完成（v0.5.5） | 1-2 天 |
 
 **预计总工期**：6-8 周一人（不含商店审核 1-3 天）
 
@@ -430,3 +431,35 @@
 - **UI 集成**（`PromptOptionsDialog` 加 B 站清晰度选择 + 抖音合集）
 - m3u8 v7+ HLS encryption / 多 variant 选择 UI（v0.5.3 留的欠账）
 - `WebViewHeadlessSniffer` 自身单测 / ANR 风险测试 / `DefaultWebViewFactory` 配置 instrumented test
+
+## 阶段 15：X-Bogus 真算法 part 1 ✅ 完成（v0.5.5）
+
+**目标**：v0.5.4 阶段 14 留的「XBogusSigner 是 placeholder」欠账**部分**落地——**RC4 + 自定义 Base64** 抽独立 utility，XBogusSigner 升级走真算法路径。`get_chaos` 仍 stub（v0.5.6+ 实装）。
+
+**预计工期**：1-2 天
+
+**重要说明**：v0.5.5 是 **part 1**——RC4 + CustomBase64 是公开反编译的 well-defined 算法已实装（byte-for-byte 验证），但 `get_chaos(params, ua)` 需要执行抖音 webmssdk.js 拿 ~110 字节大数组仍是 stub。v0.5.5 输出**结构对齐**真 a_bogus（44 字符 vs 真 a_bogus 168-172 字符），但**算法值不**等价真抖音 a_bogus。
+
+**验收**：
+- [x] `core/util/RC4.kt` —— 公开 RC4 KSA + PRGA + 5 例单测（含 RFC test vector `Key`+`Plaintext` → `BBF316E8D940AF0AD3`）
+- [x] `core/util/CustomBase64.kt` —— 64 字符字母表参数化 + 6 例单测
+- [x] `XBogusSigner` 升级——v0.5.4 SHA-256 placeholder → v0.5.5 RC4 + a_bogus 字母表编码
+- [x] `XBogusSignerTest` 更新——5 例从 20 字符 → 44 字符 + a_bogus 字母表字符集
+- [x] 单测 **269/269 全绿**（v0.5.4 258 + 11 新增）
+- [x] `assembleDebug` 通过
+- [x] 阶段 15 复盘文档（[phase-15.md](phases/phase-15.md)）
+
+**已完成（详见 [phase-15.md](phases/phase-15.md)）**：
+- `core/util/RC4.kt` —— RC4 流密码（KSA + PRGA），用公开 test vector 验证
+- `core/util/CustomBase64.kt` —— 抖音 a_bogus 字母表 `Dkdpgh2ZmsQB80/MfvV36XI1R45-WUAlEixNLwoqYTOPuzKFjJnry79HbGcaStCe`
+- `XBogusSigner.sign()` —— RC4.encrypt(stubChaos, [131]) + CustomBase64.encode(encrypted, a_bogusAlphabet)
+- 0 新依赖
+
+### 不做（v0.5.6+ 单独 PR）
+
+- **真 get_chaos 实装**（执行抖音 webmssdk.js 拿 ~110 字节大数组）—— Android 端 JS 引擎集成（Rhino / Nashorn）或反编译算法后手写
+- B 站 / 抖音 API 客户端（OkHttp + Retrofit + WBI / X-Bogus 签名）
+- Engine 集成（`PlatformAdapter : Engine` interface）
+- UI 集成（`PromptOptionsDialog` 清晰度选择 + 合集）
+- m3u8 v7+ HLS encryption / 多 variant 选择 UI
+- WebViewHeadlessSniffer 自身单测 / ANR 风险测试 / DefaultWebViewFactory 配置 instrumented test
