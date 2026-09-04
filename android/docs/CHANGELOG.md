@@ -506,6 +506,50 @@
 
 ---
 
+## [未发布] v0.5.4
+
+**当前状态**：阶段 14 完成（B 站 / 抖音 platform foundation），`versionName` 改为 `0.5.4` + `versionCode=12`，**尚未发布**。
+本版本把 v0.5.0 阶段 10 留的「BilibiliAdapter / 抖音 adapter」欠账（[phase-10.md](phases/phase-10.md) 已知问题段）落地——**foundation 层**（URL 分类 + 签名算法 + 平台分发）。v0.5.5+ 实装真 X-Bogus 算法 + API 客户端 + Engine 集成 + UI 集成才能真正下 B 站 / 抖音视频。
+**Tag**：`v0.5.4-android`。
+
+### 已完成
+
+**阶段 14 — B 站 / 抖音 platform foundation**（`未提交`）
+
+- **BilibiliUrl**（`platforms/bilibili/BilibiliUrl.kt`）：6 种 URL 类型分类（VIDEO / SHORTS / BANGUMI / AUDIO / LIVE / UNSUPPORTED）+ `toCanonicalUrl` 归一化
+- **WbiSigner**（`platforms/bilibili/WbiSigner.kt`）：公开反编译的完整 WBI 签名算法
+  - `extractMixinKey(imgUrl, subUrl): String` —— 32 字符 mixin_key
+  - `sign(query, mixinKey, wts): String` —— MD5 签名（w_rid）
+- **DouyinUrl**（`platforms/douyin/DouyinUrl.kt`）：3 种 URL 类型分类（VIDEO / SHORT_LINK / UNSUPPORTED）+ `toCanonicalUrl` 归一化
+- **XBogusSigner placeholder**（`platforms/douyin/XBogusSigner.kt`）：**v0.5.4 简化版**（SHA-256(UA + URL + timestamp) → base64 前 20 字符），**不是**抖音真 X-Bogus 输出。代码 + 文档清楚标记 v0.5.5+ 必须实装真算法
+- **PlatformRegistry**（`platforms/PlatformRegistry.kt`）：URL → Platform 分发（BILIBILI / DOUYIN / YOUTUBE / GENERIC）
+- **PlatformModule Hilt**（`platforms/di/PlatformModule.kt`）：Hilt 装配（PlatformRegistry + BilibiliUrl + DouyinUrl + 自动 @Inject WbiSigner / XBogusSigner）
+- **37 例单测新增**（v0.5.3 221 → 258）：
+  - `BilibiliUrlTest` 10 例：BV / AV / shorts / bangumi ep-ss-md / live / non-bili / canonical 2 例
+  - `WbiSignerTest` 6 例：mixin_key 32 字符 / 确定性 / 太短抛 / MD5 32 字符 / 参数敏感 / 确定性
+  - `DouyinUrlTest` 9 例：19 位 ID / 12 位 ID / short link / live / user / non-douyin / canonical 3 例
+  - `XBogusSignerTest` 5 例：20 字符 / 参数敏感 / 确定性 / base64 字符集 / 不同 URL 不同输出
+  - `PlatformRegistryTest` 7 例：B 站 video / B 站 bangumi / 抖音 main / 抖音 short / YouTube / generic / 空
+- **258/258 单测全绿**（v0.5.3 221 + 37 新增）
+- **APK 验证**：`assembleDebug` 通过，APK 78 MB 不变（platforms/ 6 个新文件 + di/PlatformModule.kt 都是 0 size 字节码 pure logic）
+
+### 修复
+
+- **合成 BV ID 字符数错**（`v0.5.4`）：第一版 `classify shorts returns SHORTS` 写 `BV1short1` 当 BV ID（9 字符总长）——BV ID 是 **BV + 10 字符 = 12 字符总长**。**修法**：合成 12 字符 BV ID（`BV1Ab2Cd3Ef4`）。**教训**：B 站 BV ID 是 12 字符总长，**不**是 10 字符
+- **WbiSigner 合成 img_url 没 `?` query 段**（`v0.5.4`）：第一版合成 `"https://i0.hdslb.com/bfs/wbi/abc.png"`（无 `?query=`），`substringAfter("?", "")` 返空串，filter 后 0 字符触发 require。**修法**：合成真 B 站 nav 接口 URL 格式 `...?{30 字符 query}`。**教训**：B 站 nav 接口 URL 格式是 `{base}?{query}`，query 段通常 30-40 字符
+- **Kotlin `"X" * 32` 不合法**（`v0.5.4`）：Kotlin String **不**有 `*` 操作符（不像 Python `"X" * 32`）。**修法**：`"X".repeat(32)` 替 `"X" * 32`。**教训**：从 Python 写 Kotlin 测试时常见——Python `*` / `+` 操作符 for String 跟 Kotlin 完全不同
+
+### 已知问题（v0.5.5+ 单独 PR）
+
+- **真 X-Bogus 算法实装**（公开反编译完整版本，RC4 + MD5 + 复杂字节操作）—— v0.5.4 placeholder **不能**直接打抖音 web API（会被 -352 风控）
+- **B 站 / 抖音 API 客户端**（OkHttp + Retrofit，需要 WBI / X-Bogus 签名支持）
+- **Engine 集成**（`PlatformAdapter : Engine` interface，调度 B 站 / 抖音 adapter）
+- **UI 集成**（`PromptOptionsDialog` 加 B 站清晰度选择 + 抖音合集）
+- **m3u8 v7+ HLS encryption** / **多 variant 选择 UI**（v0.5.3 留的欠账）
+- **WebViewHeadlessSniffer 自身单测** / **ANR 风险测试** / **DefaultWebViewFactory 0 size / GONE / JS enabled 配置的 instrumented test**
+
+---
+
 ## 维护约定
 
 - 每个阶段收尾时，把该阶段的 Added / Fixed 补进「未发布」段，并在 [`phases/`](phases/) 写复盘文档

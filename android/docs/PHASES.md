@@ -24,6 +24,7 @@
 | 11 | WebViewHolder idle release | 单例常驻 ~30-50MB 在 30s 后自动释放；抽 WebViewFactory 让单测可写 | ✅ 完成（v0.5.1） | 1-2 天 |
 | 12 | m3u8 内容解析 | 抽 M3u8Parser + WebViewHeadlessSniffer 集成；master → first variant、media → first segment | ✅ 完成（v0.5.2） | 1-2 天 |
 | 13 | m3u8 递归解析 | M3u8Parser.parseRecursive 一路递归 master → variant → media → segment；MAX_RECURSION_DEPTH=5 | ✅ 完成（v0.5.3） | 1-2 天 |
+| 14 | B 站 / 抖音 platform foundation | BilibiliUrl + WbiSigner + DouyinUrl + XBogusSigner(placeholder) + PlatformRegistry + Hilt | ✅ 完成（v0.5.4） | 1 周 |
 
 **预计总工期**：6-8 周一人（不含商店审核 1-3 天）
 
@@ -393,3 +394,39 @@
 - ANR 风险测试（v0.5.0 留的欠账）
 - `DefaultWebViewFactory` 0 size / GONE / JS enabled 配置的 instrumented test 覆盖
 - BilibiliAdapter / 抖音 adapter（新功能）
+
+## 阶段 14：BilibiliAdapter / 抖音 adapter foundation ✅ 完成（v0.5.4）
+
+**目标**：v0.5.0 阶段 10 留的「BilibiliAdapter / 抖音 adapter」欠账（[phase-10.md](phases/phase-10.md) 已知问题段）落地——**foundation 层**（URL 分类 + 签名算法 + 平台分发）。
+
+**预计工期**：1 周
+
+**重要说明**：v0.5.4 是 **foundation 范围**——XBogusSigner 是 placeholder（SHA-256 简化版），**不**是抖音真 X-Bogus 输出。v0.5.5+ 实装真 X-Bogus 算法 + API 客户端 + Engine 集成 + UI 集成才能真正下 B 站 / 抖音视频。
+
+**验收**：
+- [x] `BilibiliUrl` 6 种类型分类（VIDEO / SHORTS / BANGUMI / AUDIO / LIVE / UNSUPPORTED）+ 10 例单测
+- [x] `WbiSigner` 完整 WBI 签名算法（公开反编译 + mixin_key 提取 + MD5 签名）+ 6 例单测
+- [x] `DouyinUrl` 3 种类型分类（VIDEO / SHORT_LINK / UNSUPPORTED）+ 9 例单测
+- [x] `XBogusSigner` **placeholder**（v0.5.5+ 实装真算法）+ 5 例单测（结构验证）
+- [x] `PlatformRegistry` URL → Platform 分发（BILIBILI / DOUYIN / YOUTUBE / GENERIC）+ 7 例单测
+- [x] `PlatformModule` Hilt 装配
+- [x] 单测 **258/258 全绿**（v0.5.3 221 + 37 新增）
+- [x] `assembleDebug` 通过
+- [x] 阶段 14 复盘文档（[phase-14.md](phases/phase-14.md)）
+
+**已完成（详见 [phase-14.md](phases/phase-14.md)）**：
+- `platforms/bilibili/BilibiliUrl.kt` —— 6 种类型 URL 分类 + toCanonicalUrl
+- `platforms/bilibili/WbiSigner.kt` —— 完整 WBI 签名（extractMixinKey + sign）
+- `platforms/douyin/DouyinUrl.kt` —— 3 种类型 URL 分类
+- `platforms/douyin/XBogusSigner.kt` —— **v0.5.4 placeholder**（SHA-256 简化版，**不是**真 X-Bogus）
+- `platforms/PlatformRegistry.kt` —— URL → Platform 分发
+- `platforms/di/PlatformModule.kt` —— Hilt 装配
+
+### 不做（v0.5.5+ 单独 PR）
+
+- **真 X-Bogus 算法实装**（公开反编译完整版本，RC4 + MD5 + 复杂字节操作）—— v0.5.5+ 实装 + 真抖音 web 响应作为 test vector
+- **B 站 / 抖音 API 客户端**（OkHttp + Retrofit，需要 WBI / X-Bogus 签名支持）
+- **Engine 集成**（`PlatformAdapter : Engine` interface）
+- **UI 集成**（`PromptOptionsDialog` 加 B 站清晰度选择 + 抖音合集）
+- m3u8 v7+ HLS encryption / 多 variant 选择 UI（v0.5.3 留的欠账）
+- `WebViewHeadlessSniffer` 自身单测 / ANR 风险测试 / `DefaultWebViewFactory` 配置 instrumented test

@@ -54,8 +54,9 @@
 | 桌面版文件 | 行数 | Android 版落点 | 计划阶段 | 状态 |
 |---|---|---|---|---|
 | `platforms/youtube/`（含 `api` / `url` / `strategies`） | ~500 | `platforms/youtube/YouTubeStrategy.kt` + `YouTubeUrlClassifier.kt` | 4 | ❌ **`platforms/` 目录整个不存在**。当前 YouTube 识别只有 `YtDlpEngine.supports()` 里的 URL 判断 |
-| `platforms/bilibili/`（含 `api` / `auth` / `strategies` / `url` / `wbi` / `qr_login`） | ~1500 | v0.2+ | v0.2 | ⏸️ 首版不做 |
-| `platforms/douyin/`（含 `api` / `auth` / `strategies` / `url` / `live`） | ~1200 | v0.2+ | v0.2 | ⏸️ 首版不做 |
+| `platforms/bilibili/`（含 `api` / `auth` / `strategies` / `url` / `wbi` / `qr_login`） | ~1500 | `platforms/bilibili/BilibiliUrl.kt` + `WbiSigner.kt` + `di/PlatformModule.kt` | 14 | 🟡 **阶段 14 v0.5.4 foundation 落地**——BilibiliUrl 6 类型 URL 分类 + WbiSigner 完整 WBI 签名算法。**未**做：API 客户端（`api.py`）、auth（QR 登录 `qr_login.py`）、strategies、Engine 集成。v0.5.5+ |
+| `platforms/douyin/`（含 `api` / `auth` / `strategies` / `url` / `live`） | ~1200 | `platforms/douyin/DouyinUrl.kt` + `XBogusSigner.kt` + `di/PlatformModule.kt` | 14 | 🟡 **阶段 14 v0.5.4 foundation 落地**——DouyinUrl 3 类型 URL 分类 + XBogusSigner **placeholder**（v0.5.5+ 实装真算法）。**未**做：API 客户端、auth、strategies、live、Engine 集成。v0.5.5+ |
+| `platforms/PlatformRegistry` | ~50 | `platforms/PlatformRegistry.kt` | 14 | ✅ **阶段 14 v0.5.4 落地**——URL → Platform 分发（BILIBILI / DOUYIN / YOUTUBE / GENERIC） |
 | `platforms/generic/`（Playwright 嗅探） | ~800 | v0.4+ 评估 playwright-android；v0.1 用直链嗅探 | 延后 | ⏸️ 首版不做 |
 
 ### `ui/`
@@ -93,8 +94,8 @@
 | `tests/test_pipeline_smoke.py` | 28 | 阶段 1、4 落地 | ❌ 0（`core/pipeline/` 还不存在） |
 | `tests/test_sniffer.py`（v0.4.0 新增，桌面版 `core/sniffer.py` 对应单测） | ~25 | 阶段 8 + 10 + 11 + 12 + 13 落地 | ✅ 34（`HttpContentTypeSnifferTest` 13 + `CompositeSnifferTest` 4 + `WebViewHolderTest` 5 + `M3u8ParserTest` 12） |
 | `tests/test_pipeline_retry.py` | 16 | 阶段 2 + 3 落地 | ✅ 13（`DownloadWorkerTest` 13 例 `isTransientFailure` 判据）—— 欠账 #3 阶段 3 已还 |
-| `tests/test_bilibili_adapter.py` | 56 | v0.2+ | ⏸️ 首版不做 |
-| `tests/test_douyin_adapter.py` | 43 | v0.2+ | ⏸️ 首版不做 |
+| `tests/test_bilibili_adapter.py` | 56 | v0.5.4 foundation + v0.5.5+ API | 🟡 **阶段 14 v0.5.4 落地 16 例**（BilibiliUrlTest 10 + WbiSignerTest 6）——URL 分类 + WBI 签名算法。**未**做：API 客户端、auth、strategies 测试。v0.5.5+ |
+| `tests/test_douyin_adapter.py` | 43 | v0.5.4 foundation + v0.5.5+ API | 🟡 **阶段 14 v0.5.4 落地 14 例**（DouyinUrlTest 9 + XBogusSignerTest 5）——URL 分类 + X-Bogus placeholder。**未**做：API 客户端、auth、live 测试。v0.5.5+ |
 | `tests/test_youtube_adapter.py` | 31 | 阶段 4 落地 | 🟡 6（`YtDlpEngineTest` 里的 URL 识别部分） |
 | `tests/test_storage.py` | 55 | 阶段 1 落地 | 🟡 6（`MediaItemDaoTest`，**从未在设备上跑过**）。`PendingTaskDao` / `TaskDao` / `IncrementCheckpointDao` 三个 DAO 零测试 |
 | `tests/test_task_manager.py` | 31 | 阶段 1 + 5 落地 | ❌ 0 |
@@ -114,11 +115,17 @@
 
 | 口径 | 数量 |
 |---|---|
-| 单元测试（`src/test/`，JVM，**221/221 全绿**） | **221**（业务 220 + AS 模板 1） |
+| 单元测试（`src/test/`，JVM，**258/258 全绿**） | **258**（业务 257 + AS 模板 1） |
 | 仪器测试（`src/androidTest/`，**从未执行**） | **10**（业务 9 + AS 模板 1） |
 | 相对 ~280 估算的进度 | 约 **73%** |
 
 其中 `ModelTest` 10 例是 Android 端自加的（桌面版没有对应的 `test_models.py`），不计入上面的移植映射。
+
+**v0.5.4 平台 foundation 测试覆盖**：
+- B 站 16 例（`BilibiliUrlTest` 10 + `WbiSignerTest` 6）—— URL 分类 + WBI 签名算法
+- 抖音 14 例（`DouyinUrlTest` 9 + `XBogusSignerTest` 5）—— URL 分类 + X-Bogus placeholder
+- Platform 分发 7 例（`PlatformRegistryTest`）—— URL → Platform 分发
+- **合计 37 例** v0.5.4 新增（v0.5.3 221 → 258）
 
 ## CHANGELOG 同步策略
 
