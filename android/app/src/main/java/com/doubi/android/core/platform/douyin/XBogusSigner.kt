@@ -1,69 +1,99 @@
 package com.doubi.android.core.platform.douyin
 
+import com.doubi.android.core.util.CustomBase64
+import com.doubi.android.core.util.RC4
 import java.security.MessageDigest
-import java.util.Base64
 import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * 阶段 14 v0.5.4：抖音 X-Bogus 签名算法。1:1 对拍桌面版 `src/doubi/platforms/douyin/xbogus.py`。
+ * 阶段 14/15 v0.5.4 / v0.5.5：抖音 X-Bogus 签名算法。1:1 对拍桌面版 `src/doubi/platforms/douyin/xbogus.py`。
  *
- * **v0.5.4 placeholder 范围**：
- * - **接口落地**：`sign(url, userAgent, timestamp): String` 签名
- * - **结构验证**：单测验证输入参数敏感、确定性、输出长度
- * - **byte-for-byte 实现留 v0.5.5+** —— 公开反编译的 X-Bogus 算法涉及 RC4 加密 +
- *   MD5 + 自定义字节操作 + 复杂编码，**没有真抖音 web 响应作为 test vector** 没法
- *   验证 byte-for-byte 输出
+ * **v0.5.5 阶段 15 升级**（vs v0.5.4 placeholder）：
+ * - 抽出 **RC4 加密**（[RC4.encrypt]）和 **自定义 Base64 编码**（[CustomBase64.encode]）作为
+ *   独立 utility —— 都是公开反编译的 well-defined 算法
+ * - [sign] 用 [RC4] 加密 chaos_str + [CustomBase64] 编码 final 字符串
+ * - **get_chaos(params, ua)** 仍是 stub（v0.5.6+ 实装真 JS 执行 / 字节拼装）
  *
- * **算法背景**（v0.5.5+ 真的要实装时再看）：
- * 抖音 web API（`www.iesdouyin.com/web/api/v2/...`、`www.douyin.com/aweme/v1/web/...`）
- * 强制要求请求带 `X-Bogus` query param（19 字符），缺失返 -352 风控错误。
- * X-Bogus 算法是抖音前端 JS（`byted-acrawler`）的产物——公开反编译后有多个社区
- * 复刻项目（`Douyin_TikTok_Download_API`、`Johnserf-Seed/f2` 等）。
+ * **公开反编译的 a_bogus 算法结构**（参考 https://blog.csdn.net/weixin_48673014 ）：
+ * ```
+ * def get_a_bogus(params, _ua):
+ *     s1, s2 = get_chaos(params, _ua)     # 调 JS 黑盒拿两个 byte 字符串
+ *     s2 = make_str_chaos(s2)             # RC4 with key=[131] 加密 s2
+ *     a_bogus = chaos2result(s1 + s2)     # 自定义 base64 编码
+ *     return a_bogus
+ * ```
  *
- * **算法大致结构**（公开反编译，v0.5.5+ 复刻用）：
- * 1. 收集 inputs：URL path + sorted URL params + body + userAgent + timestamp
- * 2. 字节化拼接（特定分隔符）
- * 3. MD5 hash 部分
- * 4. RC4 加密（特定 key）
- * 5. XOR / byte 操作合成
- * 6. 编码成 19 字符字符串
+ * **v0.5.5 实装的部分**：
+ * - `make_str_chaos` → [RC4.encrypt] with key=[131] ✓
+ * - `chaos2result` → [CustomBase64.encode] with a_bogus 字母表 ✓
  *
- * **v0.5.4 简化实现**（placeholder）：
- * - 用 SHA-256(UA + URL + timestamp) 取前 20 字符做 base64
- * - **不**等于真抖音 X-Bogus 输出——只是为了**结构对齐**（输入参数、输出格式）
- * - v0.5.5+ API 集成时换成真算法，**单测**保留（验证输入参数敏感性仍然有效）
+ * **v0.5.6+ 仍 stub 的部分**：
+ * - `get_chaos(params, _ua)` —— 需要执行抖音前端 JS（`webmssdk.js`）+ 拼装 ~110 字节大数组
+ * - v0.5.5 用 `SHA-256(params + ua + timestamp) → 32 字节` 作为 stub chaos
+ * - **v0.5.5 输出** ≠ 抖音真 a_bogus，但**结构对齐**（经过 RC4 + 自定义 base64）
  *
  * **风险**：
- * - v0.5.4 placeholder 直接拿去打抖音 web API 会被风控 -352
- * - v0.5.5+ 必须实装真算法才能用
+ * - v0.5.5 stub chaos 走抖音 web API 仍会被 -352 风控
+ * - 真 chaos 算法 v0.5.6+ 实装：要么用 Rhino / Nashorn 执行 JS（Android 端
+ *   JavaScript 引擎集成），要么反编译算法后手写
  * - 抖音可能改前端 JS 让反编译算法失效——需 live validation
  */
 @Singleton
 class XBogusSigner @Inject constructor() {
 
     /**
-     * 计算 X-Bogus 字符串。
+     * 计算 a_bogus 字符串。
      *
      * @param url 完整 URL（含 query string）
-     * @param userAgent 浏览器 UA（桌面版从 `AppConfig.userAgent` 拿）
+     * @param userAgent 浏览器 UA
      * @param timestamp 当前时间戳（秒）
-     * @return X-Bogus 字符串（v0.5.4 placeholder——**不**是抖音真算法输出）
+     * @return a_bogus 字符串（v0.5.5 结构对齐 + RC4 + 自定义 base64；**v0.5.6+ 才能 byte-for-byte 真**）
      */
     fun sign(url: String, userAgent: String, timestamp: Long): String {
-        // v0.5.4 placeholder：把输入拼一起做 SHA-256，前 20 字符做 base64
-        // v0.5.5+ 实装真算法：MD5 + RC4 + 复杂字节操作
+        // v0.5.5 stub chaos：SHA-256(params + ua + timestamp) → 32 字节
+        // 真实 get_chaos 需要调抖音 webmssdk.js 拿 ~110 字节大数组
+        val stubChaos = generateStubChaos(url, userAgent, timestamp)
+        // a_bogus 算法第二步：RC4 with key=[131] 加密 chaos
+        val encrypted = RC4.encrypt(stubChaos, RC4_KEY)
+        // a_bogus 算法第三步：自定义 base64 编码（a_bogus 字母表）
+        return CustomBase64.encode(encrypted, A_BOGUS_ALPHABET)
+    }
+
+    /**
+     * v0.5.5 stub chaos 生成 —— 用 SHA-256 拼 32 字节。
+     *
+     * **v0.5.6+ 必须替换**为真 `get_chaos` —— 这函数当前**不**等价抖音 a_bogus 输入。
+     * 保留它是**为了**：
+     * 1. **结构验证**——v0.5.5 output 确实经过 RC4 + 自定义 base64
+     * 2. **代码骨架**——v0.5.6+ 替换 get_chaos 即可，无需改其它部分
+     * 3. **测试可写**——stub 输出确定性，能跑单测
+     */
+    private fun generateStubChaos(url: String, userAgent: String, timestamp: Long): ByteArray {
         val input = "$userAgent|$url|$timestamp"
-        val sha256 = MessageDigest.getInstance("SHA-256").digest(input.toByteArray(Charsets.UTF_8))
-        return Base64.getEncoder().withoutPadding().encodeToString(sha256).take(SIGNATURE_LENGTH)
+        return MessageDigest.getInstance("SHA-256").digest(input.toByteArray(Charsets.UTF_8))
     }
 
     companion object {
         /**
-         * 真 X-Bogus 字符串长度 19 字符（公开文档）。
-         * v0.5.4 placeholder 输出也是 20 字符（base64 前 20 位）——v0.5.5+ 实装
-         * 真算法时改成 19。
+         * a_bogus 算法第二步用的 RC4 key（公开反编译固定值）。
          */
-        const val SIGNATURE_LENGTH = 20
+        private val RC4_KEY: ByteArray = byteArrayOf(131.toByte())
+
+        /**
+         * a_bogus 算法第三步用的自定义 Base64 字母表（公开反编译固定值）。
+         * 64 字符，跟标准 Base64 同长度，**顺序不同**。
+         */
+        const val A_BOGUS_ALPHABET = "Dkdpgh2ZmsQB80/MfvV36XI1R45-WUAlEixNLwoqYTOPuzKFjJnry79HbGcaStCe"
+
+        /**
+         * v0.5.5 stub 输出长度 = SHA-256 32 字节 → base64 后 44 字符
+         * （v0.5.5 placeholder v0.5.4 是 20 字符，v0.5.5 升级到完整 RC4 + base64 路径，
+         * 输出从 20 → 44 字符）
+         *
+         * **真 a_bogus 输出约 168-172 字符**（公开反编译文档）——v0.5.6+ 实装真 get_chaos 后
+         * 输出长度会变。
+         */
+        const val SIGNATURE_LENGTH = 44
     }
 }
