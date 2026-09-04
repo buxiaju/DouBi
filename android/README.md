@@ -6,13 +6,13 @@
 
 ## 当前进度
 
-**阶段 15 完成**（v0.5.5-android 收官候选），`versionName = 0.5.5`，**尚未发布任何版本**。下一步是 v0.5.6+（真 get_chaos 实装 / B 站抖音 API 客户端 / Engine 集成 / UI 集成）。
+**阶段 16 完成**（v0.5.6-android 收官候选），`versionName = 0.5.6`，**尚未发布任何版本**。下一步是 v0.5.7+（真 get_chaos 实装 / Engine 集成 / UI 集成）。
 
 | | 状态 |
 |---|---|
-| 已完成 | 阶段 0 脚手架 ✅ ｜ 阶段 1 数据层 + 配置 ✅ ｜ 阶段 2 下载引擎 ✅ ｜ 阶段 3 UI 框架 ✅ ｜ 阶段 4 解析 + 列表 ✅ ｜ 阶段 5 下载 + 进度 + 完成通知 ✅ ｜ 阶段 6 历史 + 设置 ✅ ｜ 阶段 7 商店准备 ✅ ｜ 阶段 8 通用嗅探 ✅ ｜ 阶段 9 自用 UX 收官 ✅ ｜ 阶段 10 headless browser 嗅探 ✅ ｜ 阶段 11 WebViewHolder idle 30s release ✅ ｜ 阶段 12 m3u8 内容解析 ✅ ｜ 阶段 13 m3u8 递归解析 ✅｜ 阶段 14 B 站 / 抖音 platform foundation ✅｜ **阶段 15 X-Bogus 真算法 part 1** ✅（抽 RC4 + CustomBase64 utility + XBogusSigner 升级走 RC4 + a_bogus 字母表编码 + 11 例单测）|
-| 待完成 | v0.5.6+ 单独 PR：真 get_chaos 实装（v0.5.5 stub 走抖音 web API 仍会被 -352 风控）+ B 站 / 抖音 API 客户端（OkHttp + Retrofit + WBI/X-Bogus 签名）+ Engine 集成 + UI 集成。v0.5.7+：m3u8 v7+ HLS encryption / 多 variant 选择 UI / WebViewHeadlessSniffer 自身单测（需 Robolectric）/ ANR 风险测试 / DefaultWebViewFactory 配置 instrumented test |
-| 测试 | 单测 **269/269 全绿**（2026-09-04 实跑验证：46 → 64 → 99 → 153 → 158 → 167 → 183 → 200 → 204 → 209 → 217 → 221 → 258 → 269，+223 例；v0.4.1 +16；v0.5.0 +4；v0.5.1 +5；v0.5.2 +8；v0.5.3 +4；v0.5.4 +37；v0.5.5 +11：RC4Test 5 + CustomBase64Test 6）；仪器测试 10 个**写了但从未在真机执行** |
+| 已完成 | 阶段 0 脚手架 ✅ ｜ 阶段 1 数据层 + 配置 ✅ ｜ 阶段 2 下载引擎 ✅ ｜ 阶段 3 UI 框架 ✅ ｜ 阶段 4 解析 + 列表 ✅ ｜ 阶段 5 下载 + 进度 + 完成通知 ✅ ｜ 阶段 6 历史 + 设置 ✅ ｜ 阶段 7 商店准备 ✅ ｜ 阶段 8 通用嗅探 ✅ ｜ 阶段 9 自用 UX 收官 ✅ ｜ 阶段 10 headless browser 嗅探 ✅ ｜ 阶段 11 WebViewHolder idle 30s release ✅ ｜ 阶段 12 m3u8 内容解析 ✅ ｜ 阶段 13 m3u8 递归解析 ✅｜ 阶段 14 B 站 / 抖音 platform foundation ✅｜ 阶段 15 X-Bogus 真算法 part 1 ✅｜ **阶段 16 B 站 / 抖音 API 客户端** ✅（BilibiliApiClient WBI 真用 + DouyinApiClient X-Bogus 仍 stub + JSON regex 解析 + 10 例单测）|
+| 待完成 | v0.5.7+ 单独 PR：真 get_chaos 实装（v0.5.6 抖音 API 仍 -352 风控）+ Engine 集成（PlatformAdapter : Engine）+ UI 集成（PromptOptionsDialog 清晰度选择 + 合集）+ mixin_key/X-Bogus 缓存 + Play URL 获取（playurl/playwm）。v0.5.8+：m3u8 v7+ HLS encryption / 多 variant 选择 UI / WebViewHeadlessSniffer 自身单测（需 Robolectric）/ ANR 风险测试 / DefaultWebViewFactory 配置 instrumented test |
+| 测试 | 单测 **279/279 全绿**（2026-09-04 实跑验证：46 → 64 → 99 → 153 → 158 → 167 → 183 → 200 → 204 → 209 → 217 → 221 → 258 → 269 → 279，+233 例；v0.4.1 +16；v0.5.0 +4；v0.5.1 +5；v0.5.2 +8；v0.5.3 +4；v0.5.4 +37；v0.5.5 +11；v0.5.6 +10：BilibiliApiClientTest 5 + DouyinApiClientTest 5）；仪器测试 10 个**写了但从未在真机执行** |
 | 能跑什么 | Run 起来 5 个 tab 底栏可点；粘贴 tab 输入 URL → **任意 http(s) URL**（含 B 站 / 抖音 / 微博主页"JS 异步加载"网站，v0.5.0 WebView 集成）→ 弹「下载选项」选 format + 容器 / 缩略图 / 字幕 / 续传 / 标题模板 → 入队 Worker；下载中 tab 看实时进度 + 速度 + ETA + 取消；历史 tab 看 Room 记录 + 文件状态 + 重新下载；设置 tab **13+ 字段改完即生效**（含主题切换、重复下载策略、引擎 aria2、通用嗅探 5 字段、附加 NFO/JSON/弹幕）；`assembleDebug` 成功出 ~78 MB APK（v0.5.0 WebView 集成 Chromium native lib 增量 +2 MB）；`bundleRelease` 成功出 **64.7 MB .aab**（自用 keystore 签名） |
 | 构建环境 | ⚠️ 命令行必须用 AS 自带 JBR 25，系统 JDK 26 会挂在 `androidJdkImage`（[SETUP.md](docs/SETUP.md)）⚠️ release 签名走 `~/.gradle/gradle.properties` 环境变量，**keystore 不进 git**——换电脑需重新生成 |
 

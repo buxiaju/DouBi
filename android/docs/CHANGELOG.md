@@ -596,6 +596,49 @@
 
 ---
 
+## [未发布] v0.5.6
+
+**当前状态**：阶段 16 完成（B 站 / 抖音 API 客户端），`versionName` 改为 `0.5.6` + `versionCode=14`，**尚未发布**。
+本版本把 v0.5.4 阶段 14 留的「API 客户端」欠账落地——[BilibiliApiClient]（WBI 签名）+ [DouyinApiClient]（X-Bogus 仍 stub）+ JSON 解析用 regex 避开 `org.json` JVM 单测 stub 限制。
+**Tag**：`v0.5.6-android`。
+
+### 已完成
+
+**阶段 16 — B 站 / 抖音 API 客户端**（`未提交`）
+
+- **[BilibiliApiClient]**（`platforms/bilibili/BilibiliApiClient.kt`）：B 站 web API 客户端（WBI 真用上）
+  - `fetchMixinKey()` —— `GET /x/web-interface/nav` 拿 `wbi_img.img_url` + `wbi_img.sub_url` → 调 [WbiSigner.extractMixinKey] 拿 32 字符 mixin_key
+  - `view(bvid)` —— `GET /x/web-interface/view?bvid=XXX&wts=NNN&w_rid=XXX` 拿视频 info（title / duration / cid / owner / pageCount）
+  - 调 [WbiSigner] 真用上 v0.5.4 阶段 14 落地的算法
+- **[BilibiliViewResponse]** DTO：bvid / aid / title / duration / cid / ownerName / ownerMid / pageCount
+- **[DouyinApiClient]**（`platforms/douyin/DouyinApiClient.kt`）：抖音 web API 客户端
+  - `awemeItemInfo(itemIds)` —— `GET /web/api/v2/aweme/iteminfo/?item_ids=XXX&X-Bogus=YYY` 拿 aweme info
+  - 调 [XBogusSigner] 真用上 v0.5.5 阶段 15 落地的 RC4 + a_bogus 字母表编码（**get_chaos 仍 stub**——走真 API 会被 -352 风控）
+- **[DouyinAwemeItem]** DTO：awemeId / desc / durationSec / authorNickname / authorSecUid / playUrl / coverUrl
+- **JSON 解析用 regex**——避开 `org.json.JSONObject` JVM 单测是 stub 的限制
+  - `"key"\s*:\s*"([^"]+)"` 字符串值
+  - `"key"\s*:\s*(\d+)` 整数值
+  - 嵌套对象用括号深度计数（`{` +1 / `}` -1）
+- **10 例单测新增**（v0.5.5 269 → 279）：HTTP 流 + WBI/X-Bogus 签名调用 + 错误处理
+- **`assembleDebug` 通过**，APK 80.4 MB（v0.5.5 78 MB + 2.4 MB OkHttp/JSON 解析）
+
+### 修复
+
+- **`org.json.JSONObject` 在 JVM 单测是 stub**（`v0.5.6`）：第一版 `BilibiliApiClientTest` 用真实 JSON 字符串跑——5/5 全挂（`optJSONObject` 返 null）。**修法**：production 代码改用 regex 提取 JSON 字段（**不**依赖 `org.json`），单测用合成 JSON 字符串验证 regex 提取。**教训**：`org.json` 在 JVM 单测不可用——v0.5.6 之前**所有**涉及 JSON 解析的测试都受影响（[phase-9.md 修复段](phases/phase-9.md)）。**新策略**是 production 代码用 regex + 字符串处理
+- **`kotlin.test` 不在 classpath**（`v0.5.6`）：第一版测试用 `kotlin.test.assertEquals` 编译报 "Unresolved reference 'test'"。**修法**：用 Truth（已在 classpath）`assertThat(...).isEqualTo(...)` / `assertThat(...).isTrue()`
+
+### 已知问题（v0.5.7+ 单独 PR）
+
+- **真 get_chaos 实装**（v0.5.6 DouyinApiClient 走真 API 仍 -352 风控）
+- **Engine 集成**（`PlatformAdapter : Engine` 包装 API client + `ParseAndExpandUseCase` 调度）
+- **UI 集成**（`PromptOptionsDialog` B 站清晰度选择 + 抖音合集）
+- **mixin_key / X-Bogus 缓存**（每次请求 ~200ms 延迟）
+- **Play URL 获取**（B 站 `playurl` / 抖音 `playwm` 接口拿真实下载 URL）
+- m3u8 v7+ HLS encryption / 多 variant 选择 UI
+- WebViewHeadlessSniffer 自身单测 / ANR 风险测试 / DefaultWebViewFactory 配置 instrumented test
+
+---
+
 ## 维护约定
 
 - 每个阶段收尾时，把该阶段的 Added / Fixed 补进「未发布」段，并在 [`phases/`](phases/) 写复盘文档

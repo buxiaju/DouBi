@@ -26,6 +26,7 @@
 | 13 | m3u8 递归解析 | M3u8Parser.parseRecursive 一路递归 master → variant → media → segment；MAX_RECURSION_DEPTH=5 | ✅ 完成（v0.5.3） | 1-2 天 |
 | 14 | B 站 / 抖音 platform foundation | BilibiliUrl + WbiSigner + DouyinUrl + XBogusSigner(placeholder) + PlatformRegistry + Hilt | ✅ 完成（v0.5.4） | 1 周 |
 | 15 | X-Bogus 真算法 part 1 | 抽 RC4 + CustomBase64 utility + XBogusSigner 升级走 RC4 + a_bogus 字母表编码（get_chaos 仍 stub v0.5.6+ 实装）| ✅ 完成（v0.5.5） | 1-2 天 |
+| 16 | B 站 / 抖音 API 客户端 | BilibiliApiClient (WBI 真用) + DouyinApiClient (X-Bogus stub) + JSON 解析用 regex 避开 org.json stub | ✅ 完成（v0.5.6） | 1-2 天 |
 
 **预计总工期**：6-8 周一人（不含商店审核 1-3 天）
 

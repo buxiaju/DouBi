@@ -54,8 +54,8 @@
 | 桌面版文件 | 行数 | Android 版落点 | 计划阶段 | 状态 |
 |---|---|---|---|---|
 | `platforms/youtube/`（含 `api` / `url` / `strategies`） | ~500 | `platforms/youtube/YouTubeStrategy.kt` + `YouTubeUrlClassifier.kt` | 4 | ❌ **`platforms/` 目录整个不存在**。当前 YouTube 识别只有 `YtDlpEngine.supports()` 里的 URL 判断 |
-| `platforms/bilibili/`（含 `api` / `auth` / `strategies` / `url` / `wbi` / `qr_login`） | ~1500 | `platforms/bilibili/BilibiliUrl.kt` + `WbiSigner.kt` + `di/PlatformModule.kt` | 14 | 🟡 **阶段 14 v0.5.4 foundation 落地**——BilibiliUrl 6 类型 URL 分类 + WbiSigner 完整 WBI 签名算法。**未**做：API 客户端（`api.py`）、auth（QR 登录 `qr_login.py`）、strategies、Engine 集成。v0.5.5+ |
-| `platforms/douyin/`（含 `api` / `auth` / `strategies` / `url` / `live`） | ~1200 | `platforms/douyin/DouyinUrl.kt` + `XBogusSigner.kt` + `di/PlatformModule.kt` | 14 | 🟡 **阶段 14 v0.5.4 foundation 落地**——DouyinUrl 3 类型 URL 分类 + XBogusSigner **placeholder**（v0.5.5+ 实装真算法）。**未**做：API 客户端、auth、strategies、live、Engine 集成。v0.5.5+ |
+| `platforms/bilibili/`（含 `api` / `auth` / `strategies` / `url` / `wbi` / `qr_login`） | ~1500 | `platforms/bilibili/BilibiliUrl.kt` + `WbiSigner.kt` + `BilibiliApiClient.kt` + `di/PlatformModule.kt` | 16 | 🟡 **阶段 14 v0.5.4 foundation + 阶段 16 v0.5.6 API 客户端**——BilibiliUrl 6 类型 URL 分类 + WbiSigner 完整 WBI 签名算法 + BilibiliApiClient（OkHttp + WBI 签名 + regex JSON 解析）。**未**做：auth（QR 登录 `qr_login.py`）、strategies、playurl、Engine 集成。v0.5.7+ |
+| `platforms/douyin/`（含 `api` / `auth` / `strategies` / `url` / `live`） | ~1200 | `platforms/douyin/DouyinUrl.kt` + `XBogusSigner.kt` + `DouyinApiClient.kt` + `di/PlatformModule.kt` | 16 | 🟡 **阶段 14 v0.5.4 foundation + 阶段 15 v0.5.5 RC4 + 阶段 16 v0.5.6 API 客户端**——DouyinUrl 3 类型 URL 分类 + XBogusSigner（RC4 + a_bogus 字母表，get_chaos 仍 stub）+ DouyinApiClient（OkHttp + X-Bogus 签名 + regex JSON 解析）。**未**做：auth、strategies、playwm、live、Engine 集成、真 get_chaos（v0.5.7+）。v0.5.7+ |
 | `platforms/PlatformRegistry` | ~50 | `platforms/PlatformRegistry.kt` | 14 | ✅ **阶段 14 v0.5.4 落地**——URL → Platform 分发（BILIBILI / DOUYIN / YOUTUBE / GENERIC） |
 | `platforms/generic/`（Playwright 嗅探） | ~800 | v0.4+ 评估 playwright-android；v0.1 用直链嗅探 | 延后 | ⏸️ 首版不做 |
 
@@ -115,7 +115,7 @@
 
 | 口径 | 数量 |
 |---|---|
-| 单元测试（`src/test/`，JVM，**269/269 全绿**） | **269**（业务 268 + AS 模板 1） |
+| 单元测试（`src/test/`，JVM，**279/279 全绿**） | **279**（业务 278 + AS 模板 1） |
 | 仪器测试（`src/androidTest/`，**从未执行**） | **10**（业务 9 + AS 模板 1） |
 | 相对 ~280 估算的进度 | 约 **73%** |
 
