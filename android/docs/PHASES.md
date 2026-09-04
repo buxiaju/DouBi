@@ -21,6 +21,7 @@
 | 8 | 通用嗅探 | 任意 http(s) URL 嗅探 m3u8/mp4；OkHttp + Content-Type 判定 | ✅ 完成（v0.4.0） | 1 周 |
 | 9 | 自用 UX 收尾 | 自用 keystore 走环境变量 + 4 个 UX 欠账 + SplashScreen API | ✅ 完成（v0.4.1） | 1 周 |
 | 10 | headless browser 嗅探 | WebView 集成；覆盖 B 站/抖音/微博主页 JS 异步加载 | ✅ 完成（v0.5.0） | 1 周 |
+| 11 | WebViewHolder idle release | 单例常驻 ~30-50MB 在 30s 后自动释放；抽 WebViewFactory 让单测可写 | ✅ 完成（v0.5.1） | 1-2 天 |
 
 **预计总工期**：6-8 周一人（不含商店审核 1-3 天）
 
@@ -298,3 +299,33 @@
 - headless browser 嗅探（WebView load URL + 拦截 m3u8 请求）—— 覆盖 B 站 / 抖音主页 / Twitter 视频页等"页面 JS 异步加载"的网站
 - B 站 / 抖音 / Twitter 等具体平台 adapter（平台 WBI 签名 / click web API / 抖音 X-Bogus）
 - 容器展开（YouTube playlist / 抖音合集 / B 站收藏夹）—— v0.5.0+ 用 desktop 同样的 `expand` 接口扩展
+
+## 阶段 11：WebViewHolder idle 30s release ✅ 完成（v0.5.1）
+
+**目标**：v0.5.0 阶段 10 收官时记的「`@Singleton` WebViewHolder 常驻 ~30-50MB」风险（[phase-10.md](phases/phase-10.md) 决定 1 / 决定 5）落地——idle 30s 后释放 WebView，下一次 sniff 重建。
+
+**预计工期**：1-2 天
+
+**验收**：
+- [x] 抽 `WebViewFactory` interface + `DefaultWebViewFactory` 实现（单测可 mockk 工厂验证创建/复用/release 契约）
+- [x] `WebViewHolder` 重构：`by lazy` → `var current: WebView?` + `Mutex.withLock` 二次拿锁 + `CoroutineScope(SupervisorJob() + Main.immediate)` 30s 计时器
+- [x] `cancelAndJoin` 取消挂起 release，新 sniff 在 idle 窗口内复用 WebView
+- [x] `releaseNow()` 立即释放（紧急内存压力 + 测试用）
+- [x] `WebViewHolderTest` 5 例（首次创建 / 多次复用 / `releaseNow` / 30s 自动 / 窗口内 cancel）
+- [x] 单测 **209/209 全绿**（v0.5.0 204 + 5 新增）
+- [x] `assembleDebug` 通过
+- [x] 阶段 11 复盘文档（[phase-11.md](phases/phase-11.md)）
+
+**已完成（详见 [phase-11.md](phases/phase-11.md)）**：
+- `WebViewFactory` (`fun interface`) + `DefaultWebViewFactory`（v0.5.0 阶段 10 写死的 WebView 配置挪到这里：0 size + GONE + JS + DOM + cache mode）
+- `WebViewHolder` 重构：手动 `current` 管理 + `Mutex.withLock` 二次拿锁 + `CoroutineScope` 计时器 + `cancelAndJoin` 取消
+- `IDLE_TIMEOUT_MS = 30_000L` 常量（30s 经验值：覆盖高频嗅探场景 + 长 idle 自动回血）
+- `WebViewHolderTest` 5 例：`StandardTestDispatcher` setMain + `advanceTimeBy` 虚拟时间
+
+### 不做（v0.5.2+ 单独 PR）
+
+- `DefaultWebViewFactory` 0 size / GONE / JS enabled 配置的 instrumented test 覆盖（v0.5.1 单测 mockk 出的 WebView 不走真实 apply 块）
+- `WebViewHeadlessSniffer` 自身单测（v0.5.0 留的欠账，需要 Robolectric）
+- m3u8 内容解析（v0.5.0 留的欠账）
+- ANR 风险测试（v0.5.0 留的欠账）
+- BilibiliAdapter / 抖音 adapter（新功能）

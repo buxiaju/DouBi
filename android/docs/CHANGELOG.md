@@ -360,6 +360,53 @@
 
 ---
 
+## [未发布] v0.5.1
+
+**当前状态**：阶段 11 完成（WebViewHolder idle 30s release），`versionName` 改为 `0.5.1` + `versionCode=9`，**尚未发布**。
+本版本把 v0.5.0 阶段 10 收官时记的「`@Singleton` WebViewHolder 常驻 ~30-50MB」风险（[phase-10.md](phases/phase-10.md) 决定 1 / 决定 5）落地——idle 30s 后释放 WebView，下一次 sniff 重建。
+**Tag**：`v0.5.1-android`。
+
+### 已完成
+
+**阶段 11 — WebViewHolder idle 30s release**（`未提交`）
+
+- **WebViewFactory 抽出**（`core/sniffer/WebViewFactory.kt`）：`fun interface` 工厂接口，单元测试可 mockk 工厂验证 [WebViewHolder] 的「创建时机 / 复用 / release 触发 destroy」契约。**v0.5.0 阶段 10 直接 `WebView(context).apply { ... }` 的写法单测完全没法覆盖**（WebView 是 Android framework 真实组件，没法 mockk）
+- **DefaultWebViewFactory 实现**（`core/sniffer/DefaultWebViewFactory.kt`）：v0.5.0 阶段 10 写死的 WebView 配置（0 size `LayoutParams(0, 0)` + `View.GONE` + JS / DOM Storage 启用 + `LOAD_NO_CACHE`）从 `WebViewHolder` 挪到这里
+- **WebViewHolder 重构**（`core/sniffer/WebViewHolder.kt`）：
+  - `val webView by lazy { ... }` → `var current: WebView?` 手动管理（`@Volatile` 防御性写法）
+  - 加 `private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)`（release 协程用）
+  - 加 `private var releaseJob: Job?`（挂起的 release 协程引用）
+  - `withLock` 入口 `releaseJob?.cancelAndJoin()` 取消挂起 release（保留 WebView 复用）
+  - `withLock` 退出 `finally { scheduleRelease() }` 调度新 release
+  - `scheduleRelease` 流程：`delay(IDLE_TIMEOUT_MS)` → `Mutex.withLock` 二次拿锁 → `stopLoading + loadUrl("about:blank") + destroy` + `current = null`
+  - **`IDLE_TIMEOUT_MS = 30_000L`**（30s 经验值：sniff 单次 5s 超时，30s 覆盖高频嗅探场景 + 长 idle 自动回血）
+  - 加 `@VisibleForTesting` 探针：`releaseNow()` 立即释放 / `isCreated()` / `hasPendingRelease()`
+- **SnifferModule 加 binding**（`core/sniffer/di/SnifferModule.kt`）：`@Binds bindWebViewFactory(impl: DefaultWebViewFactory): WebViewFactory`
+- **WebViewHolderTest 5 例**（v0.5.1 新增）：
+  - `withLock creates WebView on first call`（首次创建）
+  - `withLock reuses existing WebView on subsequent calls`（多次复用）
+  - `releaseNow destroys WebView and clears current`（立即释放）
+  - `WebView is released after IDLE_TIMEOUT_MS of inactivity`（30s 自动释放）
+  - `new withLock within idle window cancels pending release`（窗口内 cancel）
+- **209/209 单测全绿**（v0.5.0 204 + 5 新增）
+- **APK 验证**：`assembleDebug` 通过，APK 体积基本不变（v0.5.0 78 MB —— WebViewFactory / DefaultWebViewFactory 是 0 size 字节码，WebViewHolder 重构 inline 后字节码大小基本不变）
+
+### 修复
+
+- **`advanceUntilIdle()` 快进时间到 30s 触发 release**（`v0.5.1`）：第一次跑 `withLock reuses existing WebView on subsequent calls` 调了 `advanceUntilIdle()`——它把虚拟时间**快进到"再没任务"**，但 release 协程里的 `delay(30_000)` 是"30s 后触发"的任务，被快进触发，WebView 被销毁，`isCreated()` 返回 false。**修法**：删 `advanceUntilIdle()`——本例只验证"复用不重新创建"，**不**验证 timeout 行为（timeout 行为在 `WebView is released after IDLE_TIMEOUT_MS` 例里独立测）。注释里加"不能调 advanceUntilIdle()"
+- **`@Synchronized` 不能用在 lazy property delegate**（`v0.5.1` 复述 v0.5.0 阶段 10 坑 2）：v0.5.1 改造 [WebViewHolder] 起步时想给 `val current: WebView? by lazy { ... }` 加 `@Synchronized` 编译报 "This annotation is not applicable to target 'member property with delegate'"。**修法**：直接放弃 `by lazy` 改用手动 `var current: WebView?` + `getOrCreate()` 模式——[决定 1] 抽工厂的同时拆 lazy，顺手解决同步问题
+
+### 已知问题（v0.5.2+ 单独 PR）
+
+- **`DefaultWebViewFactory` 0 size / GONE / JS enabled 配置的 instrumented test 覆盖**（v0.5.1 单测 mockk 出的 WebView 不走真实 apply 块）—— v0.5.2+ 走 Robolectric 或真机 sideload
+- **WebViewHeadlessSniffer 自身单测**（v0.5.0 留的欠账，需要 Robolectric）
+- **m3u8 内容解析**：拦截到 m3u8 URL 后解析 HLS playlist 拿 .ts 分片 URL 列表
+- **WebViewClient callback 1-3s 阻塞 Main 线程的 ANR 风险测试**
+- **BilibiliAdapter**（WBI 签名 / click web API）—— v0.5.2+ 单独 PR
+- **抖音 adapter**（X-Bogus）—— v0.5.3+ 单独 PR
+
+---
+
 ## 维护约定
 
 - 每个阶段收尾时，把该阶段的 Added / Fixed 补进「未发布」段，并在 [`phases/`](phases/) 写复盘文档
