@@ -32,8 +32,10 @@ android {
         //   + 单例常驻 ~30-50MB 在 idle 30s 后释放；单测 204 → 209）
         // v0.5.2 = 10（阶段 12 m3u8 内容解析：M3u8Parser 解析 master/media playlist
         //   + WebViewHeadlessSniffer 集成把 finalUrl 替换为 first variant/segment URL；单测 209 → 217）
-        versionCode = 10
-        versionName = "0.5.2"
+        // v0.5.3 = 11（阶段 13 m3u8 递归解析：M3u8Parser.parseRecursive 走 master → variant
+        //   → media → segment 全链路 + MAX_RECURSION_DEPTH=5 防循环；单测 217 → 221）
+        versionCode = 11
+        versionName = "0.5.3"
 
         minSdk = 24
         targetSdk = 35
