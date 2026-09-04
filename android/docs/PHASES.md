@@ -22,6 +22,7 @@
 | 9 | 自用 UX 收尾 | 自用 keystore 走环境变量 + 4 个 UX 欠账 + SplashScreen API | ✅ 完成（v0.4.1） | 1 周 |
 | 10 | headless browser 嗅探 | WebView 集成；覆盖 B 站/抖音/微博主页 JS 异步加载 | ✅ 完成（v0.5.0） | 1 周 |
 | 11 | WebViewHolder idle release | 单例常驻 ~30-50MB 在 30s 后自动释放；抽 WebViewFactory 让单测可写 | ✅ 完成（v0.5.1） | 1-2 天 |
+| 12 | m3u8 内容解析 | 抽 M3u8Parser + WebViewHeadlessSniffer 集成；master → first variant、media → first segment | ✅ 完成（v0.5.2） | 1-2 天 |
 
 **预计总工期**：6-8 周一人（不含商店审核 1-3 天）
 
@@ -328,4 +329,35 @@
 - `WebViewHeadlessSniffer` 自身单测（v0.5.0 留的欠账，需要 Robolectric）
 - m3u8 内容解析（v0.5.0 留的欠账）
 - ANR 风险测试（v0.5.0 留的欠账）
+- BilibiliAdapter / 抖音 adapter（新功能）
+
+## 阶段 12：m3u8 内容解析 ✅ 完成（v0.5.2）
+
+**目标**：v0.5.0 阶段 10 收官时记的「m3u8 内容解析留 v0.5.1+」欠账（[phase-10.md](phases/phase-10.md) 决定 5）落地——抽 [M3u8Parser] pure logic，[WebViewHeadlessSniffer] 集成把 m3u8 finalUrl 替换为 first variant/segment URL。
+
+**预计工期**：1-2 天
+
+**验收**：
+- [x] `M3u8Result` sealed（Variant / Segment / Passthrough）
+- [x] `M3u8Parser.parse(body, baseUrl)`：master 拿 first variant、media 拿 first segment、失败 Passthrough
+- [x] `M3u8ParserTest` 8 例（master 绝对 URL / master 相对 URL / media .ts / media .m4s / 空 body / 不带 #EXTM3U 头 / comments-only / URL 带 query 保留）
+- [x] `WebViewHeadlessSniffer` 注入 [OkHttpClient] + [M3u8Parser]；`enhanceM3u8IfNeeded` 增强 finalUrl；`withContext(Dispatchers.IO)` 跑 OkHttp GET 不阻塞 Main
+- [x] 单测 **217/217 全绿**（v0.5.1 209 + 8 新增）
+- [x] `assembleDebug` 通过
+- [x] 阶段 12 复盘文档（[phase-12.md](phases/phase-12.md)）
+
+**已完成（详见 [phase-12.md](phases/phase-12.md)）**：
+- `M3u8Result.kt` sealed class（Variant(url) / Segment(url) / Passthrough(url)）
+- `M3u8Parser.kt` pure logic——`parse(body, baseUrl)` 解析 master / media playlist，所有解析失败 / 不像合法 m3u8 / 空 body 走 Passthrough
+- `WebViewHeadlessSniffer` 集成：`enhanceM3u8IfNeeded(result)` 在 [SniffResult.Media] + `isHls=true` 时调 [M3u8Parser] 替换 finalUrl；`fetchM3u8Body(url)` 用 `withContext(Dispatchers.IO)` 跑 OkHttp GET（**不阻塞 Main**）
+- 0 新依赖（OkHttp 复用 [SnifferModule.provideOkHttpClient]）
+
+### 不做（v0.5.3+ 单独 PR）
+
+- 递归解析 master → media（v0.5.2 只一层；变体子 m3u8 仍要 Engine 自己解析）
+- m3u8 v7+ HLS encryption（`#EXT-X-KEY`）—— 保留原 m3u8 URL 让 Engine 解析
+- 多 variant 选择 UI（带宽/分辨率）—— v0.5.2 默认拿第一个；v0.5.3+ 可加 `PromptOptionsDialog` variant radio
+- `WebViewHeadlessSniffer` 自身单测（v0.5.0 留的欠账，需要 Robolectric）
+- ANR 风险测试（v0.5.0 留的欠账）
+- `DefaultWebViewFactory` 0 size / GONE / JS enabled 配置的 instrumented test 覆盖
 - BilibiliAdapter / 抖音 adapter（新功能）

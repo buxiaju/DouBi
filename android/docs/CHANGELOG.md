@@ -407,6 +407,59 @@
 
 ---
 
+## [未发布] v0.5.2
+
+**当前状态**：阶段 12 完成（m3u8 内容解析），`versionName` 改为 `0.5.2` + `versionCode=10`，**尚未发布**。
+本版本把 v0.5.0 阶段 10 收官时记的「m3u8 内容解析留 v0.5.1+」欠账（[phase-10.md](phases/phase-10.md) 决定 5）落地——抽 [M3u8Parser] pure logic，[WebViewHeadlessSniffer] 集成把 m3u8 finalUrl 替换为 first variant/segment URL。
+**Tag**：`v0.5.2-android`。
+
+### 已完成
+
+**阶段 12 — m3u8 内容解析**（`未提交`）
+
+- **M3u8Result sealed**（`core/sniffer/M3u8Result.kt`）：`Variant(url)` / `Segment(url)` / `Passthrough(url)` 三种返回。`Passthrough` 保留原 m3u8 URL 让 Engine 解析（v0.5.2 fail-safe）
+- **M3u8Parser pure logic**（`core/sniffer/M3u8Parser.kt`）：`parse(body, baseUrl): M3u8Result`
+  - 空 body / 不以 `#EXTM3U` 开头 / 只注释无 segment → `Passthrough`
+  - 包含 `#EXT-X-STREAM-INF` → master playlist，找第一个 variant 子 m3u8 URL → `Variant`
+  - 第一个非 # 非空行 = segment URL（.ts / .m4s）→ `Segment`
+  - 相对 URL 用 `java.net.URI.resolve()` 解析到绝对 URL
+- **M3u8ParserTest 8 例**（v0.5.2 新增）：
+  - `master playlist with absolute URLs returns first variant`
+  - `master playlist with relative URLs resolves against baseUrl`
+  - `media playlist returns first ts segment`
+  - `media playlist with m4s segments returns first m4s URL`（验证 EXT-X-MAP 跳过的简化）
+  - `empty body returns Passthrough with baseUrl`
+  - `body without EXTM3U header returns Passthrough`
+  - `comments-only m3u8 returns Passthrough`
+  - `relative segment URL with query params preserves them`（验证 Java `URI.resolve()` 行为：相对 URL 自带 query 时不继承 baseUrl 的 query）
+- **WebViewHeadlessSniffer 集成**（`core/sniffer/WebViewHeadlessSniffer.kt`）：
+  - 构造器 + `okHttpClient: OkHttpClient` + `m3u8Parser: M3u8Parser` 注入
+  - `sniff(url)` 拿到 WebView 嗅探结果后调 `enhanceM3u8IfNeeded(result)` 增强
+  - `enhanceM3u8IfNeeded` 只对 `SniffResult.Media` + `isHls=true` 生效；调 `fetchM3u8Body(url)` 拉 m3u8 body
+  - `fetchM3u8Body` 用 `withContext(Dispatchers.IO)` 跑 OkHttp GET——**不阻塞 Main 线程**
+  - 解析成功（Variant / Segment）→ 替换 `finalUrl`；Passthrough / 异常 → 保留原 `finalUrl`（fail-safe）
+  - 0 新依赖：OkHttp 复用 [SnifferModule.provideOkHttpClient] 现有 10s timeout client
+- **217/217 单测全绿**（v0.5.1 209 + 8 新增）
+- **APK 验证**：`assembleDebug` 通过，APK 78 MB 不变（M3u8Result / M3u8Parser 0 size 字节码，WebViewHeadlessSniffer 重构 inline 后字节码大小基本不变）
+
+### 修复
+
+- **相对 URL + query 行为**（`v0.5.2`）：Java `URI.resolve()` 行为是 RFC 3986 5.3 节规定的——相对 URL 是 opaque 引用，自带 query 时不继承 baseUrl 的 query。**修法**：测试断言只验证关键 path 段 + 相对 URL 自带的 query，**不**断言完整 URL 字符串
+- **EXT-X-MAP 跟 EXT-X-KEY 都被当 # 注释**（`v0.5.2` 简化）：m3u8 v7+ 高级特性的 init / encryption 段在 v0.5.2 解析逻辑里被当 `#` 注释跳过。**这是 v0.5.2 的简化**——完整 HLS 解析需要单独处理 init segment / encryption key，v0.5.2 不做。Engine (yt-dlp) 拿到 segment URL 后自己处理 init / encryption
+
+### 已知问题（v0.5.3+ 单独 PR）
+
+- **递归解析 master → media**（v0.5.2 只一层；变体子 m3u8 仍要 Engine 自己解析）
+- **m3u8 v7+ HLS encryption**（`#EXT-X-KEY`）—— 保留原 m3u8 URL 让 Engine 解析
+- **多 variant 选择 UI**（带宽/分辨率）—— v0.5.2 默认拿第一个；v0.5.3+ 可加 `PromptOptionsDialog` variant radio
+- **WebViewHeadlessSniffer 自身单测**（v0.5.0 留的欠账，需要 Robolectric）
+- **ANR 风险测试**（shouldInterceptRequest 1-3s 阻塞 Main 线程）
+- **DefaultWebViewFactory 0 size / GONE / JS enabled 配置的 instrumented test 覆盖**
+- **BilibiliAdapter**（WBI 签名 / click web API）
+- **抖音 adapter**（X-Bogus）
+
+---
+
 ## 维护约定
 
 - 每个阶段收尾时，把该阶段的 Added / Fixed 补进「未发布」段，并在 [`phases/`](phases/) 写复盘文档
