@@ -30,8 +30,10 @@ android {
         //   + CompositeSniffer 按 AppConfig.sniffHeadless 动态选 http/headless）
         // v0.5.1 = 9（阶段 11 WebViewHolder idle 30s release：抽出 WebViewFactory
         //   + 单例常驻 ~30-50MB 在 idle 30s 后释放；单测 204 → 209）
-        versionCode = 9
-        versionName = "0.5.1"
+        // v0.5.2 = 10（阶段 12 m3u8 内容解析：M3u8Parser 解析 master/media playlist
+        //   + WebViewHeadlessSniffer 集成把 finalUrl 替换为 first variant/segment URL；单测 209 → 217）
+        versionCode = 10
+        versionName = "0.5.2"
 
         minSdk = 24
         targetSdk = 35
