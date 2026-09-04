@@ -34,8 +34,11 @@ android {
         //   + WebViewHeadlessSniffer 集成把 finalUrl 替换为 first variant/segment URL；单测 209 → 217）
         // v0.5.3 = 11（阶段 13 m3u8 递归解析：M3u8Parser.parseRecursive 走 master → variant
         //   → media → segment 全链路 + MAX_RECURSION_DEPTH=5 防循环；单测 217 → 221）
-        versionCode = 11
-        versionName = "0.5.3"
+        // v0.5.4 = 12（阶段 14 B 站 / 抖音 platform foundation：BilibiliUrl + WbiSigner
+        //   + DouyinUrl + XBogusSigner + PlatformRegistry + PlatformModule Hilt；
+        //   XBogusSigner 是 placeholder（v0.5.5+ 实装真算法）；单测 221 → 258）
+        versionCode = 12
+        versionName = "0.5.4"
 
         minSdk = 24
         targetSdk = 35
