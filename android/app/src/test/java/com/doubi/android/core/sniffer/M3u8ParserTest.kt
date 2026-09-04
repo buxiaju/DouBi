@@ -1,6 +1,7 @@
 package com.doubi.android.core.sniffer
 
 import com.google.common.truth.Truth.assertThat
+import kotlinx.coroutines.runBlocking
 import org.junit.Test
 
 /**
@@ -158,5 +159,95 @@ class M3u8ParserTest {
         assertThat(url).startsWith("https://cdn.example.com/streams/720p/segment0.ts")
         assertThat(url).contains("token=abc")
         assertThat(url).contains("exp=12345")
+    }
+
+    // ─── v0.5.3 阶段 13：parseRecursive 4 例（suspend 函数，runBlocking 包） ───
+
+    @Test
+    fun `parseRecursive resolves master to media segment via fetchBody`() = runBlocking {
+        val masterBody = """
+            #EXTM3U
+            #EXT-X-VERSION:3
+            #EXT-X-STREAM-INF:BANDWIDTH=2000000
+            https://cdn.example.com/720p/index.m3u8
+        """.trimIndent()
+        val mediaBody = """
+            #EXTM3U
+            #EXT-X-VERSION:3
+            #EXT-X-TARGETDURATION:6
+            #EXTINF:6.000,
+            segment0.ts
+            #EXT-X-ENDLIST
+        """.trimIndent()
+        val fetchBody: suspend (String) -> String? = { url ->
+            assertThat(url).isEqualTo("https://cdn.example.com/720p/index.m3u8")
+            mediaBody
+        }
+
+        val result = parser.parseRecursive(masterBody, "https://cdn.example.com/master.m3u8", fetchBody)
+
+        assertThat(result).isInstanceOf(M3u8Result.Segment::class.java)
+        assertThat((result as M3u8Result.Segment).url)
+            .isEqualTo("https://cdn.example.com/720p/segment0.ts")
+    }
+
+    @Test
+    fun `parseRecursive stops at media playlist on first call`() = runBlocking {
+        // 起始 body 已经是 media playlist —— 不递归，直接返 Segment
+        val mediaBody = """
+            #EXTM3U
+            #EXT-X-VERSION:3
+            #EXTINF:6.000,
+            segment0.ts
+        """.trimIndent()
+        var fetchBodyCalls = 0
+        val fetchBody: suspend (String) -> String? = {
+            fetchBodyCalls++
+            null
+        }
+
+        val result = parser.parseRecursive(mediaBody, "https://cdn.example.com/720p/index.m3u8", fetchBody)
+
+        assertThat(result).isInstanceOf(M3u8Result.Segment::class.java)
+        assertThat(fetchBodyCalls).isEqualTo(0)  // 没调 fetchBody —— media 直接终止
+    }
+
+    @Test
+    fun `parseRecursive returns Variant when fetchBody returns null`() = runBlocking {
+        // fetchBody 返 null（网络失败）→ 保留当前 variant URL，**不**递归
+        val masterBody = """
+            #EXTM3U
+            #EXT-X-VERSION:3
+            #EXT-X-STREAM-INF:BANDWIDTH=2000000
+            https://cdn.example.com/720p/index.m3u8
+        """.trimIndent()
+        val fetchBody: suspend (String) -> String? = { null }
+
+        val result = parser.parseRecursive(masterBody, "https://cdn.example.com/master.m3u8", fetchBody)
+
+        assertThat(result).isInstanceOf(M3u8Result.Variant::class.java)
+        // 返 Variant 而不是 Passthrough —— fetchBody null 保留当前 variant URL 让调用方决定
+        // 调用方（WebViewHeadlessSniffer）用这个 URL 当 finalUrl
+        assertThat((result as M3u8Result.Variant).url)
+            .isEqualTo("https://cdn.example.com/720p/index.m3u8")
+    }
+
+    @Test
+    fun `parseRecursive stops at MAX_RECURSION_DEPTH on loop reference`() = runBlocking {
+        // 循环引用：master → master2 → master → ... depth 5 后降级 Passthrough
+        val masterBody = """
+            #EXTM3U
+            #EXT-X-VERSION:3
+            #EXT-X-STREAM-INF:BANDWIDTH=2000000
+            https://cdn.example.com/master2.m3u8
+        """.trimIndent()
+        val fetchBody: suspend (String) -> String? = { masterBody }  // 永远返 masterBody → 循环
+
+        val result = parser.parseRecursive(masterBody, "https://cdn.example.com/master.m3u8", fetchBody)
+
+        // depth 耗尽后返 Passthrough（保留最后访问的 URL）
+        assertThat(result).isInstanceOf(M3u8Result.Passthrough::class.java)
+        assertThat((result as M3u8Result.Passthrough).url)
+            .isEqualTo("https://cdn.example.com/master2.m3u8")
     }
 }
