@@ -1,8 +1,10 @@
 package com.doubi.android.core.pipeline
 
+import com.doubi.android.core.model.DownloadOptions
 import com.doubi.android.core.model.MediaFormat
 import com.doubi.android.core.model.MediaItem
 import com.doubi.android.core.model.Platform
+import com.doubi.android.core.platform.PlatformEngineRegistry
 import com.doubi.android.core.platform.youtube.YouTubeUrl
 import com.doubi.android.core.sniffer.SniffResult
 import com.doubi.android.core.sniffer.Sniffer
@@ -29,6 +31,16 @@ import javax.inject.Singleton
  *   跟 B 站 / 抖音 adapter 一起做
  * - B 站 / 抖音 / Twitter 等具体平台 adapter —— v0.5.0
  *
+ * **v0.5.7 范围新增**（Engine 集成）：
+ * - 加 [PlatformEngineRegistry] 构造参数，路由 B 站 / 抖音 URL 到对应 [com.doubi.android.engine.Engine]
+ *   实现（v0.5.7 Commit 1+2 落地的 [com.doubi.android.core.platform.bilibili.BilibiliAdapter] +
+ *   [com.doubi.android.core.platform.douyin.DouyinAdapter]）
+ * - 加 [ParseResult.Platform] sealed variant（item + formats 列表；v0.5.7 formats 走空
+ *   ——adapter 不暴露 formats，v0.5.8+ 拿 playurl 接口返的 format 列表再补）
+ * - 调度顺序：YouTube 路径 → **B 站 / 抖音 adapter 路径** → 通用嗅探
+ * - 通用嗅探前**先**调 [Engine.supports]（不支持的类型直接返 Unsupported，不浪费 HTTP 请求）
+ * - 抖音 X-Bogus / B 站 WBI 签名已经在 [PlatformEngineRegistry] 依赖的 adapter 内部处理
+ *
  * **设计取舍**：
  * 桌面版 `DownloadPipeline` 是一个会做 6 件事的胖类（parse / expand / dedup /
  * download / progress / postprocess），Kotlin 端按"每个 use case 一个类"切，
@@ -47,6 +59,7 @@ import javax.inject.Singleton
 class ParseAndExpandUseCase @Inject constructor(
     private val ytDlpEngine: YtDlpEngine,
     private val sniffer: Sniffer,
+    private val platformEngineRegistry: PlatformEngineRegistry,
 ) {
     /**
      * 主入口。**suspend**——内部调 [YtDlpEngine.probeWithFormats] / [Sniffer.sniff]。
@@ -85,7 +98,25 @@ class ParseAndExpandUseCase @Inject constructor(
             return ParseResult.Unsupported("YouTube 频道 / 播放列表暂不支持")
         }
 
-        // 3) v0.4.0 通用嗅探：先 HEAD 看 Content-Type 是不是 m3u8 / mp4 / webm
+        // 3) v0.5.7 B 站 / 抖音 adapter 路径：
+        // 用 [PlatformEngineRegistry.getEngine] 路由 URL → Engine，命中先
+        // [Engine.supports] 判定是不是支持的形态（VIDEO / SHORTS / BANGUMI / SHORT_LINK），
+        // 是 → 调 [Engine.probe] 拿 [MediaItem] 返 [ParseResult.Platform]；否 → 返 Unsupported。
+        // **v0.5.7 formats 走空**（adapter 拿不到 playurl / playwm 接口的 formats 列表）；
+        // v0.5.8+ adapter 真下时再补 formats。
+        // 抖音 X-Bogus / B 站 WBI 签名在 adapter 内部 [BilibiliApiClient] / [DouyinApiClient]
+        // 已经处理，use case 不感知。
+        val engine = platformEngineRegistry.getEngine(trimmed)
+        if (engine != null) {
+            val opts = DownloadOptions()
+            if (!engine.supports(trimmed, opts)) {
+                return ParseResult.Unsupported("该 ${engine.name} URL 类型暂不支持：$trimmed")
+            }
+            val item = engine.probe(trimmed, opts)
+            return ParseResult.Platform(item = item, formats = emptyList())
+        }
+
+        // 4) v0.4.0 通用嗅探：先 HEAD 看 Content-Type 是不是 m3u8 / mp4 / webm
         // 命中 → 走 DirectLink 简化路径（v0.1 的 probeWithFormats 二次确认也调，
         // 避免 Sniffer 误判把 HTML 页面当 mp4）
         // 不命中 → 兜底走 v0.1 路径 ytDlpEngine.probeWithFormats（让 yt-dlp 嗅探）
@@ -152,6 +183,21 @@ sealed class ParseResult {
     data class DirectLink(
         val item: MediaItem,
         val format: MediaFormat?,
+    ) : ParseResult()
+
+    /**
+     * v0.5.7 新增：B 站 / 抖音等具体平台 adapter 解析成功。
+     * `formats` 在 v0.5.7 走空（adapter 不暴露 format 列表，v0.5.8+ 拿 playurl /
+     * playwm 接口返的 formats 再补）；item 完整（title / author / duration / cover）。
+     *
+     * **跟 [Youtube] 的差异**：
+     * - [Youtube] 一定带 formats（yt-dlp 几乎一定有内容）
+     * - [Platform] v0.5.7 一定为空列表（v0.5.8+ 才是带 formats 的）
+     * - 调用方可以**统一**走"format 列表非空就显示下拉框，否则走"无 format 选项"路径
+     */
+    data class Platform(
+        val item: MediaItem,
+        val formats: List<MediaFormat>,
     ) : ParseResult()
 
     /**

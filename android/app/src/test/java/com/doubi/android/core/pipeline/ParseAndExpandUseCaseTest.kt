@@ -5,6 +5,10 @@ import com.doubi.android.core.model.MediaFormat
 import com.doubi.android.core.model.MediaItem
 import com.doubi.android.core.model.MediaType
 import com.doubi.android.core.model.Platform
+import com.doubi.android.core.platform.PlatformEngineRegistry
+import com.doubi.android.core.platform.PlatformRegistry
+import com.doubi.android.core.platform.bilibili.BilibiliAdapter
+import com.doubi.android.core.platform.douyin.DouyinAdapter
 import com.doubi.android.core.sniffer.SniffResult
 import com.doubi.android.core.sniffer.Sniffer
 import com.doubi.android.engine.ytdlp.YtDlpEngine
@@ -27,6 +31,9 @@ import org.junit.Test
  * - 非 http(s) URL → Unsupported
  * - 空 URL → Unsupported
  * - 嗅探失败 → 兜底 DirectLink
+ * - v0.5.7 新增：B 站 / 抖音 dispatch → Platform 分支
+ *   - 真实 [PlatformEngineRegistry] + mock [BilibiliAdapter] / [DouyinAdapter] 走完整 dispatch
+ *   - URL 类型不支持 → Unsupported（不调 probe）
  */
 class ParseAndExpandUseCaseTest {
 
@@ -34,7 +41,29 @@ class ParseAndExpandUseCaseTest {
     // v0.4.0 新增：Sniffer 注入。mockk(relaxed = false) 显式 stub 避免 v0.2.2 阶段 6
     // 修过的 "relaxed 模式 every 块被忽略" 的坑。
     private val sniffer: Sniffer = mockk()
-    private val useCase = ParseAndExpandUseCase(engine, sniffer)
+    // v0.5.7 新增：PlatformEngineRegistry 注入。**显式 stub `getEngine` → null**
+    // 让 17 例现有测试（URL 都是 youtube.com / example.com，platformEngineRegistry.getEngine
+    // 返 null）跳过 B 站/抖音 dispatch 分支。注意：**不能**用 `mockk(relaxed = true)`——
+    // relaxed 模式会让 `getEngine()` 返一个 relaxed mock Engine（带默认 name="" / supports=false），
+    // 把现有测试的 generic URL 错误派发到 mock adapter，返 `该  URL 类型暂不支持` Unsupported。
+    private val engineRegistry: PlatformEngineRegistry = mockk()
+    private val useCase = ParseAndExpandUseCase(engine, sniffer, engineRegistry)
+
+    init {
+        io.mockk.every { engineRegistry.getEngine(any()) } returns null
+    }
+
+    // ---- v0.5.7 B 站 / 抖音 dispatch ----
+    // 真实 [PlatformRegistry]（无状态）+ mock [BilibiliAdapter] / [DouyinAdapter] 走完整
+    // dispatch 路径。adapter 用 `relaxed = true` 避免 [Engine.name] / [Engine.supports] /
+    // [Engine.probe] 调未桩方法抛 MockKException（v0.5.7 现有测试不需要这层 relaxed，
+    // 但 [ParseAndExpandUseCase] 内部会调 [engine.name] / [engine.supports] / [engine.probe]
+    // 三个 Engine 成员，缺一抛）。
+    private val bilibiliAdapter: BilibiliAdapter = mockk(relaxed = true)
+    private val douyinAdapter: DouyinAdapter = mockk(relaxed = true)
+    private val platformRegistry = PlatformRegistry()
+    private val realEngineRegistry = PlatformEngineRegistry(platformRegistry, bilibiliAdapter, douyinAdapter)
+    private val platformUseCase = ParseAndExpandUseCase(engine, sniffer, realEngineRegistry)
 
     // ---- YouTube ----
 
@@ -297,6 +326,92 @@ class ParseAndExpandUseCaseTest {
 
         val r = useCase("  https://www.youtube.com/watch?v=dQw4w9WgXcQ\n")
         assertThat(r).isInstanceOf(ParseResult.Youtube::class.java)
+    }
+
+    // ---- v0.5.7 B 站 / 抖音 dispatch ----
+
+    @Test
+    fun `Bilibili VIDEO URL goes to Platform branch with bilibili adapter`() = runTest {
+        val bilibiliItem = sampleItem(
+            title = "测试视频",
+            platform = Platform.BILIBILI,
+            sourceUrl = "https://www.bilibili.com/video/BV1xx411c7mD",
+            itemId = "BV1xx411c7mD",
+        )
+        coEvery { bilibiliAdapter.supports("https://www.bilibili.com/video/BV1xx411c7mD", any()) } returns true
+        coEvery { bilibiliAdapter.probe("https://www.bilibili.com/video/BV1xx411c7mD", any()) } returns bilibiliItem
+
+        val r = platformUseCase("https://www.bilibili.com/video/BV1xx411c7mD")
+        assertThat(r).isInstanceOf(ParseResult.Platform::class.java)
+        val p = r as ParseResult.Platform
+        assertThat(p.item.platform).isEqualTo(Platform.BILIBILI)
+        assertThat(p.item.title).isEqualTo("测试视频")
+        assertThat(p.item.itemId).isEqualTo("BV1xx411c7mD")
+        // v0.5.7 formats 走空（adapter 不暴露 format 列表）
+        assertThat(p.formats).isEmpty()
+        // 不应调 yt-dlp / Sniffer（adapter 路径完全替代通用嗅探）
+        coVerify(exactly = 0) { engine.probeWithFormats(any()) }
+        coVerify(exactly = 0) { sniffer.sniff(any()) }
+    }
+
+    @Test
+    fun `Bilibili UNSUPPORTED URL (article) returns Unsupported without calling probe`() = runTest {
+        // B 站专栏/动态/列表 → BilibiliAdapter.supports() 返 false → Unsupported
+        coEvery { bilibiliAdapter.supports("https://www.bilibili.com/read/cv12345", any()) } returns false
+
+        val r = platformUseCase("https://www.bilibili.com/read/cv12345")
+        assertThat(r).isInstanceOf(ParseResult.Unsupported::class.java)
+        val u = r as ParseResult.Unsupported
+        assertThat(u.reason).contains("bilibili")
+        // 不调 probe
+        coVerify(exactly = 0) { bilibiliAdapter.probe(any(), any()) }
+    }
+
+    @Test
+    fun `Douyin VIDEO URL goes to Platform branch with douyin adapter`() = runTest {
+        val douyinItem = sampleItem(
+            title = "抖音视频",
+            platform = Platform.DOUYIN,
+            sourceUrl = "https://www.douyin.com/video/7234567890123456789",
+            itemId = "7234567890123456789",
+        )
+        coEvery { douyinAdapter.supports("https://www.douyin.com/video/7234567890123456789", any()) } returns true
+        coEvery { douyinAdapter.probe("https://www.douyin.com/video/7234567890123456789", any()) } returns douyinItem
+
+        val r = platformUseCase("https://www.douyin.com/video/7234567890123456789")
+        assertThat(r).isInstanceOf(ParseResult.Platform::class.java)
+        val p = r as ParseResult.Platform
+        assertThat(p.item.platform).isEqualTo(Platform.DOUYIN)
+        assertThat(p.item.title).isEqualTo("抖音视频")
+        assertThat(p.formats).isEmpty()
+    }
+
+    @Test
+    fun `Douyin SHORT_LINK URL goes to Platform branch with douyin adapter`() = runTest {
+        val shortItem = sampleItem(
+            title = "短链视频",
+            platform = Platform.DOUYIN,
+            sourceUrl = "https://v.douyin.com/abcdef12/",
+            itemId = "abcdef12",
+        )
+        coEvery { douyinAdapter.supports("https://v.douyin.com/abcdef12/", any()) } returns true
+        coEvery { douyinAdapter.probe("https://v.douyin.com/abcdef12/", any()) } returns shortItem
+
+        val r = platformUseCase("https://v.douyin.com/abcdef12/")
+        assertThat(r).isInstanceOf(ParseResult.Platform::class.java)
+        val p = r as ParseResult.Platform
+        assertThat(p.item.platform).isEqualTo(Platform.DOUYIN)
+        assertThat(p.item.itemId).isEqualTo("abcdef12")
+    }
+
+    @Test
+    fun `Douyin UNSUPPORTED URL returns Unsupported without calling probe`() = runTest {
+        // 抖音直播 / 用户主页 → DouyinAdapter.supports() 返 false → Unsupported
+        coEvery { douyinAdapter.supports("https://www.douyin.com/user/MS4wLjABAAAA", any()) } returns false
+
+        val r = platformUseCase("https://www.douyin.com/user/MS4wLjABAAAA")
+        assertThat(r).isInstanceOf(ParseResult.Unsupported::class.java)
+        coVerify(exactly = 0) { douyinAdapter.probe(any(), any()) }
     }
 
     // ---- helpers ----

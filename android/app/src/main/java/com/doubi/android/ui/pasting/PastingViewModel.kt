@@ -86,6 +86,14 @@ class PastingViewModel @Inject constructor(
                                 formats = listOfNotNull(result.format),
                                 seedOptions = currentSeed,
                             )
+                            // v0.5.7：B 站 / 抖音 adapter 路径。`formats` 在 v0.5.7 走空
+                            // （adapter 拿不到 playurl/playwm 接口的 format 列表，v0.5.8+ 补），
+                            // UI 走"无 format 选项"路径（直接入队，让 Engine 自己选）。
+                            is ParseResult.Platform -> ParseStatus.AwaitingConfirm(
+                                item = result.item,
+                                formats = result.formats,
+                                seedOptions = currentSeed,
+                            )
                             is ParseResult.Unsupported -> ParseStatus.Unsupported(result.reason)
                         },
                     )
