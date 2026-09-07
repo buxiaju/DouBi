@@ -43,8 +43,14 @@ android {
         // v0.5.6 = 14（阶段 16 B 站 / 抖音 API 客户端：BilibiliApiClient（WBI 签名）
         //   + DouyinApiClient（X-Bogus 仍 stub）+ JSON 解析用 regex 避开 org.json
         //   stub；单测 269 → 279）
-        versionCode = 14
-        versionName = "0.5.6"
+        // v0.5.7：阶段 17 - 平台 Engine 集成
+        //   + PlatformEngineRegistry（URL → Engine 路由）
+        //   + ParseAndExpandUseCase 加 B站/抖音 dispatch + ParseResult.Platform variant
+        //   + PastingViewModel 处理 Platform 分支
+        //   + BilibiliAdapter / DouyinAdapter 测试（10 + 8 = 18）+ dispatch 测试 5
+        //   单测 279 → 302
+        versionCode = 15
+        versionName = "0.5.7"
 
         minSdk = 24
         targetSdk = 35
