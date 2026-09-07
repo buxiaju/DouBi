@@ -54,8 +54,8 @@
 | 桌面版文件 | 行数 | Android 版落点 | 计划阶段 | 状态 |
 |---|---|---|---|---|
 | `platforms/youtube/`（含 `api` / `url` / `strategies`） | ~500 | `platforms/youtube/YouTubeStrategy.kt` + `YouTubeUrlClassifier.kt` | 4 | ❌ **`platforms/` 目录整个不存在**。当前 YouTube 识别只有 `YtDlpEngine.supports()` 里的 URL 判断 |
-| `platforms/bilibili/`（含 `api` / `auth` / `strategies` / `url` / `wbi` / `qr_login`） | ~1500 | `platforms/bilibili/BilibiliUrl.kt` + `WbiSigner.kt` + `BilibiliApiClient.kt` + `BilibiliAdapter.kt` + `di/PlatformModule.kt` | 16, 17 | 🟡 **阶段 14 v0.5.4 foundation + 阶段 16 v0.5.6 API 客户端 + 阶段 17 v0.5.7 Engine 集成**——BilibiliUrl 6 类型 URL 分类 + WbiSigner 完整 WBI 签名算法 + BilibiliApiClient（OkHttp + WBI 签名 + regex JSON 解析）+ BilibiliAdapter（Engine interface 实现，包装 API client 拿 metadata 填 MediaItem；download v0.5.7 placeholder 抛 IOException 标记 v0.5.8+）。**未**做：auth（QR 登录 `qr_login.py`）、strategies、playurl、download 真路径。v0.5.8+ |
-| `platforms/douyin/`（含 `api` / `auth` / `strategies` / `url` / `live`） | ~1200 | `platforms/douyin/DouyinUrl.kt` + `XBogusSigner.kt` + `DouyinApiClient.kt` + `DouyinAdapter.kt` + `di/PlatformModule.kt` | 16, 17 | 🟡 **阶段 14 v0.5.4 foundation + 阶段 15 v0.5.5 RC4 + 阶段 16 v0.5.6 API 客户端 + 阶段 17 v0.5.7 Engine 集成**——DouyinUrl 3 类型 URL 分类 + XBogusSigner（RC4 + a_bogus 字母表，get_chaos 仍 stub）+ DouyinApiClient（OkHttp + X-Bogus 签名 + regex JSON 解析）+ DouyinAdapter（Engine interface 实现，short_link 简化用 short_id 当 itemId；download v0.5.7 placeholder 抛 IOException 标记 v0.5.8+）。**未**做：auth、strategies、playwm、live、download 真路径、真 get_chaos（v0.5.8+）。v0.5.8+ |
+| `platforms/bilibili/`（含 `api` / `auth` / `strategies` / `url` / `wbi` / `qr_login`） | ~1500 | `platforms/bilibili/BilibiliUrl.kt` + `WbiSigner.kt` + `BilibiliApiClient.kt` + `BilibiliAdapter.kt` + `dto/BilibiliPlayUrlResponse.kt` + `di/PlatformModule.kt` | 16, 17, 18 | ✅ **阶段 14 v0.5.4 foundation + 阶段 16 v0.5.6 API 客户端 + 阶段 17 v0.5.7 Engine 集成 + 阶段 18 v0.5.8 download 真路径**——BilibiliUrl 6 类型 URL 分类 + WbiSigner 完整 WBI 签名算法 + BilibiliApiClient（OkHttp + WBI 签名 + regex JSON 解析，含 v0.5.8 新增 playurl 接口）+ BilibiliAdapter（Engine interface 实现，v0.5.8 download 真路径：view → playurl → YtDlpEngine 委托）。**未**做：auth（QR 登录 `qr_login.py`）、strategies、formats 列表、qn 配置化、mixin_key 缓存。v0.5.9+ |
+| `platforms/douyin/`（含 `api` / `auth` / `strategies` / `url` / `live`） | ~1200 | `platforms/douyin/DouyinUrl.kt` + `XBogusSigner.kt` + `DouyinApiClient.kt` + `DouyinAdapter.kt` + `di/PlatformModule.kt` | 16, 17, 18 | 🟡 **阶段 14 v0.5.4 foundation + 阶段 15 v0.5.5 RC4 + 阶段 16 v0.5.6 API 客户端 + 阶段 17 v0.5.7 Engine 集成 + 阶段 18 v0.5.8 download 真路径**——DouyinUrl 3 类型 URL 分类 + XBogusSigner（RC4 + a_bogus 字母表，get_chaos 仍 stub）+ DouyinApiClient（OkHttp + X-Bogus 签名 + regex JSON 解析）+ DouyinAdapter（Engine interface 实现，v0.5.8 download 真路径：awemeItemInfo 拿 playUrl → YtDlpEngine 委托；**走真 API 仍 -352 风控**，playUrl 是空字符串，抛 IOException "v0.5.9+ 真 get_chaos 实装"）。**未**做：auth、strategies、playwm、live、formats 列表、short_link 解析、真 get_chaos。v0.5.9+ |
 | `platforms/PlatformRegistry` | ~50 | `platforms/PlatformRegistry.kt` + `PlatformEngineRegistry.kt` | 14, 17 | ✅ **阶段 14 v0.5.4 + 阶段 17 v0.5.7 落地**——[PlatformRegistry] URL → Platform 分发（BILIBILI / DOUYIN / YOUTUBE / GENERIC，无依赖）；[PlatformEngineRegistry] URL → Engine 路由（BILIBILI → BilibiliAdapter / DOUYIN → DouyinAdapter / YOUTUBE / GENERIC → null，依赖 adapter），分层清晰 |
 | `platforms/generic/`（Playwright 嗅探） | ~800 | v0.4+ 评估 playwright-android；v0.1 用直链嗅探 | 延后 | ⏸️ 首版不做 |
 
@@ -132,6 +132,12 @@
 - 抖音 Engine 8 例（`DouyinAdapterTest`）—— name / supports × 3 / probe × 3 / download placeholder
 - ParseAndExpandUseCase dispatch 5 例（`ParseAndExpandUseCaseTest` 新增）—— B 站 VIDEO / B 站 UNSUPPORTED / 抖音 VIDEO / 抖音 SHORT_LINK / 抖音 UNSUPPORTED
 - **合计 23 例** v0.5.7 新增（v0.5.6 279 → 302）
+
+**v0.5.8 download 真路径测试覆盖**：
+- B 站 playurl 接口 5 例（`BilibiliApiClientTest` 新增）—— WBI 签名 / HTTP 401 / empty body / -352 风控 / durl regex 提取
+- B 站 Engine download 5 例（`BilibiliAdapterTest` 新增，-1 placeholder = 净增 4）—— 完整链路（view → playurl → YtDlpEngine）/ view IOException 透传 / cid=0 / playurl IOException 透传 / YtDlpEngine Failure 透传
+- 抖音 Engine download 4 例（`DouyinAdapterTest` 新增，-1 placeholder = 净增 3）—— 完整链路（awemeItemInfo → YtDlpEngine）/ awemeItemInfo IOException 透传 / playUrl 空 IOException / YtDlpEngine Failure 透传
+- **合计 12 例** v0.5.8 新增（v0.5.7 302 → 314）
 
 ## CHANGELOG 同步策略
 

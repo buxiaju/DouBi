@@ -692,6 +692,55 @@
 
 ---
 
+## [未发布] v0.5.8
+
+**当前状态**：阶段 18 完成（B 站 / 抖音 download 真路径），`versionName` 改为 `0.5.8` + `versionCode=16`，**尚未发布**。
+本版本把 v0.5.7 阶段 17 留的「`download()` 抛 IOException 标记 v0.5.8+」欠账落地——[BilibiliApiClient.playurl]（B 站 playurl 接口）+ [BilibiliAdapter.download] 真路径（view → playurl → YtDlpEngine 委托）+ [DouyinAdapter.download] 真路径（awemeItemInfo → YtDlpEngine 委托）。
+**Tag**：`v0.5.8-android`。
+
+### 已完成
+
+**阶段 18 — B 站 / 抖音 download 真路径**（`未提交`）
+
+- **[BilibiliApiClient.playurl]**（`platforms/bilibili/BilibiliApiClient.kt`）：B 站 playurl 接口实装
+  - `playurl(bvid, cid, qn=80)` —— `GET /x/player/playurl?bvid=XXX&cid=NNN&qn=80&wts=NNN&w_rid=YYY` 拿 `durl[0].url` 真实下载直链
+  - WBI 真用上（v0.5.4 阶段 14 落地的 WbiSigner 走真算法）
+  - regex 优先 `durl[0].url`（FLV/MP4 直链），fallback `dash.video[0].baseUrl`（DASH 流）
+  - 业务 `code != 0` 抛 IOException（含 message 字段）
+- **[BilibiliPlayUrlResponse]** DTO（`platforms/bilibili/dto/BilibiliPlayUrlResponse.kt`）：`url`（真实下载 URL）+ `size`（字节，0 = 未知）
+- **[BilibiliAdapter.download] 真路径**（`platforms/bilibili/BilibiliAdapter.kt`）
+  - 加 `YtDlpEngine` 构造参数（Hilt 自动装配）
+  - 流程：`view(item.itemId)` 拿 cid → `playurl(item.itemId, cid)` 拿 `durl[0].url` → `item.copy(sourceUrl = playResp.url)` → `ytDlpEngine.download(downloadItem, options, onProgress)`
+  - v0.5.7 placeholder IOException 删掉
+- **[DouyinAdapter.download] 真路径**（`platforms/douyin/DouyinAdapter.kt`）
+  - 加 `YtDlpEngine` 构造参数
+  - 流程：`awemeItemInfo(item.itemId)` 拿 `playUrl`（v0.5.6 阶段 16 落地的 [DouyinAwemeItem.playUrl]）→ 校验非空 → `item.copy(sourceUrl = playUrl)` → `ytDlpEngine.download(downloadItem, options, onProgress)`
+  - v0.5.7 placeholder IOException 删掉
+  - **不**调 `playwm` / `playaddr` 接口——`awemeItemInfo` 已经在 probe 阶段返了 `video.play_addr.url_list[0]` 作为无水印播放 URL
+- **12 例单测新增**（v0.5.7 302 → 314）：BilibiliApiClientTest +5（playurl WBI 签名 / HTTP 401 / empty body / -352 风控 / durl regex 提取）+ BilibiliAdapterTest 净增 4（-1 placeholder +5 新测：完整链路 / view IOException / cid=0 / playurl IOException / YtDlpEngine Failure 透传）+ DouyinAdapterTest 净增 3（-1 placeholder +4 新测：完整链路 / awemeItemInfo IOException / playUrl 空 IOException / YtDlpEngine Failure 透传）
+- **`assembleDebug` 通过**，APK 80.8 MB（v0.5.7 80.6 MB + 0.2 MB）
+
+### 修复
+
+- **`DownloadResult.Success.path` 字段名错**（`v0.5.8`）：第一版 BilibiliAdapterTest 写 `result.path` / `result.error` 编译错——`DownloadResult.Success` 实际字段是 `localPath`，`DownloadResult.Failure` 是 `reason`。**修法**：`cat DownloadResult.kt` 看实际字段名再写测试
+- **mockk `Engine` 实现缺 `name` getter 桩**（`v0.5.8` 复述 v0.5.7 阶段 17 坑 2）：第一版 BilibiliAdapterTest 用 `mockk(relaxed = false)` 的 BilibiliAdapter 触发 `MockKException: no answer found for ... .getName()`（访问 `engine.name` 拼错误信息）。**修法**：mock 任何 `Engine` 实现用 `mockk(relaxed = true)`——4 个成员都有默认 stub
+
+### 已知问题（v0.5.9+ 单独 PR）
+
+- **真 get_chaos 实装**（v0.5.8 DouyinAdapter.download 走真 API 仍 -352 风控，playUrl 是空字符串，抛 IOException "v0.5.9+ 真 get_chaos 实装"）
+- **B 站 / 抖音 mixin_key / X-Bogus 缓存**（每次 view / playurl ~200-300ms 延迟）
+- **B 站 / 抖音 formats 列表**（`accept_quality` / `playwm` / `playaddr` 接口）—— UI 端在 PromptOptionsDialog 选清晰度
+- **B 站 qn 配置化**（v0.5.8 硬编码 80=1080p）—— v0.5.9+ 接 [AppConfig.bilibiliQuality]
+- **抖音 short_link → video_id HTTP 302 跟随**（v0.5.7/0.5.8 简化用 short_id 当 itemId）
+- m3u8 v7+ HLS encryption / 多 variant 选择 UI
+- WebViewHeadlessSniffer 自身单测（Robolectric）/ ANR 风险测试 / DefaultWebViewFactory 配置 instrumented test
+
+### 已知遗留项（v0.5.7 → v0.5.8 持续）
+
+- **5 份 v0.5.4-v0.5.5 阶段 platform 测试文件 untracked**（`PlatformRegistryTest` / `BilibiliUrlTest` / `WbiSignerTest` / `DouyinUrlTest` / `CustomBase64Test`）—— working tree 一直保留并被 gradle test 跑，**未** commit 进 git。后续单独 PR `chore(android): 补 commit v0.5.4-v0.5.5 阶段遗留的 5 份 platform 测试文件`
+
+---
+
 ## 维护约定
 
 - 每个阶段收尾时，把该阶段的 Added / Fixed 补进「未发布」段，并在 [`phases/`](phases/) 写复盘文档
