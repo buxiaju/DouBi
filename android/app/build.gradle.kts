@@ -49,8 +49,13 @@ android {
         //   + PastingViewModel 处理 Platform 分支
         //   + BilibiliAdapter / DouyinAdapter 测试（10 + 8 = 18）+ dispatch 测试 5
         //   单测 279 → 302
-        versionCode = 15
-        versionName = "0.5.7"
+        // v0.5.8：阶段 18 - B 站/抖音 download 真路径
+        //   + BilibiliApiClient.playurl()（B 站 playurl 接口 + WBI 真用 + 5 例新测）
+        //   + BilibiliAdapter.download() 真路径（view → playurl → YtDlpEngine + 5 例新测）
+        //   + DouyinAdapter.download() 真路径（awemeItemInfo → YtDlpEngine + 4 例新测）
+        //   单测 302 → 314
+        versionCode = 16
+        versionName = "0.5.8"
 
         minSdk = 24
         targetSdk = 35
