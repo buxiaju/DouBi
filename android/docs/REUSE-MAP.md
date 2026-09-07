@@ -54,9 +54,9 @@
 | 桌面版文件 | 行数 | Android 版落点 | 计划阶段 | 状态 |
 |---|---|---|---|---|
 | `platforms/youtube/`（含 `api` / `url` / `strategies`） | ~500 | `platforms/youtube/YouTubeStrategy.kt` + `YouTubeUrlClassifier.kt` | 4 | ❌ **`platforms/` 目录整个不存在**。当前 YouTube 识别只有 `YtDlpEngine.supports()` 里的 URL 判断 |
-| `platforms/bilibili/`（含 `api` / `auth` / `strategies` / `url` / `wbi` / `qr_login`） | ~1500 | `platforms/bilibili/BilibiliUrl.kt` + `WbiSigner.kt` + `BilibiliApiClient.kt` + `di/PlatformModule.kt` | 16 | 🟡 **阶段 14 v0.5.4 foundation + 阶段 16 v0.5.6 API 客户端**——BilibiliUrl 6 类型 URL 分类 + WbiSigner 完整 WBI 签名算法 + BilibiliApiClient（OkHttp + WBI 签名 + regex JSON 解析）。**未**做：auth（QR 登录 `qr_login.py`）、strategies、playurl、Engine 集成。v0.5.7+ |
-| `platforms/douyin/`（含 `api` / `auth` / `strategies` / `url` / `live`） | ~1200 | `platforms/douyin/DouyinUrl.kt` + `XBogusSigner.kt` + `DouyinApiClient.kt` + `di/PlatformModule.kt` | 16 | 🟡 **阶段 14 v0.5.4 foundation + 阶段 15 v0.5.5 RC4 + 阶段 16 v0.5.6 API 客户端**——DouyinUrl 3 类型 URL 分类 + XBogusSigner（RC4 + a_bogus 字母表，get_chaos 仍 stub）+ DouyinApiClient（OkHttp + X-Bogus 签名 + regex JSON 解析）。**未**做：auth、strategies、playwm、live、Engine 集成、真 get_chaos（v0.5.7+）。v0.5.7+ |
-| `platforms/PlatformRegistry` | ~50 | `platforms/PlatformRegistry.kt` | 14 | ✅ **阶段 14 v0.5.4 落地**——URL → Platform 分发（BILIBILI / DOUYIN / YOUTUBE / GENERIC） |
+| `platforms/bilibili/`（含 `api` / `auth` / `strategies` / `url` / `wbi` / `qr_login`） | ~1500 | `platforms/bilibili/BilibiliUrl.kt` + `WbiSigner.kt` + `BilibiliApiClient.kt` + `BilibiliAdapter.kt` + `di/PlatformModule.kt` | 16, 17 | 🟡 **阶段 14 v0.5.4 foundation + 阶段 16 v0.5.6 API 客户端 + 阶段 17 v0.5.7 Engine 集成**——BilibiliUrl 6 类型 URL 分类 + WbiSigner 完整 WBI 签名算法 + BilibiliApiClient（OkHttp + WBI 签名 + regex JSON 解析）+ BilibiliAdapter（Engine interface 实现，包装 API client 拿 metadata 填 MediaItem；download v0.5.7 placeholder 抛 IOException 标记 v0.5.8+）。**未**做：auth（QR 登录 `qr_login.py`）、strategies、playurl、download 真路径。v0.5.8+ |
+| `platforms/douyin/`（含 `api` / `auth` / `strategies` / `url` / `live`） | ~1200 | `platforms/douyin/DouyinUrl.kt` + `XBogusSigner.kt` + `DouyinApiClient.kt` + `DouyinAdapter.kt` + `di/PlatformModule.kt` | 16, 17 | 🟡 **阶段 14 v0.5.4 foundation + 阶段 15 v0.5.5 RC4 + 阶段 16 v0.5.6 API 客户端 + 阶段 17 v0.5.7 Engine 集成**——DouyinUrl 3 类型 URL 分类 + XBogusSigner（RC4 + a_bogus 字母表，get_chaos 仍 stub）+ DouyinApiClient（OkHttp + X-Bogus 签名 + regex JSON 解析）+ DouyinAdapter（Engine interface 实现，short_link 简化用 short_id 当 itemId；download v0.5.7 placeholder 抛 IOException 标记 v0.5.8+）。**未**做：auth、strategies、playwm、live、download 真路径、真 get_chaos（v0.5.8+）。v0.5.8+ |
+| `platforms/PlatformRegistry` | ~50 | `platforms/PlatformRegistry.kt` + `PlatformEngineRegistry.kt` | 14, 17 | ✅ **阶段 14 v0.5.4 + 阶段 17 v0.5.7 落地**——[PlatformRegistry] URL → Platform 分发（BILIBILI / DOUYIN / YOUTUBE / GENERIC，无依赖）；[PlatformEngineRegistry] URL → Engine 路由（BILIBILI → BilibiliAdapter / DOUYIN → DouyinAdapter / YOUTUBE / GENERIC → null，依赖 adapter），分层清晰 |
 | `platforms/generic/`（Playwright 嗅探） | ~800 | v0.4+ 评估 playwright-android；v0.1 用直链嗅探 | 延后 | ⏸️ 首版不做 |
 
 ### `ui/`
@@ -126,6 +126,12 @@
 - 抖音 14 例（`DouyinUrlTest` 9 + `XBogusSignerTest` 5）—— URL 分类 + X-Bogus placeholder
 - Platform 分发 7 例（`PlatformRegistryTest`）—— URL → Platform 分发
 - **合计 37 例** v0.5.4 新增（v0.5.3 221 → 258）
+
+**v0.5.7 平台 Engine 集成测试覆盖**：
+- B 站 Engine 10 例（`BilibiliAdapterTest`）—— name / supports × 4 / probe × 3 / download placeholder
+- 抖音 Engine 8 例（`DouyinAdapterTest`）—— name / supports × 3 / probe × 3 / download placeholder
+- ParseAndExpandUseCase dispatch 5 例（`ParseAndExpandUseCaseTest` 新增）—— B 站 VIDEO / B 站 UNSUPPORTED / 抖音 VIDEO / 抖音 SHORT_LINK / 抖音 UNSUPPORTED
+- **合计 23 例** v0.5.7 新增（v0.5.6 279 → 302）
 
 ## CHANGELOG 同步策略
 

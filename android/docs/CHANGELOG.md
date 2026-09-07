@@ -639,6 +639,59 @@
 
 ---
 
+## [未发布] v0.5.7
+
+**当前状态**：阶段 17 完成（平台 Engine 集成），`versionName` 改为 `0.5.7` + `versionCode=15`，**尚未发布**。
+本版本把 v0.5.6 阶段 16 留的「Engine 集成」欠账落地——[BilibiliAdapter]（B 站 Engine 实现）+ [DouyinAdapter]（抖音 Engine 实现）+ [PlatformEngineRegistry]（URL → Engine 路由表）+ [ParseAndExpandUseCase] 加 B 站/抖音 dispatch + [ParseResult.Platform] sealed variant + [PastingViewModel] 处理 Platform 分支。
+**Tag**：`v0.5.7-android`。
+
+### 已完成
+
+**阶段 17 — 平台 Engine 集成**（`未提交`）
+
+- **[BilibiliAdapter]**（`platforms/bilibili/BilibiliAdapter.kt`）：B 站 Engine 实现（继承 v0.1 阶段 2 的 `Engine` interface）
+  - `name = "bilibili"`
+  - `supports(url)` 调 [BilibiliUrl.classify]，VIDEO / SHORTS / BANGUMI 返 true，UNSUPPORTED 返 false
+  - `probe(url)` 调 [BilibiliApiClient.view]（v0.5.6）拿 title / duration / cid / owner，构造 [MediaItem]；`author = if (ownerName.isNotBlank()) Author(id, name) else null`
+  - `download()` v0.5.7 placeholder：抛 IOException `"v0.5.8+ 才有"`（真 playurl 接口 + YtDlpEngine 跑下载留 v0.5.8+）
+- **[DouyinAdapter]**（`platforms/douyin/DouyinAdapter.kt`）：抖音 Engine 实现（同模式）
+  - `probe(url)` 调 [DouyinApiClient.awemeItemInfo]；short_link 简化用 short_id 当 itemId（v0.5.8+ 解析 short_link → video_id）
+  - `download()` 同样 v0.5.7 placeholder 抛 IOException
+- **[PlatformEngineRegistry]**（`platforms/PlatformEngineRegistry.kt`）：URL → Engine 路由表
+  - 拆 [PlatformRegistry]（v0.5.4 URL→Platform 分类，无依赖）和 [PlatformEngineRegistry]（URL→Engine 路由，依赖 adapter）—— 分层清晰 / 测试解耦 / 未来扩展
+  - `getEngine(url)`: BILIBILI → BilibiliAdapter / DOUYIN → DouyinAdapter / YOUTUBE / GENERIC → null
+  - Hilt `@Inject constructor` + `@Singleton` 自动装配，PlatformModule 无需补
+- **[ParseAndExpandUseCase] 改造**（`core/pipeline/ParseAndExpandUseCase.kt`）
+  - 加第 3 构造参数 [PlatformEngineRegistry]（直接改构造 + 17 例现有测试用 `mockk() + 显式 stub getEngine→null`，不用 relaxed-true 避免 mock Engine 错派发）
+  - 调度顺序：YouTube watch URL → YouTube 频道/播放列表拒绝 → **B 站/抖音 adapter** → 通用嗅探
+  - B 站/抖音路径：先 `Engine.supports` 判定（不支持类型直接返 Unsupported，不浪费 HTTP）→ `Engine.probe` → `ParseResult.Platform`
+  - 抖音 X-Bogus / B 站 WBI 签名在 adapter 内部已处理，use case 不感知
+- **[ParseResult.Platform]** sealed variant（`item, formats: List<MediaFormat> = emptyList()`）：v0.5.7 formats 走空（adapter 拿不到 playurl/playwm 接口 formats 列表），v0.5.8+ 补
+- **[PastingViewModel] `when` 加 `is Platform` 分支**（`ui/pasting/PastingViewModel.kt`）：走 `AwaitingConfirm(item, formats=空, seedOptions)` → UI 走「无 format 选项」入队
+- **23 例单测新增**（v0.5.6 279 → 302）：BilibiliAdapterTest 10 + DouyinAdapterTest 8 + ParseAndExpandUseCaseTest 5
+- **`assembleDebug` 通过**，APK 80.6 MB（v0.5.6 80.4 MB + 0.2 MB）
+
+### 修复
+
+- **`mockk(relaxed = true)` 让 PlatformEngineRegistry.getEngine() 返 mock Engine**（`v0.5.7`）：第一版 ParseAndExpandUseCaseTest 用 `mockk(relaxed = true)` 让 getEngine 返默认 mock Engine（`name=""` / `supports()=false`），把 generic URL（example.com）错误派发到 mock adapter，10 例现有测试全挂（`该  URL 类型暂不支持`——`${engine.name}` 是空字符串，双空格）。**修法**：`mockk()`（不用 relaxed） + `init { every { getEngine(any()) } returns null }` 显式 stub
+- **mockk adapter（relaxed=false）缺 Engine.name getter 桩**（`v0.5.7`）：第一版 B 站/抖音 UNSUPPORTED 测试缺 `name` getter stub，触发 `MockKException: no answer found for ... .getName()`。**修法**：adapter 改 `mockk(relaxed = true)`，三个 Engine 成员都有默认 stub
+- **PastingViewModel.when 漏 is ParseResult.Platform 分支**（`v0.5.7`）：ParseResult 加 Platform variant 后 PastingViewModel 编译失败 "'when' expression must be exhaustive"。**修法**：加 `is ParseResult.Platform` 分支走 AwaitingConfirm
+
+### 已知问题（v0.5.8+ 单独 PR）
+
+- **B 站 / 抖音 download 路径**（`playurl` / `playwm` 接口拿真实下载 URL + `YtDlpEngine` 跑下载）—— v0.5.7 `download()` 抛 IOException 明确标记 v0.5.8+
+- **真 get_chaos 实装**（v0.5.6 DouyinApiClient 走真 API 仍 -352 风控；v0.5.7 DouyinAdapter.probe 走 API 同样 -352）
+- **B 站 / 抖音 mixin_key / X-Bogus 缓存**（每次请求 ~200ms 延迟）
+- **B 站 / 抖音 UI 集成**（`PromptOptionsDialog` B 站清晰度选择 / 抖音合集展开）
+- m3u8 v7+ HLS encryption / 多 variant 选择 UI
+- WebViewHeadlessSniffer 自身单测（Robolectric）/ ANR 风险测试 / DefaultWebViewFactory 配置 instrumented test
+
+### 已知遗留项
+
+- **5 份 v0.5.4-v0.5.5 阶段 platform 测试文件 untracked**（`PlatformRegistryTest` / `BilibiliUrlTest` / `WbiSignerTest` / `DouyinUrlTest` / `CustomBase64Test`）—— working tree 一直保留并被 gradle test 跑，**未** commit 进 git。后续单独 PR `chore(android): 补 commit v0.5.4-v0.5.5 阶段遗留的 5 份 platform 测试文件`
+
+---
+
 ## 维护约定
 
 - 每个阶段收尾时，把该阶段的 Added / Fixed 补进「未发布」段，并在 [`phases/`](phases/) 写复盘文档
