@@ -55,7 +55,7 @@
 |---|---|---|---|---|
 | `platforms/youtube/`（含 `api` / `url` / `strategies`） | ~500 | `platforms/youtube/YouTubeStrategy.kt` + `YouTubeUrlClassifier.kt` | 4 | ❌ **`platforms/` 目录整个不存在**。当前 YouTube 识别只有 `YtDlpEngine.supports()` 里的 URL 判断 |
 | `platforms/bilibili/`（含 `api` / `auth` / `strategies` / `url` / `wbi` / `qr_login`） | ~1500 | `platforms/bilibili/BilibiliUrl.kt` + `WbiSigner.kt` + `BilibiliApiClient.kt` + `BilibiliAdapter.kt` + `dto/BilibiliPlayUrlResponse.kt` + `di/PlatformModule.kt` | 16, 17, 18 | ✅ **阶段 14 v0.5.4 foundation + 阶段 16 v0.5.6 API 客户端 + 阶段 17 v0.5.7 Engine 集成 + 阶段 18 v0.5.8 download 真路径**——BilibiliUrl 6 类型 URL 分类 + WbiSigner 完整 WBI 签名算法 + BilibiliApiClient（OkHttp + WBI 签名 + regex JSON 解析，含 v0.5.8 新增 playurl 接口）+ BilibiliAdapter（Engine interface 实现，v0.5.8 download 真路径：view → playurl → YtDlpEngine 委托）。**未**做：auth（QR 登录 `qr_login.py`）、strategies、formats 列表、qn 配置化、mixin_key 缓存。v0.5.9+ |
-| `platforms/douyin/`（含 `api` / `auth` / `strategies` / `url` / `live`） | ~1200 | `platforms/douyin/DouyinUrl.kt` + `XBogusSigner.kt` + `DouyinApiClient.kt` + `DouyinAdapter.kt` + `di/PlatformModule.kt` | 16, 17, 18 | 🟡 **阶段 14 v0.5.4 foundation + 阶段 15 v0.5.5 RC4 + 阶段 16 v0.5.6 API 客户端 + 阶段 17 v0.5.7 Engine 集成 + 阶段 18 v0.5.8 download 真路径**——DouyinUrl 3 类型 URL 分类 + XBogusSigner（RC4 + a_bogus 字母表，get_chaos 仍 stub）+ DouyinApiClient（OkHttp + X-Bogus 签名 + regex JSON 解析）+ DouyinAdapter（Engine interface 实现，v0.5.8 download 真路径：awemeItemInfo 拿 playUrl → YtDlpEngine 委托；**走真 API 仍 -352 风控**，playUrl 是空字符串，抛 IOException "v0.5.9+ 真 get_chaos 实装"）。**未**做：auth、strategies、playwm、live、formats 列表、short_link 解析、真 get_chaos。v0.5.9+ |
+| `platforms/douyin/`（含 `api` / `auth` / `strategies` / `url` / `live`） | ~1200 | `platforms/douyin/DouyinUrl.kt` + `XBogusSigner.kt` + `XBogusEncoding.kt` + `XBogusMd5.kt` + `DouyinApiClient.kt` + `DouyinAdapter.kt` + `di/PlatformModule.kt` | 16, 17, 18, 19 | 🟡 **阶段 14 v0.5.4 foundation + 阶段 15 v0.5.5 RC4 + 阶段 16 v0.5.6 API 客户端 + 阶段 17 v0.5.7 Engine 集成 + 阶段 18 v0.5.8 download 真路径 + 阶段 19 v0.5.9-wip 真算法 port**——DouyinUrl 3 类型 URL 分类 + XBogusSigner（RC4 + a_bogus 字母表，**v0.5.9 alphabet 修正**） + XBogusEncoding（**v0.5.9 WIP 落**——3字节→4字符 + 64 字符 alphabet）+ XBogusMd5（**v0.5.9 WIP 落**——md5_str_to_array / md5 / md5_encrypt）+ DouyinApiClient（OkHttp + X-Bogus 签名 + regex JSON 解析）+ DouyinAdapter（Engine interface 实现，v0.5.8 download 真路径：awemeItemInfo 拿 playUrl → YtDlpEngine 委托；**走真 API 仍 -352 风控**）。**未**做：XBogusEncodingConversion（v0.5.9 WIP Commit 3）+ XBogusSigner.sign() 走真算法（v0.5.9 WIP Commit 4，**缺真 API 验证**）+ auth、strategies、playwm、live、formats 列表、short_link 解析、真 get_chaos。v0.5.9 完整版+ |
 | `platforms/PlatformRegistry` | ~50 | `platforms/PlatformRegistry.kt` + `PlatformEngineRegistry.kt` | 14, 17 | ✅ **阶段 14 v0.5.4 + 阶段 17 v0.5.7 落地**——[PlatformRegistry] URL → Platform 分发（BILIBILI / DOUYIN / YOUTUBE / GENERIC，无依赖）；[PlatformEngineRegistry] URL → Engine 路由（BILIBILI → BilibiliAdapter / DOUYIN → DouyinAdapter / YOUTUBE / GENERIC → null，依赖 adapter），分层清晰 |
 | `platforms/generic/`（Playwright 嗅探） | ~800 | v0.4+ 评估 playwright-android；v0.1 用直链嗅探 | 延后 | ⏸️ 首版不做 |
 
@@ -138,6 +138,12 @@
 - B 站 Engine download 5 例（`BilibiliAdapterTest` 新增，-1 placeholder = 净增 4）—— 完整链路（view → playurl → YtDlpEngine）/ view IOException 透传 / cid=0 / playurl IOException 透传 / YtDlpEngine Failure 透传
 - 抖音 Engine download 4 例（`DouyinAdapterTest` 新增，-1 placeholder = 净增 3）—— 完整链路（awemeItemInfo → YtDlpEngine）/ awemeItemInfo IOException 透传 / playUrl 空 IOException / YtDlpEngine Failure 透传
 - **合计 12 例** v0.5.8 新增（v0.5.7 302 → 314）
+
+**v0.5.9-wip XBogusSigner 真算法 port 测试覆盖**（WIP 收尾 2/5 commit）：
+- XBogusEncoding 7 例（`XBogusEncodingTest` 新增）—— calculation 3字节→4字符 / 全 0 字节 / 全 0xFF 字节 / alphabet 64 字符长度 / alphabet 修正防回归（v0.5.5 错 vs v0.5.9 对）/ encodeAll 整数组 / encodeAll 长度非 3 倍数抛错
+- XBogusMd5 6 例（`XBogusMd5Test` 新增）—— md5StrToArray 32 字符 hex / 奇数长度抛错 / md5 "" 标准值 / md5 "abc" 标准值 / md5Encrypt 双层 / toHexString round-trip
+- **合计 13 例** v0.5.9-wip 新增（v0.5.8 314 → 327）
+- **未**做：XBogusEncodingConversion（Commit 3）+ XBogusSigner.sign() 走真算法（Commit 4，需真 API 验证）
 
 ## CHANGELOG 同步策略
 

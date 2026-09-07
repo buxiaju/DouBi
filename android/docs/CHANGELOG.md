@@ -741,6 +741,49 @@
 
 ---
 
+## [未发布] v0.5.9-wip
+
+**当前状态**：阶段 19 进行中，**WIP 收尾**（2/5 commit 已落）。`versionName` 仍 `0.5.8` + `versionCode=16`，**未** bump（等 v0.5.9 完整版收官时再 bump）。
+本 WIP 阶段把 XBogusSigner 真算法 port 拆成 4 个 utility，**先**落 2 个独立可测的（[XBogusEncoding] / [XBogusMd5]），**等**真抖音 API 验证环境下继续 [XBogusEncodingConversion] + [XBogusSigner] 走真算法。
+**Tag**：`v0.5.9-wip-android`（**不**是 `v0.5.9-android`——避免发"未验证"版本）。
+
+### 已完成（WIP）
+
+**阶段 19 — XBogusSigner 真算法 port**（`部分提交` 2/5）
+
+- **[XBogusEncoding]**（`platforms/douyin/XBogusEncoding.kt`，v0.5.9 Commit 1）
+  - `calculation(a1, a2, a3)` —— 3 字节 → 4 字符（24 位拆 4×6 位索引 `A_BOGUS_ALPHABET`）
+  - `encodeAll(bytes)` —— 整字节数组按 3 字节一组编码（要求 length % 3 == 0）
+  - `A_BOGUS_ALPHABET` 64 字符（trim Python 参考 `_character` 尾 `=` 反编译多余字符）
+  - **v0.5.9 修 alphabet bug**（v0.5.5 写错）：旧值 `Dkdpgh2ZmsQB80/MfvV36XI1R45-WUAlEixNLwoqYTOPuzKFjJnry79HbGcaStCe` 多处字符错；新值 `Dkdpgh4ZKsQB80/Mfvw36XI1R25-WUAlEi7NLboqYTOPuzmFjJnryx9HVGcaStCe` 是 1:1 对拍 Evil0ctal 反编译抖音 webmssdk.js
+- **[XBogusMd5]**（`platforms/douyin/XBogusMd5.kt`，v0.5.9 Commit 2）
+  - `md5StrToArray(hex)` —— 32 字符 hex 字符串转 16 字节（用反编译 `HEX_DIGIT_MAP` 字符→nibble 映射）
+  - `md5(input)` —— 标准 MD5 哈希（Kotlin `MessageDigest` + 16 字节）
+  - `md5Encrypt(url)` —— 双层 MD5（先 MD5 url → 再 MD5 那个 16 字节作为 byte 数组）
+  - `toHexString(bytes)` —— 16 字节 → 32 字符小写 hex
+  - `HEX_DIGIT_MAP`：IntArray(128) 索引 48-57 ('0'-'9') → 0-9 / 97-102 ('a'-'f') → 10-15 / 其它默认 0
+- **13 例单测新增**（v0.5.8 314 → 327）：XBogusEncodingTest 7（calculation × 3 + alphabet 修正 + encodeAll × 2）+ XBogusMd5Test 6（md5StrToArray × 2 + md5 标准值 × 2 + md5Encrypt + toHexString round-trip）
+
+### 没做（v0.5.9 完整版需要，**WIP 不做**）
+
+- **[XBogusEncodingConversion]**（Commit 3）—— 19 字节打包 + `chr(2) + chr(255)` 包装
+- **[XBogusSigner.sign()] 走真算法**（Commit 4）—— port `build()` 完整 orchestration（~150 行 Kotlin）
+  - **缺真抖音 X-Bogus test vector**——port 完成后**无法**用单测验证 xb 输出字节正确
+  - **必须**依赖真 API 验证（不在 commit 范围）
+- **versionCode 16→17** + versionName "0.5.8"→"0.5.9"（WIP **不** bump）
+
+### 已知问题（v0.5.9 完整版收官 + v0.6.0+ 单独 PR）
+
+- **真抖音 X-Bogus 算法 port**（WIP Commit 3+4）—— 抖音前端 JS 可能改版让反编译算法失效
+- **live API 验证** —— 在真抖音 web API 调 `aweme_iteminfo` 验证 xb 输出是否字节对齐
+- m3u8 v7+ HLS encryption / 多 variant 选择 UI / WebViewHeadlessSniffer 自身单测（Robolectric）/ ANR 风险测试 / DefaultWebViewFactory 配置 instrumented test
+
+### 已知遗留项（v0.5.7 → v0.5.8 → v0.5.9-wip 持续）
+
+- **5 份 v0.5.4-v0.5.5 阶段 platform 测试文件 untracked**（`PlatformRegistryTest` / `BilibiliUrlTest` / `WbiSignerTest` / `DouyinUrlTest` / `CustomBase64Test`）—— working tree 一直保留并被 gradle test 跑，**未** commit 进 git。后续单独 PR `chore(android): 补 commit v0.5.4-v0.5.5 阶段遗留的 5 份 platform 测试文件`
+
+---
+
 ## 维护约定
 
 - 每个阶段收尾时，把该阶段的 Added / Fixed 补进「未发布」段，并在 [`phases/`](phases/) 写复盘文档
