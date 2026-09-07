@@ -1,5 +1,6 @@
 package com.doubi.android.core.platform.bilibili
 
+import com.doubi.android.core.platform.bilibili.dto.BilibiliPlayUrlResponse
 import com.doubi.android.core.platform.bilibili.dto.BilibiliViewResponse
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -19,6 +20,10 @@ import javax.inject.Singleton
  *   抽 [WbiSigner.extractMixinKey] 拿 32 字符 mixin_key
  * - `view(bvid)` —— `GET /x/web-interface/view?bvid=XXX&wts=NNN&w_rid=XXX` 拿视频
  *   info（title / duration / cid / owner）
+ *
+ * **v0.5.8 新增**：
+ * - `playurl(bvid, cid, qn)` —— `GET /x/player/playurl?bvid=XXX&cid=NNN&qn=80&wts=NNN&w_rid=YYY`
+ *   拿真实下载直链（`durl[0].url`）—— Engine 集成 download 阶段需要
  *
  * **WBI 签名**（[WbiSigner]）：
  * - mixin_key 每次 `fetchMixinKey()` 拿——**不**缓存（v0.5.7+ 考虑缓存）
@@ -107,6 +112,59 @@ class BilibiliApiClient @Inject constructor(
     }
 
     /**
+     * 阶段 18 v0.5.8：Fetch real download URL via `/x/player/playurl`。
+     *
+     * **v0.5.8 流程**：
+     * 1. `fetchMixinKey()` 拿 32 字符 mixin_key（**v0.5.8 简化**：不缓存，每次调都重新 fetch，~200ms 延迟）
+     * 2. 拼 WBI 签名 query（`bvid` + `cid` + `qn` + `wts` → `w_rid`）
+     * 3. `GET /x/player/playurl?bvid=XXX&cid=NNN&qn=80&wts=NNN&w_rid=YYY` 拿 JSON
+     * 4. regex 提取 `durl[0].url`（默认清晰度 80=1080p）
+     *
+     * **v0.5.8 简化**：
+     * - **不**取 `dash.video[].baseUrl`（DASH 流需要 MP4Box / ffmpeg 合并，超出 v0.5.8 范围）
+     * - **不**取 `accept_quality` / `accept_description`（清晰度列表）—— v0.5.9+ 让用户选
+     * - `qn=80` 硬编码（1080p 高清）—— v0.5.9+ 接 [AppConfig.bilibiliQuality] 配置
+     *
+     * @param bvid 12 字符 BV ID（如 `BV1xx411c7mD`）
+     * @param cid Client ID（从 [view] 响应里拿）
+     * @param qn 清晰度代码（默认 80 = 1080p 高清；其它常见值：16=360p / 32=480p / 64=720p / 80=1080p / 112=1080p+ / 116=1080p60）
+     * @return [BilibiliPlayUrlResponse] 含真实下载直链（FLV / MP4 / m3u8）+ 文件大小
+     * @throws IOException HTTP / parse / WBI signing / 业务 code != 0 错误
+     */
+    suspend fun playurl(bvid: String, cid: Long, qn: Int = 80): BilibiliPlayUrlResponse =
+        withContext(Dispatchers.IO) {
+            // 1. Fetch mixin_key
+            val mixinKey = fetchMixinKey()
+            // 2. Compute w_rid
+            val wts = System.currentTimeMillis() / 1000
+            val wRid = wbiSigner.sign(
+                mapOf("bvid" to bvid, "cid" to cid.toString(), "qn" to qn.toString()),
+                mixinKey,
+                wts,
+            )
+            // 3. Build signed URL
+            val url = "$baseUrl/x/player/playurl?bvid=$bvid&cid=$cid&qn=$qn&wts=$wts&w_rid=$wRid"
+            Timber.d(
+                "BilibiliApi.playurl bvid=%s cid=%d qn=%d wts=%d w_rid=%s",
+                bvid, cid, qn, wts, wRid,
+            )
+            val request = Request.Builder()
+                .url(url)
+                .get()
+                .header("User-Agent", USER_AGENT)
+                .build()
+
+            client.newCall(request).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    throw IOException("playurl failed: HTTP ${resp.code}")
+                }
+                val body = resp.body?.string()
+                    ?: throw IOException("playurl body empty")
+                parsePlayUrlResponse(body)
+            }
+        }
+
+    /**
      * 用 regex 提取 nav 响应里的 `wbi_img.img_url` + `wbi_img.sub_url`。
      *
      * 不用 `org.json.JSONObject` 是因为它在 JVM 单测是 stub。
@@ -118,6 +176,52 @@ class BilibiliApiClient @Inject constructor(
         val subUrl = SUB_URL_REGEX.find(body)?.groupValues?.get(1) ?: return null
         if (imgUrl.isEmpty() || subUrl.isEmpty()) return null
         return imgUrl to subUrl
+    }
+
+    /**
+     * 用 regex 提取 playurl 响应里的 `durl[0].url` + `durl[0].size`。
+     *
+     * **v0.5.8 简化**：
+     * - 优先取 `durl[0].url`（FLV / MP4 直链），fallback `dash.video[0].baseUrl`（DASH 流）
+     * - **不**解析 `accept_quality` / `accept_description`（v0.5.9+ 清晰度选择用）
+     * - size 0 视为未知（多 P 视频常见，**不**报错）
+     *
+     * 响应结构示例：
+     * ```
+     * {
+     *   "code": 0,
+     *   "message": "0",
+     *   "data": {
+     *     "from": "local",
+     *     "quality": 80,
+     *     "format": "flv",
+     *     "timelength": 300000,
+     *     "durl": [
+     *       {
+     *         "order": 1,
+     *         "length": 30000,
+     *         "size": 12345678,
+     *         "url": "https://cn-jsnt-cu-04-12.bilivideo.com/...?bvid=..."
+     *       }
+     *     ]
+     *   }
+     * }
+     * ```
+     */
+    private fun parsePlayUrlResponse(body: String): BilibiliPlayUrlResponse {
+        // code != 0 抛错（业务错误）
+        val codeMatch = CODE_REGEX.find(body)?.groupValues?.get(1)?.toIntOrNull()
+        if (codeMatch != null && codeMatch != 0) {
+            val message = MESSAGE_REGEX.find(body)?.groupValues?.get(1) ?: "unknown"
+            throw IOException("playurl returned code=$codeMatch message=$message")
+        }
+        // 优先 durl[0].url（FLV/MP4 直链），fallback dash.video[0].baseUrl（DASH 流）
+        val durlUrl = DURL_URL_REGEX.find(body)?.groupValues?.get(1)
+        val dashUrl = DASH_VIDEO_URL_REGEX.find(body)?.groupValues?.get(1)
+        val url = durlUrl ?: dashUrl
+            ?: throw IOException("playurl no durl/dash URL found in response")
+        val size = DURL_SIZE_REGEX.find(body)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+        return BilibiliPlayUrlResponse(url = url, size = size)
     }
 
     /**
@@ -219,5 +323,37 @@ class BilibiliApiClient @Inject constructor(
 
         /** Regex: 提取顶层 `"message":"..."` 字符串值 */
         private val MESSAGE_REGEX = Regex(""""message"\s*:\s*"([^"]*)"""")
+
+        // ---- v0.5.8 playurl 响应字段 ----
+
+        /**
+         * 提取 `durl` 数组里第一个 `{"order":1,"size":NNN,"url":"..."}` 的 `url` 字段。
+         *
+         * 简化算法：找 `"durl":[{` 后的第一个 `"url":"..."` 出现的位置——通常是 `durl[0]`
+         * （[parsePlayUrlResponse] 拿这条 url 给 [YtDlpEngine.download] 跑下载）。
+         *
+         * **v0.5.8 限制**：如果 `durl[0]` 是分 P 视频片段（非分 P 整段），regex 仍能拿
+         * 到——但实际下载时 yt-dlp 会按 m3u8 / 单段 FLV 处理。v0.5.9+ 解析 `durl.length` 字段做校验。
+         */
+        private val DURL_URL_REGEX = Regex(""""durl"\s*:\s*\[\s*\{[^}]*?"url"\s*:\s*"([^"]+)"""")
+
+        /**
+         * 提取 `durl[0].size` 整数值（字节，0 = 未知）。
+         *
+         * 同样找 `"durl":[{` 后的第一个 `"size":NNN` 出现的位置——简化算法
+         * 不严格匹配 `size` 一定在 `url` 之前（B 站 JSON 字段顺序固定：order / length / size / url，
+         * 但万一有变化 regex 仍能匹配到 size）。
+         */
+        private val DURL_SIZE_REGEX = Regex(""""durl"\s*:\s*\[\s*\{[^}]*?"size"\s*:\s*(\d+)""")
+
+        /**
+         * Fallback 提取 `dash.video[0].baseUrl` 字段值。
+         *
+         * 当 B 站返 dash 流（fnval=16 时常见）时，`durl` 是空数组，**不**走 `durl[0].url`。
+         * 这种场景 regex 退到 `dash.video[0].baseUrl`（DASH 流需要 MP4Box / ffmpeg 合并，
+         * v0.5.8 范围 yt-dlp 跑会失败——v0.5.9+ 单独处理）。
+         */
+        private val DASH_VIDEO_URL_REGEX =
+            Regex(""""dash"\s*:\s*\{[^}]*?"video"\s*:\s*\[\s*\{[^}]*?"baseUrl"\s*:\s*"([^"]+)"""")
     }
 }
