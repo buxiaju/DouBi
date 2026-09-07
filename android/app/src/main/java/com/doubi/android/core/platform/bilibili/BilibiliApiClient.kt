@@ -2,6 +2,7 @@ package com.doubi.android.core.platform.bilibili
 
 import com.doubi.android.core.platform.bilibili.dto.BilibiliPlayUrlResponse
 import com.doubi.android.core.platform.bilibili.dto.BilibiliViewResponse
+import com.doubi.android.core.util.TimeBasedCache
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -55,27 +56,45 @@ class BilibiliApiClient @Inject constructor(
     private val baseUrl = "https://api.bilibili.com"
 
     /**
+     * v0.5.10 mixin_key 缓存：5min TTL，进程内共享。key 用 "global" 因为 mixin_key 是
+     * 全局单值（B 站 nav 端点返的服务端 wbi_img 当前值，所有 endpoint 共用）。
+     */
+    private val mixinKeyCache = TimeBasedCache<String, String>(
+        ttlMillis = 5 * 60 * 1000L,
+    )
+
+    /**
      * Fetch mixin_key from `/x/web-interface/nav`.
+     *
+     * **v0.5.10 加缓存**：5min TTL 内存缓存（[mixinKeyCache]）—— 避免 [view] / [playurl]
+     * 每次都 fetch nav（~200ms HTTP 延迟）。多次调用 [view] / [playurl] 共享同一个 mixin_key。
+     *
+     * **缓存策略**：
+     * - 缓存**只**存"成功结果"（[checkNotNull] 防御 null 污染）
+     * - 失败（IOException / parse 错）**不**缓存（loader 抛错不写缓存）
+     * - 5min 后过期，下次 fetch 重新拉
      *
      * @return 32 字符 mixin_key
      * @throws IOException HTTP / parse 错误
      */
-    suspend fun fetchMixinKey(): String = withContext(Dispatchers.IO) {
-        val request = Request.Builder()
-            .url("$baseUrl/x/web-interface/nav")
-            .get()
-            .header("User-Agent", USER_AGENT)
-            .build()
+    suspend fun fetchMixinKey(): String = mixinKeyCache.getOrLoad("global") {
+        withContext(Dispatchers.IO) {
+            val request = Request.Builder()
+                .url("$baseUrl/x/web-interface/nav")
+                .get()
+                .header("User-Agent", USER_AGENT)
+                .build()
 
-        client.newCall(request).execute().use { resp ->
-            if (!resp.isSuccessful) {
-                throw IOException("nav failed: HTTP ${resp.code}")
+            client.newCall(request).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    throw IOException("nav failed: HTTP ${resp.code}")
+                }
+                val body = resp.body?.string()
+                    ?: throw IOException("nav body empty")
+                val (imgUrl, subUrl) = extractWbiUrls(body)
+                    ?: throw IOException("nav wbi_img fields missing")
+                wbiSigner.extractMixinKey(imgUrl, subUrl)
             }
-            val body = resp.body?.string()
-                ?: throw IOException("nav body empty")
-            val (imgUrl, subUrl) = extractWbiUrls(body)
-                ?: throw IOException("nav wbi_img fields missing")
-            wbiSigner.extractMixinKey(imgUrl, subUrl)
         }
     }
 

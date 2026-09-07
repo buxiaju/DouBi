@@ -108,6 +108,40 @@ class BilibiliApiClientTest {
         assertThat(ex!!.message!!).contains("401")
     }
 
+    // ---- v0.5.10 mixin_key 缓存 ----
+
+    @Test
+    fun `fetchMixinKey calls HTTP only once on multiple calls within TTL (cache hit)`() = runTest {
+        // 第一次调用：缓存未命中 → HTTP 1 次
+        val validJson = """{"code":0,"data":{"wbi_img":{"img_url":"https://i0.hdslb.com/bfs/wbi/abc.png?012345678901234567890123456789","sub_url":"https://i0.hdslb.com/bfs/wbi/def.png?abcdefghijabcdefghijabcdefghij"}}}"""
+        every { call.execute() } returns mockResponse(200, validJson)
+        every { wbiSigner.extractMixinKey(any(), any()) } returns "M".repeat(32)
+
+        runCatching { apiClient.fetchMixinKey() }
+        runCatching { apiClient.fetchMixinKey() }
+        runCatching { apiClient.fetchMixinKey() }
+
+        // 3 次调用**只**触发 1 次 HTTP（缓存命中）
+        verify(exactly = 1) { client.newCall(any()) }
+    }
+
+    @Test
+    fun `fetchMixinKey does not cache on failure (next call retries HTTP)`() = runTest {
+        // 第一次：失败（HTTP 401）→ 缓存**不**被污染
+        every { call.execute() } returns mockResponse(401, "unauthorized")
+
+        val ex1 = runCatching { apiClient.fetchMixinKey() }.exceptionOrNull()
+        assertThat(ex1).isInstanceOf(IOException::class.java)
+        // 不应被缓存
+        verify(exactly = 1) { client.newCall(any()) }
+
+        // 第二次：仍然失败（**不**从缓存返过期值）→ 再次走 HTTP
+        val ex2 = runCatching { apiClient.fetchMixinKey() }.exceptionOrNull()
+        assertThat(ex2).isInstanceOf(IOException::class.java)
+        // **新**的 HTTP 调用（**不**复用上次失败）
+        verify(exactly = 2) { client.newCall(any()) }
+    }
+
     @Test
     fun `view throws on HTTP 401`() = runTest {
         every { call.execute() } returns mockResponse(401, "unauthorized")
