@@ -398,7 +398,7 @@ APK: app/build/outputs/apk/debug/app-debug.apk  80.6 MB（v0.5.6 80.4 MB + 0.2 M
 
 ### 已知遗留项
 
-- [ ] **5 份 v0.5.4-v0.5.5 阶段 platform 测试文件 untracked**（`PlatformRegistryTest` / `BilibiliUrlTest` / `WbiSignerTest` / `DouyinUrlTest` / `CustomBase64Test`）—— working tree 一直保留并被 gradle test 跑，**未** commit 进 git。后续单独 PR `chore(android): 补 commit v0.5.4-v0.5.5 阶段遗留的 5 份 platform 测试文件`
+- [x] ~~**5 份 v0.5.4-v0.5.5 阶段 platform 测试文件 untracked**（`PlatformRegistryTest` / `BilibiliUrlTest` / `WbiSignerTest` / `DouyinUrlTest` / `CustomBase64Test`）~~ ✅ **v0.5.9-wip 之后**已 commit（chore PR 单独 commit，0 测试影响）
 
 ### 文档同步
 
