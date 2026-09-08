@@ -1,8 +1,8 @@
 # 环境与构建
 
-> **状态（2026-09-02 实测）**：命令行构建**默认是坏的** —— 本机 PATH 上的 JDK 是 26，AGP 8.7.3 的
+> **状态（2026-09-08 实测，对应 v0.5.10-android 阶段 20 收官）**：命令行构建**默认是坏的** —— 本机 PATH 上的 JDK 是 26，AGP 8.7.3 的
 > `androidJdkImage` 这步会在它上面挂掉。**把 `JAVA_HOME` 指向 Android Studio 自带的 JBR 就绿**，
-> 46 个单测全过。下面第一节给一行可复制的命令。
+> 339 个单测全过。下面第一节给一行可复制的命令。
 >
 > 本文件早期版本写过「本机没有 JDK / SDK」（阶段 0 的情况）和「JDK 26 实测通过」（错误结论，已被
 > 实跑推翻），两者都已作废。
@@ -16,7 +16,7 @@ $env:JAVA_HOME = 'C:\A\01SoftWares\03IDE\Android Studio\jbr'
 .\gradlew.bat testDebugUnitTest --rerun
 ```
 
-实测结果：`BUILD SUCCESSFUL`，`testDebugUnitTest` 真执行，46/46 通过，configuration cache 正常存盘。
+实测结果：`BUILD SUCCESSFUL`，`testDebugUnitTest` 真执行，339/339 通过，configuration cache 正常存盘。
 
 要一劳永逸见下文 [永久修法](#永久修法三选一)。
 
@@ -81,7 +81,7 @@ jlink 自己的 stderr 被 Gradle 的 `ProcessException` 吞掉了，没取到�
 | 运行 | JAVA_HOME | 命令 | 结果 | 日志 |
 |---|---|---|---|---|
 | A | 不设（→ JDK 26） | `testDebugUnitTest --rerun --no-configuration-cache` | ❌ `BUILD FAILED in 14s`，挂在 `androidJdkImage` | `.scratch/gradle_jdk26_recheck.log` |
-| B | AS JBR 25 | `testDebugUnitTest --rerun --no-configuration-cache` | ✅ `BUILD SUCCESSFUL in 4s`，46/46 | `.scratch/gradle_jbr25_rerun.log` |
+| B | AS JBR 25 | `testDebugUnitTest --rerun --no-configuration-cache` | ✅ `BUILD SUCCESSFUL in 4s`，339/339（v0.5.10 阶段 20 实跑）| `.scratch/gradle_jbr25_rerun.log` |
 | C | AS JBR 25 | `testDebugUnitTest --rerun`（**开** CC） | ✅ `BUILD SUCCESSFUL in 5s`，`Configuration cache entry stored.` | `.scratch/gradle_jbr25_cc.log` |
 
 A 和 B/C 共用同一个 transform 缓存目录还能一个失败一个成功 → 说明这个 transform 的缓存键**带 JDK 身份**，
@@ -144,7 +144,7 @@ AGP 8.7.3 官方支持区间内的版本，然后同样用 `org.gradle.java.home
 ```powershell
 $env:JAVA_HOME = 'C:\A\01SoftWares\03IDE\Android Studio\jbr'
 
-# 跑全部单元测试（JVM，最常用；当前 46 个用例）
+# 跑全部单元测试（JVM，最常用；当前 339 个用例）
 .\gradlew.bat testDebugUnitTest
 
 # ⚠️ 上一条可能报 UP-TO-DATE 直接返回成功而一个测试都没跑。
@@ -171,7 +171,7 @@ $env:JAVA_HOME = 'C:\A\01SoftWares\03IDE\Android Studio\jbr'
 > **`UP-TO-DATE` 假绿是真踩过的坑**：本文件之前写「46 个单测实测全绿」，其实那次
 > `testDebugUnitTest` 是 UP-TO-DATE，测试根本没执行。要报数就带 `--rerun`，或者直接看下面的报告文件时间戳。
 
-### 当前测试构成（46 个单测）
+### 当前测试构成（v0.5.10 阶段 20，339 个单测）
 
 | 测试类 | 用例数 | 位置 |
 |---|---|---|
