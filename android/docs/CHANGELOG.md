@@ -784,6 +784,65 @@
 
 ---
 
+## [未发布] v0.5.10
+
+**当前状态**：阶段 20 完成（B 站 API 客户端 5min TTL 缓存），`versionName` 改为 `0.5.10` + `versionCode=17`，**尚未发布**。
+本版本把 v0.5.8 阶段 18 留的"性能优化"欠账**部分**落地——[TimeBasedCache] 通用 TTL 缓存 + B 站 3 个端点（fetchMixinKey / view / playurl）wire 缓存。**X-Bogus 缓存**延后到 v0.5.9 完整版（真算法依赖真 API 验证，**不**在本版本范围）。
+**Tag**：`v0.5.10-android`。
+
+### 已完成
+
+**阶段 20 — B 站 API 客户端 5min TTL 缓存**（`未提交`）
+
+- **[TimeBasedCache<K, V>]**（`core/util/TimeBasedCache.kt`，v0.5.10 Commit 1）—— 通用 TTL 内存缓存
+  - `suspend getOrLoad(key, loader: suspend () -> V)` —— 缓存命中返旧值；未命中 / 过期调 loader
+  - 5min TTL 硬编码（v0.5.10 范围；v0.5.11+ 接 AppConfig.apiCacheTtl 配置）
+  - `ConcurrentHashMap` 线程安全（协程多并发读 / 单写场景）
+  - 注入 `clock: () -> Long`（默认 `System.currentTimeMillis`）—— 单测可控时间
+  - `invalidate` / `clear` 显式失效
+  - `checkNotNull` 防御 loader 返 null（缓存**只**存成功值，失败**不**污染）
+  - **不**做主动清理 / LRU / size 上限（5-10 个 key 内存**远低于**阈值）
+  - **不**做持久化（**仅**进程生命周期内有效）—— 应用重启缓存清空
+- **[BilibiliApiClient.fetchMixinKey] 5min 缓存**（v0.5.10 Commit 2）
+  - `private val mixinKeyCache = TimeBasedCache<String, String>(ttlMillis = 5 * 60 * 1000L)`
+  - `fetchMixinKey() = mixinKeyCache.getOrLoad("global") { withContext(IO) { ... } }`
+  - key 用 "global"（mixin_key 是 B 站服务端全局单值）
+- **[BilibiliApiClient.view] 按 bvid 5min 缓存**（v0.5.10 Commit 3）
+  - `private val viewCache = TimeBasedCache<String, BilibiliViewResponse>(ttlMillis = 5 * 60 * 1000L)`
+  - `view(bvid) = viewCache.getOrLoad(bvid) { ... }`
+  - 缓存 value = `BilibiliViewResponse`（**不**含 wts / w_rid——请求侧瞬态值）
+- **[BilibiliApiClient.playurl] 按 `"$bvid:$cid:$qn"` 5min 缓存**（v0.5.10 Commit 4）
+  - `private val playurlCache = TimeBasedCache<String, BilibiliPlayUrlResponse>(ttlMillis = 5 * 60 * 1000L)`
+  - `playurl(bvid, cid, qn) = playurlCache.getOrLoad("$bvid:$cid:$qn") { ... }`
+  - **qn 必**进 key——不同清晰度返不同 URL，**不**能共享缓存
+- **12 例单测新增**（v0.5.9-wip 327 → 339）：TimeBasedCacheTest 6 + BilibiliApiClientTest 净增 6
+- **`assembleDebug` 通过**，APK 80.8 MB（同 v0.5.8 —— 0 字节码大小变化）
+
+### 修复
+
+- **v0.5.10 Commit 1 第一版 `getOrLoad` 用 sync `() -> V` loader → fetchMixinKey 编译失败**——`withContext(Dispatchers.IO) { ... }` 是 suspend 函数，**不**能在 sync lambda 里调。**修法**：`getOrLoad` 改 `suspend fun <K, V> getOrLoad(key, loader: suspend () -> V): V`；单测**全**改用 `runTest { ... }` 包装
+- **v0.5.10 Commit 3 `view uses different cache keys for different bvids` 测试 mock 错位**——mock `returnsMany` 4 元素，实际**只** 3 次 HTTP 调用，3rd HTTP mock 错位。**修法**：改 3 元素 list（1 mixin_key + 2 view）
+- **`checkNotNull` 抛 `IllegalStateException`**（v0.5.10 Commit 1）——Kotlin `checkNotNull` 跟 Java `Objects.requireNonNull` 行为**不**同（抛 ISE **不**是 NPE）。**修法**：测试断言改 `IllegalStateException`
+
+### 已知问题（v0.5.11+ 单独 PR）
+
+- **X-Bogus 缓存**——XBogusSigner 真算法**未**完成（v0.5.9-wip 仍 stub chaos），真算法落地后**才**能 wire cache
+- **-352 风控时强制失效** —— 当前缓存**不**主动失效，-352 风控时需等 5min 过期
+- **按 UA 分 key** —— USER_AGENT 写死常量，AppConfig.userAgent 落地后再分
+- **TTL 配置化** —— v0.5.10 硬编码 5min，AppConfig.apiCacheTtl 落地后再配置
+- **抖音 API 客户端缓存** —— DouyinApiClient.awemeItemInfo 暂**不**加（X-Bogus 没通真 API 时缓存是 stub 数据）
+- m3u8 v7+ HLS encryption / 多 variant 选择 UI / WebViewHeadlessSniffer 自身单测（Robolectric）/ ANR 风险测试 / DefaultWebViewFactory 配置 instrumented test
+
+### 文档同步
+
+- [x] [PHASES.md](../PHASES.md) — 阶段 20 行加
+- [x] [CHANGELOG.md](../CHANGELOG.md) — + v0.5.10 段
+- [x] [REUSE-MAP.md](../REUSE-MAP.md) — 同步 v0.5.10 缓存映射
+- [x] [README.md](../../README.md) — 阶段 20 标完成
+- [x] [phase-20.md](phase-20.md) — 本文档
+
+---
+
 ## 维护约定
 
 - 每个阶段收尾时，把该阶段的 Added / Fixed 补进「未发布」段，并在 [`phases/`](phases/) 写复盘文档

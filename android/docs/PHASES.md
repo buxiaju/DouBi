@@ -30,6 +30,7 @@
 | 17 | 平台 Engine 集成 | PlatformEngineRegistry（URL→Engine 路由）+ BilibiliAdapter / DouyinAdapter（Engine interface 实现）+ ParseAndExpandUseCase 加 B 站/抖音 dispatch + ParseResult.Platform variant | ✅ 完成（v0.5.7） | 1-2 天 |
 | 18 | B 站 / 抖音 download 真路径 | BilibiliApiClient.playurl（B 站 playurl 接口 + WBI 真用）+ BilibiliAdapter.download / DouyinAdapter.download 真路径（调 play API 拿直链 → YtDlpEngine 跑下载）| ✅ 完成（v0.5.8） | 1-2 天 |
 | 19 | XBogusSigner 真算法 port（WIP） | XBogusEncoding（3字节→4字符 + 修 alphabet 64字符）+ XBogusMd5（md5_str_to_array / md5 / md5_encrypt）| ⚠️ WIP 收尾（v0.5.9-wip） | 1-2 天已做 |
+| 20 | B 站 API 客户端 5min TTL 缓存 | TimeBasedCache<K, V> 通用 TTL 缓存 + BilibiliApiClient.fetchMixinKey / view / playurl 3 个端点 wire cache | ✅ 完成（v0.5.10） | 1-2 天 |
 
 **预计总工期**：6-8 周一人（不含商店审核 1-3 天）
 
