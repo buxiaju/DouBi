@@ -142,6 +142,58 @@ class BilibiliApiClientTest {
         verify(exactly = 2) { client.newCall(any()) }
     }
 
+    // ---- v0.5.10 view 缓存 ----
+
+    @Test
+    fun `view calls HTTP only once on multiple calls with same bvid (cache hit)`() = runTest {
+        val navJson = """{"code":0,"data":{"wbi_img":{"img_url":"https://i0.hdslb.com/bfs/wbi/abc.png?012345678901234567890123456789","sub_url":"https://i0.hdslb.com/bfs/wbi/def.png?abcdefghijabcdefghijabcdefghij"}}}"""
+        val viewJson = """{"code":0,"data":{"bvid":"BV1xx","aid":1,"title":"t","duration":1,"cid":1}}"""
+        // 第 1 次 mixin_key + 第 2 次 view = 2 次 HTTP；后续 view 都 cache hit
+        every { call.execute() } returnsMany listOf(
+            mockResponse(200, navJson),
+            mockResponse(200, viewJson),
+        )
+        every { wbiSigner.extractMixinKey(any(), any()) } returns "MOCK_MIXIN_KEY_32_CHARS_LONG_XX"
+        every { wbiSigner.sign(any(), any(), any()) } returns "MOCK_W_RID_32_CHARS_LONG_XXXXXXX"
+
+        runCatching { apiClient.view("BV1xx411c7mD") }
+        runCatching { apiClient.view("BV1xx411c7mD") }
+        runCatching { apiClient.view("BV1xx411c7mD") }
+
+        // 3 次 view 调用**只**触发 1 次 view HTTP（+ 1 次 mixin_key HTTP）= 2 次 newCall
+        verify(exactly = 2) { client.newCall(any()) }
+    }
+
+    @Test
+    fun `view uses different cache keys for different bvids`() = runTest {
+        val navJson = """{"code":0,"data":{"wbi_img":{"img_url":"https://i0.hdslb.com/bfs/wbi/abc.png?012345678901234567890123456789","sub_url":"https://i0.hdslb.com/bfs/wbi/def.png?abcdefghijabcdefghijabcdefghij"}}}"""
+        val viewJson1 = """{"code":0,"data":{"bvid":"BV1xx","aid":1,"title":"t1","duration":1,"cid":1}}"""
+        val viewJson2 = """{"code":0,"data":{"bvid":"BV1yy","aid":2,"title":"t2","duration":2,"cid":2}}"""
+        // 实际 HTTP 调用顺序：
+        //   1) view(BV1xx) → mixin_key HTTP（cache miss） + view HTTP（cache miss）
+        //   2) view(BV1yy) → mixin_key CACHE HIT（无 HTTP） + view HTTP（cache miss，新 bvid）
+        //   3) view(BV1xx) → mixin_key CACHE HIT + view CACHE HIT（无 HTTP）
+        // 共 3 次 HTTP：mixin_key × 1 + view × 2
+        every { call.execute() } returnsMany listOf(
+            mockResponse(200, navJson),
+            mockResponse(200, viewJson1),
+            mockResponse(200, viewJson2),
+        )
+        every { wbiSigner.extractMixinKey(any(), any()) } returns "MOCK_MIXIN_KEY_32_CHARS_LONG_XX"
+        every { wbiSigner.sign(any(), any(), any()) } returns "MOCK_W_RID_32_CHARS_LONG_XXXXXXX"
+
+        val r1 = apiClient.view("BV1xx411c7mD")
+        val r2 = apiClient.view("BV1yy411c7mD")
+        val r3 = apiClient.view("BV1xx411c7mD")  // 缓存命中
+
+        assertThat(r1.title).isEqualTo("t1")
+        assertThat(r2.title).isEqualTo("t2")
+        assertThat(r3.title).isEqualTo("t1")  // 来自缓存
+
+        // 2 个不同 bvid → 2 次 view HTTP 调用（+ 1 次 mixin_key）= 3 次 newCall
+        verify(exactly = 3) { client.newCall(any()) }
+    }
+
     @Test
     fun `view throws on HTTP 401`() = runTest {
         every { call.execute() } returns mockResponse(401, "unauthorized")

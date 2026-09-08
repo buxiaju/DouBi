@@ -64,6 +64,21 @@ class BilibiliApiClient @Inject constructor(
     )
 
     /**
+     * v0.5.10 view 缓存：5min TTL，**按 bvid 分 key**。B 站视频 metadata
+     * （title / duration / cid / owner）短时间（< 5min）内**不**变 —— 重复粘贴同一 B 站
+     * URL 时省 1 次 view HTTP 调用（~200ms）。
+     *
+     * **缓存策略**：
+     * - key = bvid（12 字符 BV ID 唯一）
+     * - 缓存 value = `BilibiliViewResponse`（**不**含 wts / w_rid——这些是请求侧的
+     *   瞬态值，每秒变化，**不**进缓存）
+     * - 5min 后过期，下次 fetch 重新拉
+     */
+    private val viewCache = TimeBasedCache<String, BilibiliViewResponse>(
+        ttlMillis = 5 * 60 * 1000L,
+    )
+
+    /**
      * Fetch mixin_key from `/x/web-interface/nav`.
      *
      * **v0.5.10 加缓存**：5min TTL 内存缓存（[mixinKeyCache]）—— 避免 [view] / [playurl]
@@ -101,32 +116,41 @@ class BilibiliApiClient @Inject constructor(
     /**
      * Fetch video info with WBI signing.
      *
+     * **v0.5.10 加缓存**：5min TTL 按 bvid 缓存（[viewCache]）—— B 站视频 metadata
+     * 短时间内**不**变，重复粘贴同一 URL 省 1 次 view HTTP 调用（~200ms）。
+     *
+     * **注意**：缓存**只**存 `BilibiliViewResponse`，**不**存 wts / w_rid（这些是请求侧
+     * 瞬态值，每秒变化）。每次调用都**重新**计算 wts + w_rid——cache hit 时**不**再发
+     * HTTP 但**仍**用当前 timestamp 算 w_rid（**不**影响——response 已缓存）。
+     *
      * @param bvid 12 字符 BV ID（如 `BV1xx411c7mD`）
      * @return [BilibiliViewResponse] 包含 title / duration / cid / owner
      * @throws IOException HTTP / parse / WBI signing 错误
      */
-    suspend fun view(bvid: String): BilibiliViewResponse = withContext(Dispatchers.IO) {
-        // 1. Fetch mixin_key
-        val mixinKey = fetchMixinKey()
-        // 2. Compute w_rid
-        val wts = System.currentTimeMillis() / 1000
-        val wRid = wbiSigner.sign(mapOf("bvid" to bvid), mixinKey, wts)
-        // 3. Build signed URL
-        val url = "$baseUrl/x/web-interface/view?bvid=$bvid&wts=$wts&w_rid=$wRid"
-        Timber.d("BilibiliApi.view bvid=%s wts=%d w_rid=%s", bvid, wts, wRid)
-        val request = Request.Builder()
-            .url(url)
-            .get()
-            .header("User-Agent", USER_AGENT)
-            .build()
+    suspend fun view(bvid: String): BilibiliViewResponse = viewCache.getOrLoad(bvid) {
+        withContext(Dispatchers.IO) {
+            // 1. Fetch mixin_key（v0.5.10 Commit 2 加缓存）
+            val mixinKey = fetchMixinKey()
+            // 2. Compute w_rid
+            val wts = System.currentTimeMillis() / 1000
+            val wRid = wbiSigner.sign(mapOf("bvid" to bvid), mixinKey, wts)
+            // 3. Build signed URL
+            val url = "$baseUrl/x/web-interface/view?bvid=$bvid&wts=$wts&w_rid=$wRid"
+            Timber.d("BilibiliApi.view bvid=%s wts=%d w_rid=%s", bvid, wts, wRid)
+            val request = Request.Builder()
+                .url(url)
+                .get()
+                .header("User-Agent", USER_AGENT)
+                .build()
 
-        client.newCall(request).execute().use { resp ->
-            if (!resp.isSuccessful) {
-                throw IOException("view failed: HTTP ${resp.code}")
+            client.newCall(request).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    throw IOException("view failed: HTTP ${resp.code}")
+                }
+                val body = resp.body?.string()
+                    ?: throw IOException("view body empty")
+                parseViewResponse(bvid, body)
             }
-            val body = resp.body?.string()
-                ?: throw IOException("view body empty")
-            parseViewResponse(bvid, body)
         }
     }
 
