@@ -54,8 +54,20 @@ android {
         //   + BilibiliAdapter.download() 真路径（view → playurl → YtDlpEngine + 5 例新测）
         //   + DouyinAdapter.download() 真路径（awemeItemInfo → YtDlpEngine + 4 例新测）
         //   单测 302 → 314
-        versionCode = 16
-        versionName = "0.5.8"
+        // v0.5.9-wip：XBogusSigner 真算法 port WIP 收尾（**不** bump versionName / versionCode）
+        //   + XBogusEncoding utility（3字节→4字符 + 修 alphabet 64字符 + 7 例单测）
+        //   + XBogusMd5 utility（md5_str_to_array / md5 / md5_encrypt + 6 例单测）
+        //   单测 314 → 327（仍 versionName=0.5.8 / versionCode=16，因 v0.5.9 真算法**未**完成）
+        // v0.5.10：阶段 20 - B 站 API 客户端 5min TTL 缓存
+        //   + TimeBasedCache<K, V> 通用 TTL 缓存 utility（suspend getOrLoad + 6 例单测）
+        //   + fetchMixinKey() 用 cache（5min TTL，key="global" + 2 例单测）
+        //   + view() 用 cache（5min TTL，key=bvid + 2 例单测）
+        //   + playurl() 用 cache（5min TTL，key="$bvid:$cid:$qn" + 1-2 例单测）
+        //   单测 327 → 337+
+        // versionName 跳 0.5.8 → 0.5.10：v0.5.9-wip 是 chore-style WIP tag（不 bump），
+        //   显式跳号避免 0.5.9 完整版时跟 v0.5.9-wip 混淆
+        versionCode = 17
+        versionName = "0.5.10"
 
         minSdk = 24
         targetSdk = 35

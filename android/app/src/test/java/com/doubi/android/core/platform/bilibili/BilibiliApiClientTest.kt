@@ -194,6 +194,63 @@ class BilibiliApiClientTest {
         verify(exactly = 3) { client.newCall(any()) }
     }
 
+    // ---- v0.5.10 playurl 缓存 ----
+
+    @Test
+    fun `playurl calls HTTP only once on multiple calls with same bvid cid qn (cache hit)`() = runTest {
+        val navJson = """{"code":0,"data":{"wbi_img":{"img_url":"https://i0.hdslb.com/bfs/wbi/abc.png?012345678901234567890123456789","sub_url":"https://i0.hdslb.com/bfs/wbi/def.png?abcdefghijabcdefghijabcdefghij"}}}"""
+        val playurlJson = """{"code":0,"message":"0","data":{"from":"local","quality":80,"format":"flv","timelength":300000,"durl":[{"order":1,"length":30000,"size":12345678,"url":"https://cn-jsnt-cu.bilivideo.com/12345?bvid=BV1xx"}]}}"""
+        // 2 次 playurl 同一 (bvid, cid, qn)：
+        //   1) playurl → mixin_key HTTP（cache miss） + playurl HTTP（cache miss）
+        //   2) playurl → mixin_key CACHE HIT + playurl CACHE HIT（无 HTTP）
+        // 共 2 次 HTTP
+        every { call.execute() } returnsMany listOf(
+            mockResponse(200, navJson),
+            mockResponse(200, playurlJson),
+        )
+        every { wbiSigner.extractMixinKey(any(), any()) } returns "MOCK_MIXIN_KEY_32_CHARS_LONG_XX"
+        every { wbiSigner.sign(any(), any(), any()) } returns "MOCK_W_RID_32_CHARS_LONG_XXXXXXX"
+
+        val r1 = apiClient.playurl("BV1xx411c7mD", 12345L, 80)
+        val r2 = apiClient.playurl("BV1xx411c7mD", 12345L, 80)  // 缓存命中
+
+        assertThat(r1.url).isEqualTo("https://cn-jsnt-cu.bilivideo.com/12345?bvid=BV1xx")
+        assertThat(r2.url).isEqualTo("https://cn-jsnt-cu.bilivideo.com/12345?bvid=BV1xx")
+
+        // 2 次调用**只**触发 2 次 HTTP（1 mixin_key + 1 playurl）
+        verify(exactly = 2) { client.newCall(any()) }
+    }
+
+    @Test
+    fun `playurl uses different cache keys for different qn values`() = runTest {
+        val navJson = """{"code":0,"data":{"wbi_img":{"img_url":"https://i0.hdslb.com/bfs/wbi/abc.png?012345678901234567890123456789","sub_url":"https://i0.hdslb.com/bfs/wbi/def.png?abcdefghijabcdefghijabcdefghij"}}}"""
+        val playurlJson80 = """{"code":0,"message":"0","data":{"quality":80,"durl":[{"size":12345678,"url":"https://example.com/80p.flv"}]}}"""
+        val playurlJson116 = """{"code":0,"message":"0","data":{"quality":116,"durl":[{"size":87654321,"url":"https://example.com/116p60.flv"}]}}"""
+        // 实际 HTTP：
+        //   1) playurl qn=80 → mixin_key HTTP + playurl HTTP（qn=80）
+        //   2) playurl qn=116 → mixin_key CACHE HIT + playurl HTTP（qn=116，**新** cache key）
+        //   3) playurl qn=80 → 2 个 CACHE HIT
+        // 共 3 次 HTTP：mixin_key × 1 + playurl × 2
+        every { call.execute() } returnsMany listOf(
+            mockResponse(200, navJson),
+            mockResponse(200, playurlJson80),
+            mockResponse(200, playurlJson116),
+        )
+        every { wbiSigner.extractMixinKey(any(), any()) } returns "MOCK_MIXIN_KEY_32_CHARS_LONG_XX"
+        every { wbiSigner.sign(any(), any(), any()) } returns "MOCK_W_RID_32_CHARS_LONG_XXXXXXX"
+
+        val r80a = apiClient.playurl("BV1xx411c7mD", 12345L, 80)
+        val r116 = apiClient.playurl("BV1xx411c7mD", 12345L, 116)  // **新** qn
+        val r80b = apiClient.playurl("BV1xx411c7mD", 12345L, 80)  // cache hit
+
+        assertThat(r80a.url).isEqualTo("https://example.com/80p.flv")
+        assertThat(r116.url).isEqualTo("https://example.com/116p60.flv")
+        assertThat(r80b.url).isEqualTo("https://example.com/80p.flv")  // 来自缓存
+
+        // 3 次 newCall
+        verify(exactly = 3) { client.newCall(any()) }
+    }
+
     @Test
     fun `view throws on HTTP 401`() = runTest {
         every { call.execute() } returns mockResponse(401, "unauthorized")

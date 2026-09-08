@@ -79,6 +79,21 @@ class BilibiliApiClient @Inject constructor(
     )
 
     /**
+     * v0.5.10 playurl 缓存：5min TTL，**按 `"$bvid:$cid:$qn"` 分 key**。B 站 playurl 接口
+     * 返真实下载直链，**短时间（< 5min）内对同一 (bvid, cid, qn) 不变** —— 重复下载同一
+     * 视频时省 1 次 playurl HTTP 调用（~200ms）。
+     *
+     * **缓存策略**：
+     * - key = `"$bvid:$cid:$qn"`（3 元组——bvid 12 字符 + cid 数字 + qn 清晰度）
+     * - **qn 必**进 key——不同清晰度返不同 URL，**不**能共享缓存
+     * - 缓存 value = `BilibiliPlayUrlResponse`（url + size）
+     * - 5min 后过期，下次 fetch 重新拉
+     */
+    private val playurlCache = TimeBasedCache<String, BilibiliPlayUrlResponse>(
+        ttlMillis = 5 * 60 * 1000L,
+    )
+
+    /**
      * Fetch mixin_key from `/x/web-interface/nav`.
      *
      * **v0.5.10 加缓存**：5min TTL 内存缓存（[mixinKeyCache]）—— 避免 [view] / [playurl]
@@ -155,18 +170,16 @@ class BilibiliApiClient @Inject constructor(
     }
 
     /**
-     * 阶段 18 v0.5.8：Fetch real download URL via `/x/player/playurl`。
+     * 阶段 18 v0.5.8 + 阶段 20 v0.5.10：Fetch real download URL via `/x/player/playurl`。
      *
-     * **v0.5.8 流程**：
-     * 1. `fetchMixinKey()` 拿 32 字符 mixin_key（**v0.5.8 简化**：不缓存，每次调都重新 fetch，~200ms 延迟）
-     * 2. 拼 WBI 签名 query（`bvid` + `cid` + `qn` + `wts` → `w_rid`）
-     * 3. `GET /x/player/playurl?bvid=XXX&cid=NNN&qn=80&wts=NNN&w_rid=YYY` 拿 JSON
-     * 4. regex 提取 `durl[0].url`（默认清晰度 80=1080p）
+     * **v0.5.10 加缓存**：5min TTL 按 `"$bvid:$cid:$qn"` 缓存（[playurlCache]）—— B 站
+     * playurl 短时间**不**变，重复下载同一视频省 1 次 HTTP（~200ms）。
      *
-     * **v0.5.8 简化**：
-     * - **不**取 `dash.video[].baseUrl`（DASH 流需要 MP4Box / ffmpeg 合并，超出 v0.5.8 范围）
-     * - **不**取 `accept_quality` / `accept_description`（清晰度列表）—— v0.5.9+ 让用户选
-     * - `qn=80` 硬编码（1080p 高清）—— v0.5.9+ 接 [AppConfig.bilibiliQuality] 配置
+     * **注意**：缓存**只**存 url + size，**不**存 wts / w_rid（请求侧瞬态值）。
+     * 每次调用都**重新**计算 wts + w_rid——cache hit 时**不**再发 HTTP 但**仍**用当前
+     * timestamp 算 w_rid（**不**影响——response 已缓存）。
+     *
+     * **qn 进 cache key**：不同清晰度返不同 URL，**不**能共享缓存。
      *
      * @param bvid 12 字符 BV ID（如 `BV1xx411c7mD`）
      * @param cid Client ID（从 [view] 响应里拿）
@@ -175,35 +188,37 @@ class BilibiliApiClient @Inject constructor(
      * @throws IOException HTTP / parse / WBI signing / 业务 code != 0 错误
      */
     suspend fun playurl(bvid: String, cid: Long, qn: Int = 80): BilibiliPlayUrlResponse =
-        withContext(Dispatchers.IO) {
-            // 1. Fetch mixin_key
-            val mixinKey = fetchMixinKey()
-            // 2. Compute w_rid
-            val wts = System.currentTimeMillis() / 1000
-            val wRid = wbiSigner.sign(
-                mapOf("bvid" to bvid, "cid" to cid.toString(), "qn" to qn.toString()),
-                mixinKey,
-                wts,
-            )
-            // 3. Build signed URL
-            val url = "$baseUrl/x/player/playurl?bvid=$bvid&cid=$cid&qn=$qn&wts=$wts&w_rid=$wRid"
-            Timber.d(
-                "BilibiliApi.playurl bvid=%s cid=%d qn=%d wts=%d w_rid=%s",
-                bvid, cid, qn, wts, wRid,
-            )
-            val request = Request.Builder()
-                .url(url)
-                .get()
-                .header("User-Agent", USER_AGENT)
-                .build()
+        playurlCache.getOrLoad("$bvid:$cid:$qn") {
+            withContext(Dispatchers.IO) {
+                // 1. Fetch mixin_key（v0.5.10 Commit 2 加缓存）
+                val mixinKey = fetchMixinKey()
+                // 2. Compute w_rid
+                val wts = System.currentTimeMillis() / 1000
+                val wRid = wbiSigner.sign(
+                    mapOf("bvid" to bvid, "cid" to cid.toString(), "qn" to qn.toString()),
+                    mixinKey,
+                    wts,
+                )
+                // 3. Build signed URL
+                val url = "$baseUrl/x/player/playurl?bvid=$bvid&cid=$cid&qn=$qn&wts=$wts&w_rid=$wRid"
+                Timber.d(
+                    "BilibiliApi.playurl bvid=%s cid=%d qn=%d wts=%d w_rid=%s",
+                    bvid, cid, qn, wts, wRid,
+                )
+                val request = Request.Builder()
+                    .url(url)
+                    .get()
+                    .header("User-Agent", USER_AGENT)
+                    .build()
 
-            client.newCall(request).execute().use { resp ->
-                if (!resp.isSuccessful) {
-                    throw IOException("playurl failed: HTTP ${resp.code}")
+                client.newCall(request).execute().use { resp ->
+                    if (!resp.isSuccessful) {
+                        throw IOException("playurl failed: HTTP ${resp.code}")
+                    }
+                    val body = resp.body?.string()
+                        ?: throw IOException("playurl body empty")
+                    parsePlayUrlResponse(body)
                 }
-                val body = resp.body?.string()
-                    ?: throw IOException("playurl body empty")
-                parsePlayUrlResponse(body)
             }
         }
 
