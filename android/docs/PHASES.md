@@ -3,8 +3,12 @@
 > **每个阶段结束都要**：① 通过本阶段所有验收 ② 在 [`phases/`](phases/) 子目录里写一份阶段复盘文档
 > **CHANGELOG 节奏**：从 v0.1.0 起独立递增，写在 [`CHANGELOG.md`](CHANGELOG.md)。桌面版与 Android 版号不互通。
 >
-> **当前位置**：阶段 3 已收官（4 占位 tab + 还完 v0.1.0 关键欠账 #1#2#3），**下一步是阶段 4（解析）**。`versionName` 仍是 `0.1.0`，尚未发布任何版本。
-> **本轮变更**（v0.1.0 收官候选）：还账 #1 `setBackoffCriteria`+`Result.retry()`、#2 `Engine` 真读三个路径模板、#3 Room `Migration` 链 + `MigrationTestHelper`；UI 引入 Navigation Compose + 4 tab + 2 个 Hilt ViewModel；单测 46 → 64 全绿。
+> **当前位置**：**阶段 20 已收官**（v0.5.10-android 收官候选）—— B 站 API 客户端 5min TTL 缓存 + TimeBasedCache 通用 utility。`versionName = 0.5.10` + `versionCode=17`，**尚未发布**任何正式版本（v0.5.0-android → v0.5.10-android 共 11 个 tag 全部**未 push**到 GitHub/Gitee）。
+> **下一阶段**：v0.5.11+ 单独 PR——X-Bogus 缓存（v0.5.9 真算法落地后 wire）+ -352 风控时强制失效 + 抖音 API 客户端缓存 + TTL 配置化（AppConfig.apiCacheTtl）+ 按 UA 分 key。v0.6.0+：B站/抖音 UI 集成 + formats 列表 + B站 qn 配置化 + 抖音 short_link 解析 + m3u8 v7+ HLS encryption。
+>
+> **versionName 跳号说明**：v0.5.9-wip-android 是 chore-style WIP tag（XBogusSigner 真算法 port WIP 收尾）—— **不**算正式 release，versionName / versionCode **没** bump。v0.5.10-android 是 v0.5.9-wip 之后的下一个正式 release，显式跳号避免 0.5.9 完整版时跟 v0.5.9-wip 混淆。
+>
+> **本轮变更**（v0.5.10 收官候选）：B 站 3 端点（fetchMixinKey / view / playurl）wire 5min TTL 内存缓存——重复粘贴同 URL / 同视频重试下载**都**走 cache hit（0ms），省 ~200ms × N 次 HTTP 延迟。单测 327 → 339（+12：TimeBasedCacheTest 6 + BilibiliApiClientTest 净增 6）。`assembleDebug` 通过，APK 80.8 MB。
 
 ## 总览
 

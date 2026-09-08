@@ -16,16 +16,7 @@
 | 能跑什么 | Run 起来 5 个 tab 底栏可点；粘贴 tab 输入 URL → **任意 http(s) URL**（含 B 站 / 抖音 / 微博主页"JS 异步加载"网站，v0.5.0 WebView 集成）→ 弹「下载选项」选 format + 容器 / 缩略图 / 字幕 / 续传 / 标题模板 → 入队 Worker；下载中 tab 看实时进度 + 速度 + ETA + 取消；历史 tab 看 Room 记录 + 文件状态 + 重新下载；设置 tab **13+ 字段改完即生效**（含主题切换、重复下载策略、引擎 aria2、通用嗅探 5 字段、附加 NFO/JSON/弹幕）；v0.5.7 粘贴 tab 输入 B 站/抖音 URL → 自动 dispatch 到对应 Adapter 拿 metadata 填 MediaItem；v0.5.8 B 站/抖音点入队后走真 web API 拿 playUrl → YtDlpEngine 跑真实下载（B 站 1080p 完整可用，抖音走真 API 仍 -352 需 v0.5.9+ get_chaos 实装）；v0.5.10 B 站 3 端点（fetchMixinKey / view / playurl）wire 5min TTL 内存缓存——重复粘贴同 URL / 同视频重试下载**都**走 cache hit（0ms），省 ~200ms × N 次；`assembleDebug` 成功出 ~80.8 MB APK（v0.5.8 同大小——0 字节码大小变化）；`bundleRelease` 成功出 **64.7 MB .aab**（自用 keystore 签名） |
 | 构建环境 | ⚠️ 命令行必须用 AS 自带 JBR 25，系统 JDK 26 会挂在 `androidJdkImage`（[SETUP.md](docs/SETUP.md)）⚠️ release 签名走 `~/.gradle/gradle.properties` 环境变量，**keystore 不进 git**——换电脑需重新生成 |
 
-**v0.1.0 收官前已还 7 笔欠账**：
-- #1 失败重试（`setBackoffCriteria` EXPONENTIAL + `Result.retry()`，10 次封顶）
-- #2 路径模板（Engine 真消费 `outputRoot` / `outputDirTemplate` / `filenameTemplate`）
-- #3 Room 显式 `Migration` 链 + `MigrationTestHelper` 仪器测试
-- #4 `Progress.speed` / `eta` 字段 + **修了 progress 0-100 量纲被截成满格的真 bug**（字节码级证据）
-- #6 jacoco 覆盖率（基线 LINE 37.5% / METHOD 48.5%）
-- #5（部分）`assembleDebug` 0 警告 + 4 ABI JNI 库完整
-- #7 proguard 引擎类 keep + #8 SETUP.md JDK 26 → JBR 25 修法
-
-**仍欠**：`#5 真机 adb install`（10 个仪器测试一次没跑）。完整登记见 [PHASES.md 的跨阶段欠账](docs/PHASES.md)。
+**v0.1.0 收官前还账摘要**（详细见 [PHASES.md 跨阶段欠账表](docs/PHASES.md)）：7 笔已还（#1 失败重试 / #2 路径模板 / #3 Room Migration / #4 `Progress.speed/eta` + 修了 progress 0-100 量纲被截成满格的真 bug / #6 jacoco 覆盖率基线 / #5 部分 `assembleDebug` 0 警告 / #7-#8 proguard + JBR 25 修法）。**仍欠 #5 真机 adb install**（10 个仪器测试一次没跑）—— v0.5.10 仍没真机部署。
 
 ## 入口
 
@@ -34,22 +25,26 @@
 - **架构总览**：[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) —— 模块划分（标注已落地/未落地）、技术栈
 - **从 Python 桌面版移植了什么**：[`docs/REUSE-MAP.md`](docs/REUSE-MAP.md) —— 一对一映射 + 落地状态
 - **变更记录**：[`docs/CHANGELOG.md`](docs/CHANGELOG.md) —— Android 版独立 CHANGELOG，含「vs 桌面版」行为差异表
-- **阶段复盘**：[`docs/phases/`](docs/phases/) —— [phase-1](docs/phases/phase-1.md)（含 5 个 Kotlin 编译坑）、[phase-2](docs/phases/phase-2.md)（含 4 个依赖集成坑）、[phase-3](docs/phases/phase-3.md)（含 5 笔欠账逐笔详解 + 6 个设计决定 + progress 0-100 量纲字节码证据）、[phase-4](docs/phases/phase-4.md)（含 5 个新文件 + 4 个坑 + 5 个设计决定）、[phase-17](docs/phases/phase-17.md)（含 6 个设计决定 + 4 个 mockk 坑 + 5 份 v0.5.4-0.5.5 遗留 untracked 测试文件登记）、[phase-18](docs/phases/phase-18.md)（含 6 个设计决定 + 4 个坑 + 抖音 X-Bogus 仍 stub chaos 已知限制）、[phase-19](docs/phases/phase-19.md)（**WIP 收尾** — 2/5 commit + 4 个设计决定 + 4 个坑 + 缺真 API 验证的风险登记）、[phase-20](docs/phases/phase-20.md)（含 6 个设计决定 + 4 个坑 + versionName 跳号解释 + 三层缓存 key 分层）
+- **阶段复盘**（共 20 份 phase 文档，[`docs/phases/`](docs/phases/)）—— v0.1 基础期 4 份：[phase-1](docs/phases/phase-1.md)（5 个 Kotlin 编译坑）、[phase-2](docs/phases/phase-2.md)（4 个依赖集成坑）、[phase-3](docs/phases/phase-3.md)（5 笔欠账逐笔详解 + 6 个设计决定 + progress 0-100 量纲字节码证据）、[phase-4](docs/phases/phase-4.md)（5 个新文件 + 4 个坑 + 5 个设计决定）；v0.5.x 平台期 4 份：[phase-17](docs/phases/phase-17.md)（6 个设计决定 + 4 个 mockk 坑 + 5 份遗留 untracked 测试文件登记）、[phase-18](docs/phases/phase-18.md)（6 个设计决定 + 4 个坑 + 抖音 X-Bogus 仍 stub chaos 已知限制）、[phase-19](docs/phases/phase-19.md)（**WIP 收尾** — 2/5 commit + 4 个设计决定 + 4 个坑 + 缺真 API 验证的风险登记）、[phase-20](docs/phases/phase-20.md)（6 个设计决定 + 4 个坑 + versionName 跳号解释 + 三层缓存 key 分层）。中间 phase 5-16（v0.1.0 → v0.5.4 阶段）以 bug fix / 基础设施增量为主，**不**列在主线入口——查 [`docs/PHASES.md`](docs/PHASES.md) 看完整阶段划分。
 
 ## 与桌面版的对应关系
 
 | 桌面版（Python） | Android 版（Kotlin） | 状态 |
 |---|---|---|
-| `src/doubi/core/pipeline.py` | `core/pipeline/` | ❌ 目录还不存在（阶段 4） |
-| `src/doubi/engines/yt_dlp.py` | `engine/ytdlp/`（基于 Maven Central 的 `io.github.junkfood02.youtubedl-android:library`，Java 包名 `com.yausername.youtubedl_android.*`） | ✅ |
-| `src/doubi/engines/nm3u8dl.py` | v0.1 不移植（见 PHASES）；ffmpeg 依赖也未启用 → **目前无 HLS 兜底** | ⏸️ |
-| `src/doubi/platforms/{douyin,bilibili,youtube}/` | v0.1 只移植 `youtube/`；`bilibili` / `douyin` 在 v0.2 用 Kotlin 重写 | ❌ `platforms/` 整个目录不存在（阶段 4） |
-| `src/doubi/ui/main_window.py` | `ui/`（Jetpack Compose 重写） | 🟡 只有占位 `home/` 和 `theme/` |
-| `src/doubi/core/storage/` | `data/db/`（Room 替代 SQLite） | ✅ 4 entity + 4 DAO |
-| `src/doubi/core/config.py` | `core/config/` + `data/config/`（DataStore 替代 YAML） | ✅ 30 字段 |
-| `src/doubi/__init__.py:__version__` | `app/build.gradle.kts:versionName` | ✅ |
+| `src/doubi/core/pipeline.py:DownloadPipeline` | `core/pipeline/ParseAndExpandUseCase.kt` + `DownloadRepository.kt` | ✅ 阶段 4 落地 |
+| `src/doubi/engines/yt_dlp.py` | `engine/ytdlp/YtDlpEngine.kt`（基于 Maven Central 的 `io.github.junkfood02.youtubedl-android:library`，Java 包名 `com.yausername.youtubedl_android.*`） | ✅ |
+| `src/doubi/engines/nm3u8dl.py` | **未**移植（v0.1 决定）；ffmpeg 依赖**未**启用 → **目前无 HLS 兜底** | ⏸️ |
+| `src/doubi/platforms/bilibili/` | `platforms/bilibili/`（BilibiliUrl + WbiSigner + BilibiliApiClient + BilibiliAdapter + 5min TTL 缓存） | ✅ 阶段 14+16+17+18+20 落地 |
+| `src/doubi/platforms/douyin/` | `platforms/douyin/`（DouyinUrl + XBogusSigner + DouyinApiClient + DouyinAdapter；X-Bogus 真算法 WIP v0.5.9-wip） | 🟡 阶段 14+15+16+17+18 落地（X-Bogus 真算法缺） |
+| `src/doubi/platforms/youtube/` | `platforms/youtube/YouTubeUrl.kt`（仅 URL 分类 + 归一化，**不**单独 adapter——走 YtDlpEngine 通用路径） | ✅ |
+| `src/doubi/ui/main_window.py` | `ui/`（Jetpack Compose 重写，5 tab：pasting / parsing / downloading / history / settings） | ✅ |
+| `src/doubi/core/storage/database.py` | `data/db/`（Room 替代 SQLite） | ✅ 4 entity + 4 DAO + Migrations.ALL |
+| `src/doubi/core/config.py:AppConfig` | `core/config/` + `data/config/`（DataStore 替代 YAML） | ✅ 30+ 字段 + ConfigValidator |
+| `src/doubi/utils/cache.py:TimeBasedCache` | `core/util/TimeBasedCache.kt`（**内存版**——**不**持久化） | ✅ 阶段 20 落地 |
+| `src/doubi/__init__.py:__version__` | `app/build.gradle.kts:versionName` | ✅ 0.5.10 |
 
 > Android 版包路径统一省略前缀 `app/src/main/java/com/doubi/android/`。
+> **v0.1 阶段初版**（2026-02）这条表是空白状态，现在（v0.5.10）已基本填满——仅 `nm3u8dl.py` 仍 ⏸️ 未移植（v0.1 决定不依赖 ffmpeg）。
 
 ## 工作约定
 
