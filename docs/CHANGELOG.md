@@ -5,6 +5,10 @@
 > 本版把此前一直躺在工作区、从未提交的 M6.48–M6.59 成果正式入库（68 个文件、
 > +19227/−718），并修掉体检中发现的 5 处缺陷：3 处注解可求值性运行时缺陷 +
 > 2 处 GUI 侧缺陷（漏搬 `cookies_file`、账号状态刷新丢弃协程）。
+>
+> 两个数字别搞混：`68 文件 / +19227/−718` 是**采集成果单独 staged 时**的量，
+> 5 处修复随后改在同几个文件上，所以**那个 release commit 整体是 69 文件
+> / +19500/−740**（`git show --stat d3e522b` 可复算）。两处都出现过，都不是笔误。
 > 版本号单一真源 `src/doubi/__init__.py` 由 0.3.1 升至 0.3.2，GUI 标题栏 /
 > `doubi -V` / REST `/health` / MCP `serverInfo` / 安装包文件名全部派生自它。
 
@@ -137,6 +141,40 @@ cookie 文件。受影响的只有**显式指定过** `cookies_file` 的用户�
 - 新增 4 例注解守卫（`tests/test_registry_annotations.py`），并实测「移除绑定即复现
   原始 `NameError`」，确认修复是承重的而非装饰性的。
 - `ruff`：本次触碰的源文件 0 新增；仓库其余 139 处为历史遗留（ROADMAP P3-3）。
+
+### 八、发布产物与验收（手工打包，CI 未参与）
+
+| 项 | 值 |
+|---|---|
+| 产物 | `dist/DouBi-Setup-0.3.2.exe` |
+| 体积 | **236,925,706 字节 / 225.95 MB** |
+| SHA256 | `18df8b5f949fab6e98d50ba25f8ea0d69fd6b79b05ea43bd9b0e9825b1b3722a` |
+| NSIS CRC | `CRC (0x015F56E8): 4 / 4 bytes` / `Total size: 236925706 / 741220130 bytes (31.9%)` |
+| onedir 产物 | **1086 文件 / 706.6 MB**（0.3.1 是 1003 / 688.0 MB） |
+| 侧签 | `DouBi-Setup-0.3.2.exe.sha256`、`SHA256SUMS.txt`（88 字节、LF、无 BOM） |
+
+**体积 +18.6 MB 的原因**：不是代码膨胀。按文件逐项排下来，大头仍是
+`chromium-1234\chrome.dll`(284.2 MB) / `playwright\driver\node.exe`(88.3 MB) /
+`Qt6*` / `ffmpeg.exe`(10.9 MB)，**没有任何误打包的大文件**；增量来自本机
+Playwright 浏览器目录的版本漂移（同一份 `build_exe.py`，机器上的浏览器包换了）。
+
+**静默验收（BUILD.md §6.5 配方，隔离目录 `%LOCALAPPDATA%\DouBi_VerifyTest`）**：
+
+| 检查 | 结果 |
+|---|---|
+| 静默安装 | 退出码 0，**25.3s**；落盘与 `dist/doubi-gui/` 逐项吻合 |
+| 注册表 | `豆比下载 0.3.2` / `DisplayVersion 0.3.2` / `Publisher DouBi` |
+| 标题栏 | `豆比下载 0.3.2  ·  多平台视频下载器 - DouBi`（i18n 与版本单一真源同时对） |
+| 进程 | `Responding=True`，内存 187.3 MB |
+| 静默卸载（**故意让程序开着**） | 退出码 0，**6.2s**；`EnsureAppClosed` 生效 |
+| 卸载残留 | 目录 / HKCU 两个键 / 快捷方式 / 进程全清，**仅剩 1 个 `doubi.db`（56 KB）** |
+| WebEngine 残留 | `*webengine*` **0 个文件**、`*headless_shell*` **0 个文件** |
+| aiohttp 链 | `_ssl.pyd` 177.7 KB / `_socket.pyd` 84.7 KB / `_http_parser` 254.5 KB / `_http_writer` 42.5 KB，与 0.3.0 记录逐项一致 |
+
+> 残留的那个 `doubi.db` 时间戳是 **8/30**，即上一轮 0.3.1 验收留下的，不是本次产生；
+> 它也正好解释了「装出 1088 个文件 vs onedir 1086 个」的差额
+> （1086 载荷 + `uninstall.exe` + 旧 db）。**已知限制如实保留**：默认 DB 路径仍落
+> 安装目录，见 ROADMAP P1-1，本版未修。
 
 ---
 

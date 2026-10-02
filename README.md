@@ -36,51 +36,54 @@ python scripts/build_installer.py
 
 正式分发有**两种一键运行形态**（不用装 Python，不用 Playwright install）：
 
-| 形态 | 文件 | 体积（0.3.1 实测） | 说明 |
+| 形态 | 文件 | 体积（0.3.2 实测） | 说明 |
 |---|---|---|---|
-| **NSIS 安装包**（推荐给普通用户） | `dist/DouBi-Setup-0.3.1.exe` | **219.45 MB**（230,110,981 字节） | 双击安装到 `%LOCALAPPDATA%\DouBi`，**无 UAC 弹窗**；开始菜单 + 桌面快捷方式；控制面板正常卸载；卸载后仅剩一个 `doubi.db`（约 57 KB，见下），`~/.doubi` 配置默认保留 |
+| **NSIS 安装包**（推荐给普通用户） | `dist/DouBi-Setup-0.3.2.exe` | **225.95 MB**（236,925,706 字节） | 双击安装到 `%LOCALAPPDATA%\DouBi`，**无 UAC 弹窗**；开始菜单 + 桌面快捷方式；控制面板正常卸载；卸载后仅剩一个 `doubi.db`（约 57 KB，见下），`~/.doubi` 配置默认保留 |
 | **Onefile 便携版**（推荐给 U 盘/网盘） | `dist/doubi-gui.exe` | 体积精简后未重新量化 | 单文件即跑，启动时自解压到 `%TEMP%/_MEIxxxxx`；免安装；机器之间直接拷。**onefile 更容易被 Windows Defender 误报**（见 BUILD §5.5），对外分发优先用安装包 |
-| Onedir 绿色目录（内网分发） | `dist/doubi-gui/` | **688.0 MB / 1003 文件** | **启动最快**；直接 zip 打包即可发布「绿色版」 |
+| Onedir 绿色目录（内网分发） | `dist/doubi-gui/` | **706.6 MB / 1086 文件** | **启动最快**；直接 zip 打包即可发布「绿色版」 |
 
 > **体积为什么这么大**：安装包里带了 Playwright Chromium 浏览器目录（通用
 > 视频站嗅探的核心依赖）+ PySide6/Fluent 完整样式资源。0.3.0 已经做过一轮
 > 精简——onedir 从 1501.8 MB 砍到 678.5 MB（−54.8%：剔掉 QtWebEngine、Qt
 > 多语言翻译、测试与文档目录等，判据见 [BUILD §4.5](docs/BUILD.md)），现在
-> 这个 219 MB 的安装包就是精简后的结果。如果完全不需要通用 Playwright 嗅探
+> 这个 226 MB 的安装包就是精简后的结果。如果完全不需要通用 Playwright 嗅探
 > （只走 B 站 / 抖音 / YouTube 的 yt-dlp 路径），可以在
 > `scripts/build_exe.py` 里去掉 ms-playwright 的 `--add-data`，还能再砍一大块。
 >
-> **卸载残留一处（0.3.1 已知，良性）**：卸载后安装目录、注册表、快捷方式都清干净，
+> **卸载残留一处（0.3.0 起已知，良性）**：卸载后安装目录、注册表、快捷方式都清干净，
 > 但会剩一个约 57 KB 的 `doubi.db`——数据库默认路径是相对路径，程序从安装目录
 > 启动时就写在那儿，NSIS 删不掉运行期生成的文件。里面只有下载历史，手动删除
-> 即可；下一版会把默认位置挪到 `~/.doubi/`。
+> 即可。**0.3.2 仍未修**：把默认位置挪到 `~/.doubi/` 要单独设计老用户迁移路径，
+> 见 ROADMAP P1-1。0.3.1 的 README 曾写「下一版会把默认位置挪过去」，那版没做到，
+> 这里改成指向 ROADMAP，不再留一个不兑现的承诺。
 
 #### 下载后的 SHA256 校验（推荐做）
 
 每次发布 `dist/` 目录里都会生成侧签文件：`SHA256SUMS.txt` 和
-`DouBi-Setup-0.3.1.exe.sha256`（打了 onefile 便携版时另有
+`DouBi-Setup-0.3.2.exe.sha256`（打了 onefile 便携版时另有
 `doubi-gui.exe.sha256`）。内容是标准 `sha256sum` 格式——**哈希后面还跟着
 一个空格 + `*文件名`**：
 
 ```
-c1ecd13392c3eb1aa84ac9ebe9c79c5025fde1049054ddb50a2b629945636b8f *DouBi-Setup-0.3.1.exe
+18df8b5f949fab6e98d50ba25f8ea0d69fd6b79b05ea43bd9b0e9825b1b3722a *DouBi-Setup-0.3.2.exe
 ```
 
-0.3.1 安装包的官方哈希就是上面这串。Windows PowerShell 一键对比
+0.3.2 安装包的官方哈希就是上面这串（0.3.1 是 `c1ecd133…`，别混）。
+Windows PowerShell 一键对比
 （无需安装任何软件）：
 
 ```powershell
 # 方式 1：Get-FileHash（推荐）
 # 注意 .Split(' ')[0]：侧签行尾带着 " *文件名"，不切开就拿去比必然得到 False
-$expected = (Get-Content dist\DouBi-Setup-0.3.1.exe.sha256).Split(' ')[0].Trim().ToLower()
-$actual   = (Get-FileHash dist\DouBi-Setup-0.3.1.exe -Algorithm SHA256).Hash.ToLower()
+$expected = (Get-Content dist\DouBi-Setup-0.3.2.exe.sha256).Split(' ')[0].Trim().ToLower()
+$actual   = (Get-FileHash dist\DouBi-Setup-0.3.2.exe -Algorithm SHA256).Hash.ToLower()
 $expected -eq $actual    # $true = 通过
 
 # 方式 2：certutil（老 Win 机器也有），输出的哈希跟上面那串肉眼对一下
-certutil -hashfile dist\DouBi-Setup-0.3.1.exe SHA256
+certutil -hashfile dist\DouBi-Setup-0.3.2.exe SHA256
 ```
 
-> 装了 Git for Windows / WSL 的话最省事：`sha256sum -c DouBi-Setup-0.3.1.exe.sha256`
+> 装了 Git for Windows / WSL 的话最省事：`sha256sum -c DouBi-Setup-0.3.2.exe.sha256`
 > 直接输出 `OK`（侧签就是为它准备的格式）。
 
 #### 首次运行「翻译正常」自检 2 条（10 秒确认包是好的）
@@ -88,7 +91,11 @@ certutil -hashfile dist\DouBi-Setup-0.3.1.exe SHA256
 0.3.0 曾出现过「打包漏加 i18n JSON 导致 GUI 显示英文 key」的 bug（见
 CHANGELOG G7），新包到手后跑两条就能确认没回归：
 
-1. **标题栏**：应为「**豆比下载 0.3.1 · 多平台视频下载器**」。如果末尾是
+1. **标题栏**：应为「**豆比下载 0.3.2  ·  多平台视频下载器 - DouBi**」。
+   两个容易误判成 bug 的地方，都不是 bug：`·` 两侧各**两个**空格，是
+   `main_window.py` 那个 f-string 的既有拼法；末尾 `- DouBi` 是 Qt 把
+   `applicationDisplayName`（`ui/app.py` 里设成 `DouBi`）自动追加到窗口标题上的，
+   源码里没有这一段。如果看到的是
    `app.title_suffix` 这种英文 key → 包坏了，换一个新的。
 2. **左侧导航**：从上到下应为「**解析 / 下载 / 历史 / 设置**」。如果看到
    `nav.parse` / `av.downloads` / `nav.history` / `nav.settings` → 同样是
@@ -326,7 +333,7 @@ DouBi/
 ├── tools/nsis/                    # 内置便携版 NSIS，clone 下来即可打包
 ├── screenshots/                   # 文档用截图
 ├── docs/                          # 见下方「文档」表
-└── tests/                         # 46 个测试文件，1276 条用例（其中逻辑层 1013）
+└── tests/                         # 47 个测试文件，1278 条用例（其中逻辑层 1015）
 ```
 
 > 仓库里不含 `Bili23-Downloader-main/` 与 `douyin-downloader-main/` 这两个被整合的

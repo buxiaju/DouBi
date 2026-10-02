@@ -763,6 +763,33 @@ SHA256 `c1ecd13392c3eb1aa84ac9ebe9c79c5025fde1049054ddb50a2b629945636b8f`。
 > 也就是说，§7 清单里「卸载后零残留」这一条从 0.3.1 起的准确判据是
 > **「除 `doubi.db` 外零残留」**。
 
+#### 0.3.2 实测基线（手工打包，CI 未参与）
+
+安装包 `DouBi-Setup-0.3.2.exe` = **236,925,706 字节 / 225.95 MB**，
+SHA256 `18df8b5f949fab6e98d50ba25f8ea0d69fd6b79b05ea43bd9b0e9825b1b3722a`。
+
+| 项 | 0.3.1 | **0.3.2** | 备注 |
+| --- | --- | --- | --- |
+| 安装包体积 | 230,110,981 B / 219.45 MB | **236,925,706 B / 225.95 MB** | +6.5 MB |
+| onedir 产物 | 1003 文件 / 688.0 MB | **1086 文件 / 706.6 MB** | +83 文件 / +18.6 MB |
+| 静默装后落盘 | 1004 文件 / 688.1 MB | **1088 文件 / 706.7 MB** | 含上一轮遗留的 `doubi.db` |
+| 静默安装耗时 | 37.4s | **25.3s** | `/S /D=` 起到进程退出 |
+| 静默卸载耗时 | 10.2s | **6.2s** | 故意开着程序，检验 `EnsureAppClosed` |
+| CRC footer | 有 | **有** | `CRC (0x015F56E8): 4 / 4 bytes` + `Total size: 236925706 / 741220130 bytes (31.9%)` |
+| WebEngine 残留 | 0 | **0** | `*webengine*` 与 `*headless_shell*` 逐项按**文件**计为 0（`-Filter` 会命中 `qframelesswindow\webengine\` 这个目录名，别按条目判） |
+| 注册表 | 正确 | **正确** | 「豆比下载 0.3.2」/ `DisplayVersion 0.3.2` / `EstimatedSize 723636` / Publisher DouBi |
+| 标题栏 i18n | PASS | **PASS** | `豆比下载 0.3.2  ·  多平台视频下载器 - DouBi`（`·` 两侧各两个空格，是 `main_window.py` f-string 的既有写法） |
+| aiohttp 链 `.pyd` | 记录在案 | **逐项一致** | `_ssl.pyd` 177.7 KB / `_socket.pyd` 84.7 KB / `_http_parser` 254.5 KB / `_http_writer` 42.5 KB |
+
+> **体积 +18.6 MB 不是代码膨胀**：按文件排下来大头仍是
+> `chromium-1234\chrome.dll`(284.2 MB) / `playwright\driver\node.exe`(88.3 MB) /
+> `Qt6*` / `ffmpeg.exe`(10.9 MB)，无误打包的大文件；增量来自本机 Playwright
+> 浏览器目录的版本漂移。**下次看到体积跳变先按文件排查，别急着改打包配置。**
+>
+> **0.3.2 的一条排障经验**：隔离目录 `DouBi_VerifyTest` 若不复用旧目录，
+> 装出来的文件数会比 onedir 多 2 而不是多 1（多出的是上一轮验收留下的
+> `doubi.db`）。看 `doubi.db` 的时间戳就能区分是「本次产生」还是「上轮遗留」。
+
 > **导航栏 i18n 没法用截图验证（0.3.1 结论，别再浪费时间试）**：主窗口是
 > Qt 无边框 + DWM 合成，`BitBlt` 和 `PrintWindow` 抓出来**全是黑屏**——
 > 这是 GDI 对 DWM 窗口的已知限制，不是程序坏了。所以 §7 那条「左侧导航文字
@@ -797,19 +824,25 @@ CPU 在涨、临时文件在涨，就是在压缩。makensis 退出前日志最�
       `PySide6` / `qfluentwidgets` / `qasync` / `psutil` / `qrcode` / `mcp`）
       再跑 `pytest -q --maxfail=5`。判绿标准不是「没红」，而是
       **passed+failed 与 CI 相等、skipped 也相等**（0.3.0 基线
-      `629 passed / 146 skipped`；**0.3.1 基线 `670 passed / 175 skipped`，
-      两次实测 96.90s / 102.06s**）
+      `629 passed / 146 skipped`；0.3.1 基线 `670 passed / 175 skipped`；
+      **0.3.2 基线 `981 passed / 181 skipped / 53.35s`**。耗时只是参考：
+      同一台机器复跑是 `55.65s`，**passed / skipped 必须逐项相等**，
+      秒数对不上不算回归）
 - [ ] **本地全量回归拿准确数字**（0.3.1 新增，CHANGELOG 和 Release 正文里的
       回归数必须来自这一步）：`python scripts/run_full_tests.py`（默认 local
       口径）。它带真依赖跑，只排除 `tests/test_theme_apply_gui.py`——那 28 例
       带真 PySide6 会起 Qt 事件循环反复切主题，是「本地全量跑不动」的**唯一**
-      根因，排掉之后全量约 3 分钟就能跑完。**0.3.1 基线：948 收集 − 28 排除
-      = 920 → `913 passed / 7 skipped`，两次实测 164.67s / 181.81s**。
+      根因，排掉之后全量约 3 分钟就能跑完。**0.3.2 基线：1278 收集 − 28 排除
+      = 1250 → `1243 passed / 7 skipped / 154.37s`**（0.3.1 是 948−28=920 →
+      `913 passed / 7 skipped`）。同样地，**拿 passed / skipped 当判据，别拿秒数**
+      ——0.3.2 复跑是 `174.74s`，多出的 20s 是机器负载，不是回归。
       **不要再用 CHANGELOG 分批累加去推算回归数**——0.3.1 就是这么写下了一个
       不存在的「901 passed / 3 skipped」（真值 913 / 7，差 12 passed + 4 skipped）
 - [ ] `dist/doubi-gui.exe`（onefile 便携版）文件存在（精简后未重新量化，见 §4.5）
-- [ ] onedir `dist/doubi-gui/doubi-gui.exe` 存在，整个目录约 **1003 文件 / 688.0 MB**
-      （0.3.1 基线；0.3.0 是 1002 文件 / 687.4 MB）
+- [ ] onedir `dist/doubi-gui/doubi-gui.exe` 存在，整个目录约 **1086 文件 / 706.6 MB**
+      （0.3.2 基线；0.3.1 是 1003 / 688.0 MB，0.3.0 是 1002 / 687.4 MB。
+      体积往上走不等于代码膨胀——先按文件排查，多半是本机 Playwright 浏览器
+      目录的版本漂移，见 CHANGELOG 0.3.2 第八节）
 - [ ] **侧签哈希与 exe 实际匹配**：`dist/DouBi-Setup-<v>.exe.sha256` 和
       `SHA256SUMS.txt` **不会**随重打包自动更新，重打后必须重写，否则会留着上一版
       的哈希（0.3.0 就发生过：exe 已是新的，侧签还是 M6.17 的 `e833f155…`，
@@ -830,16 +863,17 @@ CPU 在涨、临时文件在涨，就是在压缩。makensis 退出前日志最�
 
 安装包额外检查（0.3.0 新增三条，CHANGELOG G8 integrity fail 回归检查）：
 
-- [ ] `dist/DouBi-Setup-<version>.exe` 存在，**约 219 MB**（0.3.0 当前基线：
-      精简后 215.46 MB，M6.20 补 aiohttp 全链后 **219.02 MB**；精简前是 441 MB。
+- [ ] `dist/DouBi-Setup-<version>.exe` 存在，**约 226 MB**（0.3.2 基线
+      225.95 MB / 236,925,706 字节，见 §6.5；0.3.0 精简后是 215.46 MB，
+      M6.20 补 aiohttp 全链后 219.02 MB，精简前是 441 MB。
       如果拿到的是 345 MB 那一档，说明 `SetDatablockOptimize` 被打开了，不要发——见 §6.4）
 - [ ] **发布前 CRC/footer 证据**：makensis 构建日志里显式有 `CRC (0xXXXXXXXX): 4 / 4 bytes` 和 `Total size: ...` 两行
 - [ ] **双击不弹 integrity check fail**：首次运行安装包，NSIS launcher 自校验通过（正常进入中文安装向导）
 - [ ] **侧签 SHA 校验通过**：PowerShell 执行
   ```powershell
   # .Split(' ')[0] 不能省——侧签是 sha256sum 格式，行尾还带着 " *文件名"
-  $e=(Get-Content dist\DouBi-Setup-0.3.1.exe.sha256).Split(' ')[0].Trim().ToLower()
-  $a=(Get-FileHash dist\DouBi-Setup-0.3.1.exe -Algorithm SHA256).Hash.ToLower()
+  $e=(Get-Content dist\DouBi-Setup-0.3.2.exe.sha256).Split(' ')[0].Trim().ToLower()
+  $a=(Get-FileHash dist\DouBi-Setup-0.3.2.exe -Algorithm SHA256).Hash.ToLower()
   $e -eq $a   # 必须 $true
   ```
   > **0.3.1 修正**：这段命令原先写的是 `(Get-Content ...).Trim()`，少了
@@ -1091,8 +1125,26 @@ SHA256SUMS.txt                 88 bytes
 两个侧签都是标准 `sha256sum` 格式（`<hash> *<filename>` + LF，可直接
 `sha256sum -c`），内容同为
 `c1ecd13392c3eb1aa84ac9ebe9c79c5025fde1049054ddb50a2b629945636b8f *DouBi-Setup-0.3.1.exe`。
-Gitee 侧如果 219 MB 单文件超限额，退路是只传两个侧签、正文里指向 GitHub
-Release 的 exe 直链。
+
+0.3.2 仍是同一组三文件，只有体积和哈希变了（**发版时照抄这一份，别复用
+0.3.1 的数字**）：
+
+```
+DouBi-Setup-0.3.2.exe          236,925,706 bytes   # 225.95 MB
+DouBi-Setup-0.3.2.exe.sha256   88 bytes
+SHA256SUMS.txt                 88 bytes
+# SHA256: 18df8b5f949fab6e98d50ba25f8ea0d69fd6b79b05ea43bd9b0e9825b1b3722a
+```
+
+**0.3.2 的分工决定**（与 0.3.0/0.3.1 不同，本次已与作者确认）：
+
+- **GitHub 端**：传上面三个文件，是唯一有资产的一端。
+- **Gitee 端**：**不传任何资产**，只推代码与 tag；Release 正文里指向 GitHub
+  Release 的 exe 直链。所以「Gitee 单文件是否超限额」这个老顾虑在 0.3.2 不再
+  是问题——不是绕过了限额，而是压根不上传。
+
+> 上一版这里是「如果超限额就只传两个侧签」的退路写法。0.3.2 改成明确分工，
+> 免得下次又要在「传还是不传」上重新做一次判断。
 
 ### 8.6 CI 红了就不会有 draft Release（0.3.1 才搞明白）
 
