@@ -20,7 +20,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger("doubi.platforms.bilibili.auth")
 
@@ -244,6 +244,7 @@ def browser_login(
     headless: bool = False,
     timeout: float = 180.0,
     user_data_dir: Optional[Path] = None,
+    qr_callback: Optional[Callable[["object"], None]] = None,
 ) -> list[dict]:
     """Run a Playwright browser to log in to B 站 and return the cookies.
 
@@ -265,6 +266,7 @@ def browser_login(
         cookie_domains=[".bilibili.com"],
         headless=headless,
         timeout=timeout,
+        qr_callback=qr_callback,
     )
     result = login.run()
     return [

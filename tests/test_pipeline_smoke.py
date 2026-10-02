@@ -106,11 +106,18 @@ def test_registry_detect_bilibili():
     assert adapter.platform is Platform.BILIBILI
 
 
-def test_registry_detect_unknown_falls_back_to_generic():
-    """不认识的 URL 走 generic adapter 兜底（M6.16）。"""
+def test_registry_detect_unknown_falls_back_to_ytdlp_generic():
+    """不认识的 URL 现在先走 ytdlp_generic（M6.17+），generic 是更下一层兜底。
+
+    兜底链：具体平台 (priority=0) → ytdlp_generic (priority=-1) → generic
+    (priority=-2)。``https://example.com/something`` 没有具体平台匹配，
+    ytdlp_generic 第一个命中（match_url 永真）。
+    """
     adapter = PlatformRegistry.detect("https://example.com/something")
     assert adapter is not None
-    assert adapter.name == "generic"
+    assert adapter.name == "ytdlp", (
+        f"M6.17+ 未知 URL 应优先匹配 ytdlp_generic，实际 {adapter.name}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +134,35 @@ def test_classify_douyin_video():
 def test_classify_douyin_note():
     c = classify_douyin_url("https://www.douyin.com/note/7341234567890123456")
     assert c.type is DouyinURLType.NOTE
+
+
+def test_classify_douyin_collection_no_seq():
+    """``/collection/{mix_id}`` → COLLECTION + seq=None（整个合集）。"""
+    c = classify_douyin_url("https://www.douyin.com/collection/7663019958858680347")
+    assert c.type is DouyinURLType.COLLECTION
+    assert c.item_id == "7663019958858680347"
+    assert c.seq is None
+
+
+def test_classify_douyin_collection_with_seq():
+    """``/collection/{mix_id}/{seq}`` → COLLECTION + seq=int（M6.45+）。
+
+    seq 后缀是抖音 web 选中合集里某条视频时复制出来的链接，原 M6.17
+    实现把它当纯 collection URL，``seq`` 静默吞掉 → adapter 把整个
+    合集当单条任务。修：``ClassifiedURL.seq`` 捕获，``adapter.parse``
+    据此切单条 / MIX 容器两种模式。
+    """
+    c = classify_douyin_url("https://www.douyin.com/collection/7663019958858680347/1")
+    assert c.type is DouyinURLType.COLLECTION
+    assert c.item_id == "7663019958858680347"
+    assert c.seq == 1
+
+    c2 = classify_douyin_url("https://www.douyin.com/collection/7663019958858680347/42")
+    assert c2.item_id == "7663019958858680347"
+    assert c2.seq == 42
+
+    c3 = classify_douyin_url("https://www.douyin.com/collection/7663019958858680347/3?from=share")
+    assert c3.seq == 3
 
 
 def test_classify_douyin_user():
@@ -200,18 +236,39 @@ def test_pipeline_parse_bilibili_bangumi():
     assert item.item_id == "ss12345"
 
 
-def test_pipeline_process_url_unknown_returns_sniff_error_item():
-    """不认识的 URL 现在走 generic adapter——测试环境无 Playwright 时
-    返回带「[嗅探失败]」标题的错误 MediaItem，而不是 None（M6.16）。"""
+def test_pipeline_process_url_unknown_returns_none_ytdlp_failed():
+    """M6.17+ 兜底链变更：不认识的 URL 先走 ytdlp_generic（priority=-1），
+
+    yt-dlp 解析失败时返回 ``None``——pipeline 不再自动 chain 到 generic
+    嗅探（那条路径需要用户主动触发，例如 CLI ``--force-sniff``）。
+
+    行为变化：
+
+    * M6.16: registry.detect → generic → sniff 失败 → 错误 MediaItem
+    * M6.17+: registry.detect → ytdlp_generic → yt-dlp DownloadError → ``None``
+    """
     pipeline = DownloadPipeline(engine=_FakeEngine())
     item = asyncio.run(pipeline.process_url(
         "https://example.com/something",
         DownloadOptions(output_root=Path("./_test_out")),
     ))
+    # ytdlp_generic 解析 ``https://example.com/something`` 时 yt-dlp 抛
+    # DownloadError（404 / 站点不存在）→ adapter 返回 None → pipeline 透传。
+    assert item is None
+
+
+def test_generic_adapter_parse_returns_sniff_error_item():
+    """保留 M6.16 的 sniff 错误 item 路径——直接测 GenericAdapter。
+
+    M6.17 之后 pipeline.process_url 不再自动走 generic，但 GenericAdapter
+    本身仍然返回 sniff 错误 item（用户可主动调，或 CLI ``--force-sniff`` 触发）。
+    """
+    from doubi.platforms.generic import GenericAdapter
+    adapter = GenericAdapter()
+    item = asyncio.run(adapter.parse("https://example.com/something"))
     assert item is not None
     assert item.platform is Platform.GENERIC
     assert "嗅探失败" in item.title or "嗅探" in item.title
-    # 错误原因在 extra 里
     assert "sniff_error" in item.extra or "sniffed_from" in item.extra
 
 

@@ -31,6 +31,7 @@ from ...core.models import (
     MediaType,
     Platform,
 )
+from .url import is_image_album_payload
 
 logger = logging.getLogger("doubi.platforms.douyin.api")
 
@@ -64,21 +65,48 @@ def _parse_timestamp(value: Any) -> Optional[datetime]:
     return None
 
 
+#: yt-dlp ``info`` 字段里出现任意一个、即视为图集（图文）的字段名。
+#:
+#: 抖音的图文帖在 yt-dlp 侧有多种偏移表示，历史实现只看 formats /
+#: thumbnails，会漏掉前三种（P0-1）。判据与常量本身都是单一真源，
+#: 定义在 ``url.py``（见 ``is_image_album_payload``），与 ``webapi.py``
+#: 的采集路径共用——两条路径必须同口径，否则同一条链接「解析」与
+#: 「采集」得到的 media_type 会不同。
+def _is_image_album(info: dict) -> bool:
+    """Return ``True`` when yt-dlp's info dict describes a 抖音 图文 post.
+
+    委托给 :func:`doubi.platforms.douyin.url.is_image_album_payload`，
+    保持两条路径判据一致。**刻意不看** ``formats``：图文帖常带一条纯
+    音频流（背景音乐），旧实现因此落回 ``VIDEO``——这正是 P0-1 的根因。
+    """
+    return is_image_album_payload(info)
+
+
 def _classify_media_type(info: dict) -> MediaType:
-    """Pick a MediaType based on yt-dlp's info dict signals."""
+    """Pick a MediaType based on yt-dlp's info dict signals.
+
+    判定顺序：LIVE → IMAGE_ALBUM → VIDEO。图集必须排在 VIDEO 之前，
+    且不能依赖「没有任何音视频流」这个条件（见 :func:`_is_image_album`）。
+
+    **对下载行为的影响**：``engines/yt_dlp.py`` 只对 ``LIVE`` 做特殊分支
+    （``live_from_start`` / 不 merge），非直播一律走同一条 yt-dlp 下载路径。
+    图集由 yt-dlp 的抖音 extractor 自行展开成多张图片，因此本分类**不改变
+    下载结果**，它的实际用途是：GUI/CLI 的展示与筛选、``{media_type}``
+    输出目录模板的取值、以及 ``core.models.CONTAINER_MEDIA_TYPES`` 之外的
+    类型语义正确性。详见 docs/CHANGELOG.md P0-1。
+    """
     live = info.get("is_live") or info.get("live_status") == "is_live"
     if live:
         return MediaType.LIVE
-    duration = info.get("duration") or 0
-    # yt-dlp sometimes returns a list of image URLs for 抖音 图文 posts
+    if _is_image_album(info):
+        return MediaType.IMAGE_ALBUM
+    # 末位兜底：早期实现用 thumbs 判定图集，保留该行为以免回归——
+    # 无音视频流 + 有缩略图的条目仍然认为可能是图集。
     formats = info.get("formats") or []
     has_video = any(f.get("vcodec") not in (None, "none") for f in formats)
     has_audio = any(f.get("acodec") not in (None, "none") for f in formats)
-    if not has_video and not has_audio:
-        # Could be an image post
-        thumbs = info.get("thumbnails") or []
-        if thumbs:
-            return MediaType.IMAGE_ALBUM
+    if not has_video and not has_audio and (info.get("thumbnails") or []):
+        return MediaType.IMAGE_ALBUM
     return MediaType.VIDEO
 
 

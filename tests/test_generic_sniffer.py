@@ -404,8 +404,13 @@ class TestGenericAdapter:
         assert adapter.match_url("file:///etc/passwd") is False
 
     def test_priority_is_lowest(self):
-        """generic 的 priority 是 -1，让其他适配器先匹配。"""
-        assert GenericAdapter.priority == -1
+        """generic 是兜底链最末位（M6.17+）。
+
+        M6.17 之前 priority=-1；引入 ytdlp_generic (priority=-1) 后，generic
+        改为 priority=-2 避免与 ytdlp_generic 平级产生 stable-sort 不确定性。
+        兜底链：具体平台 (0) → ytdlp_generic (-1) → generic (-2)。
+        """
+        assert GenericAdapter.priority == -2
 
     @pytest.mark.asyncio
     async def test_parse_returns_collection_with_children(self, monkeypatch):
@@ -514,23 +519,41 @@ class TestRegistryPriorityFallback:
         assert adapter.name != "generic"
 
     def test_unknown_url_falls_back_to_generic(self):
-        """不认识的平台 URL 走 generic 兜底。"""
+        """不认识的平台 URL 走 ytdlp_generic 优先；generic 兜底在更下一层。
+
+        M6.17+ 兜底链：具体平台 (priority=0) → ytdlp_generic (priority=-1)
+        → generic (priority=-2)。``random-site.example.com`` 是不存在的域
+        名，没有具体平台能匹配，ytdlp_generic 第一个命中（match_url 永真）。
+        generic 现在是「ytdlp_generic 解析失败后才走」的最末兜底，不再是
+        ``registry.detect`` 第一选。
+        """
         import doubi.platforms  # noqa: F401
 
         from doubi.core.registry import PlatformRegistry
         adapter = PlatformRegistry.detect("https://random-site.example.com/article/123")
         assert adapter is not None
-        assert adapter.name == "generic"
+        # ytdlp_generic 优先匹配（priority=-1 > generic.priority=-2）
+        assert adapter.name == "ytdlp", (
+            f"M6.17 后未知 URL 应优先匹配 ytdlp_generic，实际 {adapter.name}"
+        )
 
     def test_generic_registered_with_lowest_priority(self):
-        """generic adapter priority=-1，最低。"""
+        """generic adapter priority=-2（最低）；ytdlp_generic=-1 插在它前面。
+
+        M6.17 引入 ytdlp_generic 后，兜底顺序是：
+            具体平台 (priority=0) → ytdlp_generic (priority=-1) → generic (priority=-2)
+        generic 不再是「最低 priority 适配器」语义下唯一持有者，但仍必须是
+        priority 最小的那个，保证它是最后兜底。
+        """
         import doubi.platforms  # noqa: F401
 
         from doubi.core.registry import PlatformRegistry
         generic = PlatformRegistry.get_by_name("generic")
-        assert generic.priority == -1
-        # 所有其他适配器 priority 应该 >= 0
-        for adapter in PlatformRegistry.all():
-            if adapter.name == "generic":
-                continue
-            assert adapter.priority >= 0, f"{adapter.name} priority 异常: {adapter.priority}"
+        assert generic.priority == -2, (
+            f"generic.priority 应为 -2（M6.17 兜底链最末位），实际为 {generic.priority}"
+        )
+        # generic 必须是所有已注册适配器中 priority 最小的
+        all_priorities = [a.priority for a in PlatformRegistry.all()]
+        assert generic.priority <= min(all_priorities), (
+            f"generic.priority={generic.priority} 不是最小的（所有 priority={all_priorities}）"
+        )

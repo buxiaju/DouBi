@@ -48,6 +48,50 @@ _QUALITY_CHOICES = ("best", "8k", "4k", "1080p", "720p", "480p")
 _CONTAINER_CHOICES = ("mp4", "mkv")
 
 
+# ---------------------------------------------------------------------------
+# MIX expand_error → user-facing hint (M6.46)
+# ---------------------------------------------------------------------------
+#
+# The Douyin adapter stamps ``item.extra["expand_error"]`` when a MIX /
+# USER container expansion fails. The dict shape comes from
+# ``doubi.platforms.douyin.webapi._set_error_sink``:
+#
+#     {"reason": str, "status_code": Optional[int], "hint": str}
+#
+# ``hint`` is the i18n-ready identifier; this map turns it into a
+# short Chinese label that appears inline next to the title cell.
+# Anything we don't know falls back to a generic message so the user
+# never sees an empty card with zero explanation.
+
+_EXPAND_HINT_LABELS: dict[str, str] = {
+    # 抖音 / Argus 风控 → 通用建议是登录后重试
+    "need_login":    "需要登录抖音",
+    # 抖音侧服务器异常（5xx）→ 让用户过会重试
+    "server_error":  "抖音服务器异常",
+    # 网络瞬时抖动 / anti-bot 探测 → 也是过会重试
+    "transient":     "网络异常,请重试",
+}
+
+
+def _expand_hint_text(expand_error: dict) -> str:
+    """Return the inline badge label for an ``expand_error`` dict."""
+    if not isinstance(expand_error, dict):
+        return "展开失败"
+    return _EXPAND_HINT_LABELS.get(
+        str(expand_error.get("hint", "")), "展开失败",
+    )
+
+
+def _expand_tooltip_text(expand_error: dict) -> str:
+    """Return the tooltip (raw reason + status) for power-user debugging."""
+    if not isinstance(expand_error, dict):
+        return ""
+    reason = expand_error.get("reason") or "unknown"
+    status = expand_error.get("status_code")
+    status_str = f"HTTP {status}" if status is not None else "no response"
+    return f"展开失败：{reason} ({status_str})"
+
+
 def _build_prompt_dialog_class():
     """Lazy-import Qt and return the dialog class.
 
@@ -805,8 +849,20 @@ def build_parse_widgets():
                             f"{container.title}: {exc}")
                 return
             if not children:
-                self._toast(InfoBar.warning, "合集为空",
-                            f"{container.title}：未获取到任何视频。")
+                # M6.46 / M6.47: surface the structured hint instead of
+                # "empty". ``container.extra["expand_error"]`` is set
+                # by the adapter when webapi enumeration hits 抖音
+                # Argus 风控, M2.2 「需要登录」 cookie, or transport
+                # problems — works for both MIX 合集 and USER 用户.
+                expand_error = container.extra.get("expand_error")
+                if expand_error:
+                    self._toast(
+                        InfoBar.warning, "展开失败",
+                        f"{container.title}：{_expand_hint_text(expand_error)}",
+                    )
+                else:
+                    self._toast(InfoBar.warning, "展开为空",
+                                f"{container.title}：未获取到任何视频。")
                 return
             self._fill_result_table(children)
             self._toast(InfoBar.success, "合集已展开",
@@ -921,7 +977,18 @@ def build_parse_widgets():
                     title_text = item.title or item.item_id
                     if is_section_row:
                         title_text = f"▸ {title_text}  ({item.extra.get('episode_count', 0)} 分集)"
-                    self.result_table.setItem(i, 2, _cell(title_text))
+                    # M6.46: when a MIX container expansion fails (typically
+                    # 抖音 Argus 403 → webapi can't enumerate), surface a
+                    # hint inline so the user understands why the card is empty
+                    # instead of staring at a silent placeholder. Tooltip
+                    # carries the raw ``status_code`` for power-users.
+                    expand_error = item.extra.get("expand_error")
+                    if expand_error and not item.children:
+                        title_cell = _cell(f"{title_text}  · {_expand_hint_text(expand_error)}")
+                        title_cell.setToolTip(_expand_tooltip_text(expand_error))
+                        self.result_table.setItem(i, 2, title_cell)
+                    else:
+                        self.result_table.setItem(i, 2, _cell(title_text))
                     self.result_table.setItem(i, 3, _cell(
                         item.author.name if item.author else ""))
                     self.result_table.setItem(i, 4, _cell(
@@ -1585,6 +1652,12 @@ def build_parse_widgets():
                 manifest=self._cfg.manifest_path,
                 proxy=self._cfg.proxy,
                 rate_limit=self._cfg.rate_limit,
+                # ``None`` here is meaningful, not "unset": the pipeline then
+                # falls back to the per-platform cookie file under
+                # ``~/.doubi/cookies/``. Forwarding the configured path is
+                # what lets a user who pinned ``cookies_file`` (config file /
+                # ``DOUBI_COOKIES_FILE``) actually be honoured in the GUI.
+                cookies_file=self._cfg.cookies_file,
             )
 
         def _toast(self, kind, title: str, content: str) -> None:

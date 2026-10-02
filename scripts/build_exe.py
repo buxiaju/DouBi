@@ -117,14 +117,19 @@ EXCLUDE_MODULES = [
     "PySide6.QtStateMachine",
     "PySide6.QtUiTools",
     "PySide6.QtWebSockets",
-    # --- PIL（12.8 MB）：唯一消费者是 qfluentwidgets 的 AcrylicLabel，
-    #     而 grep 确认本项目从没用过 Acrylic* 任何控件 ---
-    "PIL",
     # --- imageio_ffmpeg（83.6 MB）：整个包就是一个 ffmpeg-win-x86_64.exe
     #     的壳。改用 tools/nm3u8dl/ffmpeg.exe（10.91 MB）打包，三个引擎的
     #     _find_ffmpeg / _resolve_ffmpeg 都已加上 bundled 分支优先查找 ---
     "imageio_ffmpeg",
     "imageio",
+    # --- PIL：M6.16 起 B 站登录对话框用 QR 码真实图片替代了 ASCII,
+    #     ``qrcode.make_image(image_factory=PilImage)`` 必须用 PIL
+    #     才能输出 8-bit grayscale 图像给 ``QImage`` 吃(QImage.Format_Grayscale8)。
+    #     见 docs/CHANGELOG.md M6.16 段。Pillow 始终是 ``qrcode`` 的
+    #     运行时依赖,排了 PIL 等于隐式把 qfluentwidgets 的 image_utils
+    #     也连带排掉——12.8 MB 体积换不回来,反而引入运行时 ImportError。
+    #     这条"曾经是 12.8 MB 精简"的注释留在历史记录里,实际已被撤销 ---
+    # "PIL",
     # --- 打包期工具链，绝不该进运行时 ---
     "PyInstaller",
     "pytest",

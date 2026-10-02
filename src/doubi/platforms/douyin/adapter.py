@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
 
@@ -33,9 +33,26 @@ from .api import DouyinAPI
 from .auth import load_cookie_file
 from .strategies import ContainerStrategy, LikeStrategy, PostStrategy
 from .url import DouyinURLType, classify_douyin_url
-from .webapi import DouyinWebAPI, aweme_to_media_item
+from .webapi import (
+    DouyinWebAPI,
+    aweme_to_media_item,
+    extract_mix_ref,
+    format_mix_title,
+)
 
 logger = logging.getLogger("doubi.platforms.douyin")
+
+
+def _mix_ref_title(ref: Optional[dict[str, Any]], mix_id: str = "") -> Optional[str]:
+    """Title for a 合集 ref, or ``None`` when it carries no name (M6.56).
+
+    Returning ``None`` (rather than the ``抖音合集 {id}`` placeholder)
+    is what lets callers distinguish "resolved a name" from "resolved
+    nothing" and decide whether to try another probe.
+    """
+    if not ref or not str(ref.get("mix_name") or "").strip():
+        return None
+    return format_mix_title(ref, mix_id)
 
 
 _TYPE_TO_MEDIA: dict[DouyinURLType, MediaType] = {
@@ -122,7 +139,18 @@ class DouyinAdapter(PlatformAdapter):
             url = f"https://www.douyin.com/video/{classified.item_id}"
 
         if classified.type in (DouyinURLType.COLLECTION, DouyinURLType.MIX):
-            return await self._parse_collection(classified.item_id)
+            # 合集 URL 永远返回 MIX 容器，pipeline 触发 expand() 把整
+            # 合集的视频全列出来。``seq`` 后缀只是抖音 web 的"滚动到第
+            # N 个"的位置提示，不是"我要第 N 条"——``/video/{aweme_id}``
+            # 才是要单条。要让用户能完整看到合集的所有视频。
+            #
+            # M6.45 回归：原本想"seq 解析为单条 VIDEO"，但用户的真实
+            # 意图是"显示整个合集每条视频"——退回 MIX 容器是正确的。
+            # seq 仍保留在 ``ClassifiedURL.seq`` 备用（debug / / 日志），
+            # 但不影响 adapter 行为。
+            return await self._parse_collection(
+                classified.item_id, seq=classified.seq,
+            )
 
         if classified.type is DouyinURLType.USER:
             return await self._parse_user(url, classified.item_id)
@@ -161,51 +189,94 @@ class DouyinAdapter(PlatformAdapter):
     # collection (合集) URL → MIX container
     # ------------------------------------------------------------------
 
-    async def _parse_collection(self, mix_id: str) -> MediaItem:
+    async def _parse_collection(
+        self, mix_id: str, *, seq: Optional[int] = None,
+        mix_ref: Optional[dict[str, Any]] = None,
+    ) -> MediaItem:
         """Build a MIX container for a 合集 URL.
 
         Children are NOT expanded here — the pipeline calls
-        :meth:`expand` when it sees the container. The title is
-        probed best-effort from the first page (``/mix/detail/`` is
-        often 403'd by risk control, but ``/mix/aweme/`` page 1
-        carries ``mix_info.mix_name``).
+        :meth:`expand` when it sees the container.
+
+        Title resolution (M6.56): when the caller already resolved the
+        合集 (``mix_ref``, e.g. :meth:`collection_of` coming from a
+        single video), that known-good ``mix_name`` is used and **no
+        probe is issued**. Otherwise :meth:`_probe_mix_title` runs —
+        best-effort, since ``/mix/detail/`` is often 403'd by risk
+        control while ``/mix/aweme/`` page 1 carries ``mix_info.mix_name``.
+
+        ``seq`` 保留在 ``source_url`` + ``extra``：抖音 web URL
+        ``/collection/{mix_id}/{seq}`` 的 seq 后缀是"滚动到第 N
+        个"位置提示，不是"只取第 N 条"。seq 留痕便于调试 + UI 上
+        能提示用户"你当时选的是第 N 个开始看"，但 expand() 会把
+        整集合都拉下来。
         """
-        title = f"抖音合集 {mix_id}"
-        try:
-            page = await self.webapi.get_mix_aweme(mix_id, count=1)
-            for raw in page["items"]:
-                aweme = raw if raw.get("aweme_id") else (
-                    raw.get("aweme_info") or raw.get("aweme") or {}
-                )
-                name = ((aweme.get("mix_info") or {}).get("mix_name") or "").strip()
-                if name:
-                    title = f"抖音合集《{name}》"
-                    break
-        except Exception:
-            logger.debug("mix title probe failed for %s", mix_id, exc_info=True)
+        extra: dict[str, Any] = {"mix_id": mix_id}
+        title: Optional[str] = None
+        if mix_ref:
+            title = _mix_ref_title(mix_ref)
+            name = str(mix_ref.get("mix_name") or "").strip()
+            if name:
+                extra["mix_name"] = name
+            # Preserve the platform-side id when it differs from the
+            # URL segment (they agree today, but trusting the URL would
+            # silently mis-tag a container if that ever changes).
+            ref_id = str(mix_ref.get("mix_id") or "").strip()
+            if ref_id and ref_id != mix_id:
+                extra["mix_id"] = ref_id
+        if not title:
+            title = await self._probe_mix_title(mix_id)
+        source_url = f"https://www.douyin.com/collection/{mix_id}"
+        if seq is not None:
+            source_url = f"{source_url}/{seq}"
+            extra["seq"] = seq
         return MediaItem(
             platform=self.platform,
             item_id=mix_id,
-            title=title,
+            title=title or f"抖音合集 {mix_id}",
             author=Author(),
             media_type=MediaType.MIX,
-            source_url=f"https://www.douyin.com/collection/{mix_id}",
-            extra={"mix_id": mix_id},
+            source_url=source_url,
+            extra=extra,
         )
+
+    async def _probe_mix_title(self, mix_id: str) -> Optional[str]:
+        """尝试从合集第一页拿 ``mix_name``。失败/无名字返回 ``None``。
+
+        抖音 web API 经常 403，所以这是 best-effort，调用方拿到 ``None``
+        就回退到占位符标题。
+
+        M6.56 — 委托给 ``DouyinWebAPI.resolve_mix_ref``，与
+        ``collection_of`` 共用同一套「先 /mix/detail/ 再 /mix/aweme/
+        首页」回查顺序，避免两条路径各自演化出不同语义。
+        """
+        try:
+            ref = await self.webapi.resolve_mix_ref(mix_id=mix_id)
+        except Exception:
+            logger.debug("mix title probe failed for %s", mix_id, exc_info=True)
+            return None
+        return _mix_ref_title(ref)
 
     async def collection_of(self, aweme_id: str) -> Optional[MediaItem]:
         """Return the 合集 container a single video belongs to (or None).
 
         Lets the GUI offer「下载整个合集」when the user only has a
         link to one video of the collection.
+
+        M6.56 — the aweme detail that we must fetch anyway carries
+        ``mix_info``; that name is now threaded into
+        :meth:`_parse_collection` instead of being discarded and
+        re-probed. Saves one network round-trip per call and gives the
+        container its real title even when ``/mix/aweme/`` is 403'd.
         """
         detail = await self.webapi.get_video_detail(aweme_id)
         if not detail:
             return None
-        mix_id = (detail.get("mix_info") or {}).get("mix_id")
+        mix_ref = extract_mix_ref(detail)
+        mix_id = mix_ref.get("mix_id", "")
         if not mix_id:
             return None
-        return await self._parse_collection(str(mix_id))
+        return await self._parse_collection(mix_id, mix_ref=mix_ref)
 
     # ------------------------------------------------------------------
     # user URL → container
@@ -233,22 +304,73 @@ class DouyinAdapter(PlatformAdapter):
 
         Returns the children list. Mutates ``item.children`` as a side
         effect so callers that keep the item see the expansion.
+
+        Failure handling (M6.46 / M6.47): when enumeration fails due to
+        抖音's Argus risk-control (HTTP 403) or other transport issues,
+        ``item.extra["expand_error"]`` is stamped with ``{reason,
+        status_code, hint}`` keys. The GUI reads the ``hint`` key
+        (``need_login`` / ``server_error`` / ``transient``) to surface
+        a user-facing message — typically 「需要登录抖音」 — instead
+        of leaving the user staring at an empty container card.
+
+        The hint machinery is symmetric for MIX (M6.46) and USER
+        containers (M6.47): the abstract ``ContainerStrategy.expand``
+        forwards ``error_sink`` to its underlying web-API calls so the
+        adapter sees the same reason on either container type.
         """
         if item.media_type is MediaType.MIX:
             # 合集：strategy is irrelevant; enumerate via the signed
             # web API (yt-dlp has no Douyin collection extractor).
+            error_sink: dict[str, Any] = {}
             awemes = await self.webapi.iter_mix_awemes(
-                item.item_id, max_count=max_count,
+                item.item_id,
+                max_count=max_count,
+                error_sink=error_sink,
             )
             children = [aweme_to_media_item(a) for a in awemes]
             item.children = children
+            # M6.46: surface the failure reason so the GUI can show
+            # 「需要登录抖音」 instead of an empty placeholder MIX card.
+            # We only stamp the error when the page-1 fetch actually
+            # populated the sink AND we ended up with zero children —
+            # otherwise the hint machinery could fire on legitimately
+            # empty 合集.
+            if not children and error_sink:
+                item.extra["expand_error"] = error_sink
+                logger.info(
+                    "expand MIX %s failed: %s (status=%s, hint=%s)",
+                    item.item_id,
+                    error_sink.get("reason"),
+                    error_sink.get("status_code"),
+                    error_sink.get("hint"),
+                )
             return children
         if item.media_type is not MediaType.USER:
             return list(item.children)
+        # M6.47: USER 容器也走 hint 机制——Argus 风控 / 缺 cookie /
+        # yt-dlp 失败 → 同样的「需要登录抖音」徽章，避免 MIX 已支持、
+        # USER 还是空白的 UX 不对称。
         s = self._strategies.get(strategy) or self._strategies[self._default_strategy]
-        children = await s.expand(item.source_url, max_count=max_count)
+        error_sink = {}
+        children = await s.expand(
+            item.source_url,
+            max_count=max_count,
+            error_sink=error_sink,
+        )
         item.children = children
         item.extra["applied_strategy"] = s.name
+        # Same guard as MIX: only fire when expansion produced no children AND
+        # the strategy actually populated the sink (legitimately-empty
+        # user with 0 public aworks wouldn't).
+        if not children and error_sink:
+            item.extra["expand_error"] = error_sink
+            logger.info(
+                "expand USER %s failed: %s (status=%s, hint=%s)",
+                item.item_id,
+                error_sink.get("reason"),
+                error_sink.get("status_code"),
+                error_sink.get("hint"),
+            )
         return children
 
     # ------------------------------------------------------------------

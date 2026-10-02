@@ -44,6 +44,40 @@ def _refresh_account_status_external(host) -> None:
         logger.debug("refresh account status failed", exc_info=True)
 
 
+def _spawn_account_refresh(page) -> None:
+    """排一次账号状态刷新；没有可用 loop 时退化为同步跑一次。
+
+    全部 6 个触发点（构造后的延迟首刷 + 刷新按钮 / 两种扫码登录 / 两种
+    Cookie 导入）都走这里，避免「有的地方有兜底、有的地方没有」。
+
+    两个刻意的实现选择：
+
+    * 判别用 ``asyncio.ensure_future`` 而不是 ``asyncio.get_running_loop()``
+      ——两者判的不是同一件事。qasync 启动瞬间的 loop 处于「已 set 但
+      尚未 run」，``ensure_future`` 认它（能正常排进去），
+      ``get_running_loop()`` 不认。若误判成「没有 loop」改走
+      ``asyncio.run``，那个临时 loop 收尾时会把 current loop 清成 None，
+      此后所有 ``ensure_future`` 调用都会开始抛 RuntimeError。
+    * 判别失败时必须显式 ``coro.close()``。协程对象在调用点就已构造出来，
+      不关掉它既不会被执行也不会被 await，GC 时抛
+      ``RuntimeWarning: coroutine ... was never awaited``——而那条被丢掉
+      的协程正是本该完成的账号状态刷新（测试输出里就是这么冒出来的）。
+    """
+    coro = page._refresh_account_status_async()
+    try:
+        asyncio.ensure_future(coro)
+        return
+    except RuntimeError:
+        pass
+    coro.close()
+    logger.debug("no event loop, falling back to sync account refresh")
+    try:
+        # 同步跑一次：阻塞到完成。账号状态晚一点刷新不影响 UI 启动。
+        asyncio.run(page._refresh_account_status_async())
+    except Exception:   # noqa: BLE001
+        logger.debug("sync account refresh failed", exc_info=True)
+
+
 def _find_settings_page(widget):
     """从 ``widget`` 出发找到设置页。
 
@@ -107,7 +141,6 @@ def build_settings_widgets():
         douyin_status,
         import_bilibili_cookies,
         import_douyin_cookies,
-        import_douyin_legacy_json,
     )
     from ..theme import (
         SPACE_LG,
@@ -156,23 +189,7 @@ def build_settings_widgets():
             # 别处（导航栏主题按钮、CLI）切换主题时，下拉框跟着走。
             subscribe_theme(self, self._sync_theme_combo)
             # Populate the account block asynchronously
-            # 包一层 try：测试/截屏脚本等没有运行中的 asyncio loop 时，
-            # ``asyncio.ensure_future`` 会抛 RuntimeError——这种情况
-            # 直接同步调一次即可，账号状态晚一点刷新不影响 UI 启动。
-            def _kick_status_refresh() -> None:
-                try:
-                    asyncio.ensure_future(self._refresh_account_status_async())
-                except RuntimeError:
-                    import logging
-                    logging.getLogger("doubi.ui.pages.settings").debug(
-                        "no event loop, falling back to sync account refresh",
-                    )
-                    try:
-                        # 同步跑一次：阻塞到完成
-                        asyncio.run(self._refresh_account_status_async())
-                    except Exception:   # noqa: BLE001
-                        pass
-            QTimer.singleShot(50, _kick_status_refresh)
+            QTimer.singleShot(50, lambda: _spawn_account_refresh(self))
 
         # ---------------------------------------------------------- UI
 
@@ -424,6 +441,7 @@ def build_settings_widgets():
             return {"widget": card, "body": body, "title": title_label, "subtitle": sub_label}
 
         def _build_account_card(self) -> CardWidget:
+            from ..i18n import tr
             card = CardWidget(self)
             card.setObjectName("settingsCard")
             layout = QVBoxLayout(card)
@@ -446,7 +464,7 @@ def build_settings_widgets():
             header.addLayout(text_col, 1)
             self.refresh_status_btn = PushButton("刷新状态", card)
             self.refresh_status_btn.clicked.connect(
-                lambda: asyncio.ensure_future(self._refresh_account_status_async())
+                lambda: _spawn_account_refresh(self)
             )
             header.addWidget(self.refresh_status_btn)
             layout.addLayout(header)
@@ -461,7 +479,7 @@ def build_settings_widgets():
             self.bili_status_label = StrongBodyLabel(card)
             self.bili_status_label.setText("B 站：正在检测…")
             bili_row.addWidget(self.bili_status_label, 1)
-            self.bili_qr_btn = PushButton("扫码登录", card)
+            self.bili_qr_btn = PushButton("登录", card)
             self.bili_qr_btn.clicked.connect(self._on_bilibili_qr_login)
             self.bili_import_btn = PushButton("导入 Cookie 文件", card)
             self.bili_import_btn.clicked.connect(self._on_bilibili_import)
@@ -470,8 +488,7 @@ def build_settings_widgets():
             layout.addLayout(bili_row)
 
             bili_detail = QLabel(
-                "扫码登录用 B 站 App 扫描二维码；导入 Cookie 用浏览器扩展 "
-                "“Get cookies.txt LOCALLY” 导出后再选文件。",
+                tr("login.bili.settings_detail"),
                 card,
             )
             bili_detail.setStyleSheet(muted_qss())
@@ -489,16 +506,12 @@ def build_settings_widgets():
             self.dy_qr_btn.clicked.connect(self._on_douyin_browser_login)
             self.dy_import_btn = PushButton("导入 Cookie 文件", card)
             self.dy_import_btn.clicked.connect(self._on_douyin_import)
-            self.dy_legacy_btn = PushButton("导入 douyin-downloader JSON", card)
-            self.dy_legacy_btn.clicked.connect(self._on_douyin_legacy_import)
             dy_row.addWidget(self.dy_qr_btn)
             dy_row.addWidget(self.dy_import_btn)
-            dy_row.addWidget(self.dy_legacy_btn)
             layout.addLayout(dy_row)
 
             dy_detail = QLabel(
-                "扫码登录会打开 Chromium 窗口，请在窗口里完成登录；"
-                "Cookie 抓取完成后会自动写入。",
+                tr("login.dy.settings_detail"),
                 card,
             )
             dy_detail.setStyleSheet(muted_qss())
@@ -621,11 +634,11 @@ def build_settings_widgets():
                 self.dy_status_label.setText("抖音：未知（点击右上角刷新）")
 
         def _on_bilibili_qr_login(self) -> None:
-            from ...ui.dialogs.login_dialog import build_bilibili_qr_dialog
-            cls = build_bilibili_qr_dialog()
+            from ...ui.dialogs.login_dialog import build_bilibili_login_dialog
+            cls = build_bilibili_login_dialog()
             dlg = cls(self.window())
             dlg.exec()
-            asyncio.ensure_future(self._refresh_account_status_async())
+            _spawn_account_refresh(self)
 
         def _on_bilibili_import(self) -> None:
             src, _ = QFileDialog.getOpenFileName(
@@ -641,14 +654,14 @@ def build_settings_widgets():
                 self._toast(False, "导入失败", str(exc))
                 return
             self._toast(ok, "B 站 Cookie" if ok else "B 站 Cookie 失败", msg)
-            asyncio.ensure_future(self._refresh_account_status_async())
+            _spawn_account_refresh(self)
 
         def _on_douyin_browser_login(self) -> None:
             from ...ui.dialogs.login_dialog import build_douyin_browser_dialog
             cls = build_douyin_browser_dialog()
             dlg = cls(self.window())
             dlg.exec()
-            asyncio.ensure_future(self._refresh_account_status_async())
+            _spawn_account_refresh(self)
 
         def _on_douyin_import(self) -> None:
             src, _ = QFileDialog.getOpenFileName(
@@ -664,23 +677,7 @@ def build_settings_widgets():
                 self._toast(False, "导入失败", str(exc))
                 return
             self._toast(ok, "抖音 Cookie" if ok else "抖音 Cookie 失败", msg)
-            asyncio.ensure_future(self._refresh_account_status_async())
-
-        def _on_douyin_legacy_import(self) -> None:
-            src, _ = QFileDialog.getOpenFileName(
-                self, "选择 douyin-downloader cookies.json",
-                str(Path.home()),
-                "JSON 文件 (*.json);;全部 (*)",
-            )
-            if not src:
-                return
-            try:
-                ok, msg = import_douyin_legacy_json(Path(src))
-            except Exception as exc:   # noqa: BLE001
-                self._toast(False, "导入失败", str(exc))
-                return
-            self._toast(ok, "抖音 legacy" if ok else "抖音 legacy 失败", msg)
-            asyncio.ensure_future(self._refresh_account_status_async())
+            _spawn_account_refresh(self)
 
         def _toast(self, ok: bool, title: str, msg: str) -> None:
             kind = InfoBar.success if ok else InfoBar.error

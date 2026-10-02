@@ -7,7 +7,7 @@
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │ 入口层（可互换，共享同一套 core）                              │
-│   cli/        doubi <download|auth|live|serve|mcp>          │
+│   cli/        doubi（17 子命令：下载 / 采集 / 平台 / 运行）                │
 │   ui/         doubi-gui（PySide6 Fluent，7 套主题包）        │
 │                theme.py = token 表 + set_theme 全局广播      │
 │                i18n.py  = JSON 词表 + tr() 模块级翻译（M6.14）│
@@ -31,8 +31,11 @@
 │   aria2.py         Aria2Engine（M6.15，多线程分片下载后端）   │
 ├─────────────────────────────────────────────────────────────┤
 │ platforms/（平台适配器，自注册）                               │
-│   douyin/    adapter / api / auth / strategies / url / live /
-│              webapi（签名 Web API）/ sign（a_bogus / x_bogus）
+│   douyin/    adapter   URL 分类 → 容器展开 → MediaItem             │
+│              webapi    签名 Web API（2141 行 / 30 async 方法）      │
+│              sign/     签名栈：abogus / websign / ms_token /     │
+│                        tt_wid（M6.48–M6.53）                   │
+│              strategies / live / auth / api / url / models   │
 │   bilibili/  adapter / api / auth / strategies / url /              │
 │              qr_login / wbi                                  │
 │              （M6.15 起 url.py 识别 live.bilibili.com 直播）  │
@@ -481,3 +484,70 @@ aria2 守护进程通过 JSON-RPC 2.0 over HTTP 控制：
 | `user_agent` | `user-agent` |
 | `resume` | `continue` |
 
+## 13. 抖音签名采集层（M6.48–M6.59）
+
+抖音 web API 有签名风控，而 yt-dlp **没有合集 / 用户作品 / 搜索 / 收藏夹的抽取器**，
+所以这些容器类内容靠不了下载引擎，DouBi 自建了一套签名管线。
+
+### 13.1 分层
+
+```
+  入口层（CLI / GUI / MCP）
+        │  只调 adapter，不碰签名
+        ▼
+  容器展开层   adapter.py + strategies.py
+        │  URL 分类 → 选策略 → 调 webapi 枚举 → 归一化成 MediaItem
+        ▼
+  数据获取层   webapi.py（DouyinWebAPI）
+        │  唯一出口：_request_json（重试 + 反爬判定）
+        ▼
+  签名层       sign/abogus.py + sign/websign.py + sign/ms_token.py + sign/tt_wid.py
+        │  a_bogus（query+UA+指纹） / msToken / ttwid
+        ▼
+  传输层       httpx + aiohttp
+```
+
+**边界很硬**：签名逻辑永远不向上泄露到 adapter 以上；adapter 也不直接拼 query。
+唯一例外是纯函数（`extract_mix_ref` / `format_mix_title` / `pick_live_quality`）——它们无 IO，
+放模块级可以被 CLI / MCP / 测试共用，不算泄露。
+
+### 13.2 一次采集的完整路径
+
+```
+宿主传入 URL
+  → url.classify_douyin_url()            # URL → 类型（video / mix / user / live / challenge…）
+  → registry.detect() → DouyinAdapter
+  → adapter.parse()
+      ├─ 单条 → webapi.get_video_detail() → aweme_to_media_item()
+      └─ 容器 → 返回带 children=[] 的 MediaItem（needs_expansion() 为真）
+  → pipeline 发现容器 → adapter.collection_of(item)
+      → strategies 选路 → webapi.iter_*() 分页枚举
+      → 逐条归一化为 MediaItem（source_url = /video/{id}）
+  → 每条 MediaItem 交给 engines/yt_dlp.py 下载
+```
+
+**签名只在「列举」阶段用，下载阶段不用**——所以
+`aweme_to_media_item` 必须把 `source_url` 写成 canonical
+`https://www.douyin.com/video/{aweme_id}`，否则 yt-dlp 认不出来。
+
+### 13.3 为什么不把签名推给 yt-dlp
+
+yt-dlp 的抖音抽取器只覆盖**单条视频**。推它去拿合集 / 搜索等容器会落到
+generic fallback（2026.08 版离线 `ie.suitable()` 验证）——它不会报错，只会拿回一堆无关内容，
+这种静默降级比直接报错难排查得多。另外一个硬限制是**无法影响签名参数**：
+a_bogus 要求 query + UA + 指纹三者一致，yt-dlp 不提供插手点。适配器只能做到「自己拿列表」。
+
+### 13.4 设计约束
+
+1. **所有请求走 `_request_json` 单一出口**——重试、反爬判定、日志只实现一遍。
+2. **新端点必须同步加进 `DOUYIN_SIGNED_PATHS`**——漏了就拿不到数据。
+3. **空 ID 不发请求**——调用方传空参是 bug，发出去只会烧风控预算。
+4. **失败不静默**——宁可报「没查到」，不给看起来成功的假结果（空 ref 不回落用户输入）。
+5. **移植只移调用链上的代码**——上游存在死代码（xGnarly / device_id）与空壳
+   （hashtag / slides），移植死代码 ≠ 移植功能。
+
+### 13.5 测试边界
+
+签名层与 webapi 层全部用**真实响应快照**（脱离网络）测试，CI 不打真实请求。
+只有「签名结构与白名单完整性」和「分页状态机」在测试里断言，
+平台真实返回值不做硬断言（会随风控变）。

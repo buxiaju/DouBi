@@ -30,8 +30,17 @@ class Platform(str, Enum):
     TIKTOK = "tiktok"
     XIAOHONGSHU = "xiaohongshu"
     WEIBO = "weibo"
-    #: 任意 URL 的兜底适配器：headless Chromium 嗅探页面里的视频直链。
+    #: 把任意 URL 丢给 yt-dlp 自身 extractor，覆盖 yt-dlp 内置的 1800+ 站点
+    #: （Twitter / Instagram / Vimeo / Reddit / Vimeo / Pixiv / AcFun / 虎牙
+    #: / 斗鱼 / 网易云 / QQ 音乐 / 喜马拉雅 / 央视频 / …）。priority=-1 让
+    #: 具体平台（douyin / bilibili / youtube）优先匹配——它们拿到的元数据
+    #: 通常更丰富（自家 API 拿 B 站弹幕 / 抖音合集列表等 yt-dlp 没有的信息）。
+    #: 解析失败时返回 None，由 generic 嗅探接管（再下一层兜底）。
+    YT_DLP_GENERIC = "ytdlp"
+    #: 任意 URL 的最后兜底：headless Chromium 嗅探页面里的视频直链。
     #: 见 docs/superpowers/specs/2026-08-25-generic-sniffer-design.md。
+    #: priority=-2 表示「能走到这一步的 URL，ytdlp_generic 也搞不定」——
+    #: 多半是国产 HLS / 自建 CMS 等 yt-dlp 没有专用 extractor 的站点。
     GENERIC = "generic"
     UNKNOWN = "unknown"
 

@@ -26,6 +26,7 @@ from doubi.platforms.douyin import auth
 from doubi.platforms.douyin.api import DouyinAPI
 from doubi.platforms.douyin.adapter import DouyinAdapter
 from doubi.platforms.douyin.strategies import LikeStrategy, PostStrategy
+from doubi.platforms.douyin.webapi import aweme_to_media_item
 
 
 def _item(title: str = "测试视频", author: str = "张三", date=None) -> MediaItem:
@@ -230,6 +231,89 @@ def test_api_to_media_item_classifies_image_album():
     assert item.media_type is MediaType.IMAGE_ALBUM
 
 
+# ---------------------------------------------------------------------------
+# P0-1: 图集判定 —— 带音频流不能被误判为 VIDEO，且两条路径必须同口径
+# ---------------------------------------------------------------------------
+#
+# 背景：抖音图文帖几乎都带一条纯音频流（背景音乐）。旧实现用
+# 「没有任何音视频流」判断图集，于是这类帖落回 VIDEO。修复后由
+# ``url.is_image_album_payload`` 统一判定，yt-dlp 路径与 webapi 路径共用。
+
+
+def test_image_album_with_audio_stream_is_not_misclassified_as_video():
+    """P0-1 的核心回归：带 BGM 音频流的图文帖必须仍是 IMAGE_ALBUM。
+
+    旧实现在这里返回 VIDEO（``has_audio`` 为真 → 不进图集分支）。
+    """
+    info = _fake_info_dict()
+    info["images"] = [{"url": "https://x/1.jpg"}]
+    # 只有音频流，没有视频流 —— 图集帖的典型形态
+    info["formats"] = [{"vcodec": "none", "acodec": "mp4a.40.2"}]
+    info["thumbnails"] = [{"url": "https://x/cover.jpg"}]
+    item = DouyinAPI().to_media_item(info, "x")
+    assert item.media_type is MediaType.IMAGE_ALBUM
+
+
+def test_image_album_detected_from_aweme_type():
+    """``aweme_type`` 68 / 150 是图集类型码（与 webapi 侧同口径）。"""
+    for aweme_type in (68, 150):
+        info = _fake_info_dict()
+        info["aweme_type"] = aweme_type
+        item = DouyinAPI().to_media_item(info, "x")
+        assert item.media_type is MediaType.IMAGE_ALBUM, aweme_type
+
+
+def test_plain_video_with_cover_stays_video():
+    """普通视频有封面缩略图，不能因为 thumbnails 非空就被判成图集。"""
+    info = _fake_info_dict()
+    info["formats"] = [{"vcodec": "h264", "acodec": "mp4a.40.2"}]
+    info["thumbnails"] = [{"url": "https://x/cover.jpg"}]
+    item = DouyinAPI().to_media_item(info, "x")
+    assert item.media_type is MediaType.VIDEO
+
+
+def test_live_wins_over_image_signals():
+    """LIVE 优先级最高：即使同时带图集字段也必须是 LIVE。"""
+    info = _fake_info_dict()
+    info["is_live"] = True
+    info["images"] = [{"url": "https://x/1.jpg"}]
+    item = DouyinAPI().to_media_item(info, "x")
+    assert item.media_type is MediaType.LIVE
+
+
+def test_bool_aweme_type_is_not_treated_as_type_code():
+    """``bool`` 是 ``int`` 子类，不能拿 True 去和 68/150 比。"""
+    info = _fake_info_dict()
+    info["aweme_type"] = True
+    info["formats"] = [{"vcodec": "h264", "acodec": "mp4a"}]
+    item = DouyinAPI().to_media_item(info, "x")
+    assert item.media_type is MediaType.VIDEO
+
+
+def test_two_paths_agree_on_image_album():
+    """同一图文帖在 yt-dlp 路径与 webapi 路径上得到相同 media_type。
+
+    这是 P0-1 验收标准的直接断言：两条路径判据由
+    ``url.is_image_album_payload`` 单一真源提供。
+    """
+    info = _fake_info_dict()
+    info["images"] = [{"url": "https://x/1.jpg"}]
+    info["formats"] = [{"vcodec": "none", "acodec": "mp4a"}]
+    ytdlp_type = DouyinAPI().to_media_item(info, "x").media_type
+
+    aweme = {
+        "aweme_id": "7123456789012345678",
+        "desc": "图文帖",
+        "images": [{"url_list": ["https://x/1.jpg"]}],
+        "video": {"duration": 0},
+    }
+    webapi_type = aweme_to_media_item(aweme).media_type
+
+    assert ytdlp_type is MediaType.IMAGE_ALBUM
+    assert webapi_type is MediaType.IMAGE_ALBUM
+    assert ytdlp_type is webapi_type
+
+
 def test_api_to_media_item_classifies_live():
     info = _fake_info_dict()
     info["is_live"] = True
@@ -346,7 +430,7 @@ def test_adapter_parse_user_returns_container_with_no_children_yet():
 
 def test_adapter_expand_container_populates_children(monkeypatch):
     a = DouyinAdapter()
-    async def _fake_expand(strategy, *, max_count=0):
+    async def _fake_expand(strategy, *, max_count=0, error_sink=None):
         return [MediaItem(
             platform=Platform.DOUYIN, item_id="c1", title="child",
             author=Author(name="u"), media_type=MediaType.VIDEO,
@@ -418,6 +502,317 @@ class _SpyEngine:
     def supports(self, item): return True
     async def download(self, item, options, *, on_progress=None):
         return True
+
+
+# ---------------------------------------------------------------------------
+# M6.45: 合集 URL 带 /{seq} 后缀 → 取合集里第 seq 个视频
+# ---------------------------------------------------------------------------
+
+
+def _fake_aweme(aweme_id: str, *, desc: str = "测试视频", mix_name: str = "") -> dict:
+    """构造一份够 webapi.aweme_to_media_item 用的最小 aweme 字典。"""
+    return {
+        "aweme_id": aweme_id,
+        "desc": desc,
+        "create_time": 1700000000,
+        "author": {"sec_uid": "MS4wLjABAAAAxxxx", "nickname": "测试UP"},
+        "video": {
+            "duration": 30000,
+            "cover": {"url_list": ["https://cdn.example.com/cover.jpg"]},
+            "origin_cover": {"url_list": []},
+            "play_addr": {"url_list": ["https://cdn.example.com/play.mp4"]},
+        },
+        "statistics": {"play_count": 100, "digg_count": 5},
+        "mix_info": {"mix_id": "7663019958858680347", "mix_name": mix_name} if mix_name else {},
+    }
+
+
+def test_adapter_parse_collection_with_seq_returns_mix(monkeypatch):
+    """``/collection/{mix_id}/3`` → 返回 MIX 容器（不是单条 VIDEO）。
+
+    用户粘贴 ``/collection/{id}/{seq}`` 是想"看 / 整个下载整集合的每条
+    视频"，不是"只取第 seq 条"。seq 后缀是抖音 web 的"滚动到第 N
+    个"位置提示，跟单条请求是两回事——要单条应该用
+    ``/video/{aweme_id}``。
+
+    M6.45 最初想"seq 解析为单条 VIDEO"，但用户实测的"是"想要的
+    是整集合。正确做法：永远返回 MIX 容器，让 pipeline 触发
+    ``expand()`` 把整集合拉下来；seq 留痕在 ``extra`` 便于调试 / UI
+    上给提示。
+    """
+    a = DouyinAdapter()
+
+    async def _fake_get_mix_detail(mix_id):
+        return None
+
+    async def _fake_get_mix_aweme(mix_id, *, cursor=0, count=20, error_sink=None):
+        return {"items": [
+            _fake_aweme("aweme_1", desc="第一条", mix_name="我的测试合集"),
+        ], "has_more": True, "max_cursor": 0}
+
+    # M6.56 — ``resolve_mix_ref`` probes /mix/detail/ before falling back
+    # to page 1, so both must be stubbed or the test would issue real
+    # (and unstable) traffic.
+    monkeypatch.setattr(a.webapi, "get_mix_detail", _fake_get_mix_detail)
+    monkeypatch.setattr(a.webapi, "get_mix_aweme", _fake_get_mix_aweme)
+
+    item = asyncio.run(a.parse("https://www.douyin.com/collection/7663019958858680347/3"))
+    assert item is not None
+    # MIX 容器（不是 VIDEO 单条）
+    assert item.media_type is MediaType.MIX
+    assert item.platform is Platform.DOUYIN
+    assert item.item_id == "7663019958858680347"
+    # title probe 拿到 mix_name
+    assert "我的测试合集" in item.title
+    # source_url 保留 seq（用户原始语义，但不影响容器展开）
+    assert item.source_url == "https://www.douyin.com/collection/7663019958858680347/3"
+    # extra 留痕 seq
+    assert item.extra["seq"] == 3
+    assert item.extra["mix_id"] == "7663019958858680347"
+    # 容器 → needs_expansion=True，pipeline 触发 expand()
+    assert item.needs_expansion()
+
+
+def test_adapter_parse_collection_with_seq_webapi_fails(monkeypatch):
+    """``/collection/{mix_id}/3`` webapi 403 → 仍然返回 MIX 容器。
+
+    即使反爬拿不到合集名 / aweme列表，也**不能**返回 None —— 用户
+    的意图是整集合，pipeline 触发 expand() 后会用 ytdlp_generic
+    兜底拉子视频。返回 None 会让 UI 提示"解析失败"，但实际我们
+    还能拿到合集里的视频。
+    """
+    a = DouyinAdapter()
+
+    async def _fake_get_mix_detail(mix_id):
+        return None
+
+    async def _fake_get_mix_aweme(mix_id, *, cursor=0, count=20, error_sink=None):
+        raise RuntimeError("webapi HTTP 403")
+
+    monkeypatch.setattr(a.webapi, "get_mix_detail", _fake_get_mix_detail)
+    monkeypatch.setattr(a.webapi, "get_mix_aweme", _fake_get_mix_aweme)
+
+    item = asyncio.run(a.parse("https://www.douyin.com/collection/7663019958858680347/3"))
+    assert item is not None
+    assert item.media_type is MediaType.MIX
+    # 标题退到占位符（webapi 拿不到 mix_name）
+    assert "7663019958858680347" in item.title
+    # source_url / extra 仍带 seq
+    assert item.source_url == "https://www.douyin.com/collection/7663019958858680347/3"
+    assert item.extra["seq"] == 3
+    assert item.needs_expansion()
+
+
+def test_adapter_parse_collection_without_seq_unchanged(monkeypatch):
+    """``/collection/{mix_id}``（无 seq）走原 MIX 容器路径，行为不变。
+
+    防止 M6.45 的 seq 处理改变无-seq 路径的行为。
+    """
+    a = DouyinAdapter()
+
+    async def _fake_get_mix_detail(mix_id):
+        return None
+
+    async def _fake_get_mix_aweme(mix_id, *, cursor=0, count=20, error_sink=None):
+        return {"items": [], "has_more": False, "max_cursor": 0}
+
+    monkeypatch.setattr(a.webapi, "get_mix_detail", _fake_get_mix_detail)
+    monkeypatch.setattr(a.webapi, "get_mix_aweme", _fake_get_mix_aweme)
+
+    item = asyncio.run(a.parse("https://www.douyin.com/collection/7663019958858680347"))
+    assert item is not None
+    assert item.media_type is MediaType.MIX
+    # 无 seq → source_url 不带 seq 后缀
+    assert item.source_url == "https://www.douyin.com/collection/7663019958858680347"
+    # extra 不应该有 seq
+    assert "seq" not in item.extra
+
+
+# ---------------------------------------------------------------------------
+# M6.46: expand() 失败 → item.extra["expand_error"] 留痕 + UI 提示钩子
+# ---------------------------------------------------------------------------
+
+
+def _mix_container(mix_id: str = "7663019958858680347") -> MediaItem:
+    """构造一个 ready-to-expand MIX 容器（跳过 webapi title probe）。"""
+    return MediaItem(
+        platform=Platform.DOUYIN,
+        item_id=mix_id,
+        title="抖音合集 7663019958858680347",
+        author=Author(),
+        media_type=MediaType.MIX,
+        source_url=f"https://www.douyin.com/collection/{mix_id}",
+        extra={"mix_id": mix_id},
+    )
+
+
+def test_adapter_expand_mix_argus_403_sets_expand_error(monkeypatch):
+    """``expand()`` 时 webapi 持续 403 → ``item.extra["expand_error"]``
+    留痕，``hint="need_login"``，UI 据此渲染「需要登录抖音」徽章。
+
+    验证：
+    * children = []（不是 None，避免误判为"解析失败"）
+    * expand_error 有 reason / status_code / hint 三键
+    * hint == "need_login"（= Argus 风控 → 引导用户登录）
+    * 错误不被吞掉（adapter 不再静默返回空列表）
+    """
+    a = DouyinAdapter()
+    item = _mix_container()
+
+    async def _fake_iter_mix_awemes(mix_id, *, max_count=0, error_sink=None):
+        # 模拟 webapi Argus 403 路径：往 sink 写错误 + 返回空
+        if error_sink is not None:
+            error_sink["reason"] = "HTTP 403"
+            error_sink["status_code"] = 403
+            error_sink["hint"] = "need_login"
+        return []
+
+    monkeypatch.setattr(a.webapi, "iter_mix_awemes", _fake_iter_mix_awemes)
+
+    children = asyncio.run(a.expand(item))
+
+    assert children == []
+    assert item.children == []
+    assert "expand_error" in item.extra
+    err = item.extra["expand_error"]
+    assert err["hint"] == "need_login"
+    assert err["status_code"] == 403
+    assert err["reason"] == "HTTP 403"
+
+
+def test_adapter_expand_mix_transient_no_expand_error(monkeypatch):
+    """``expand()`` 时 webapi 网络瞬时异常 + 返回真实空列表（无错）→ 不写
+    ``expand_error``，避免在合法空合集上误触发「需要登录抖音」徽章。
+
+    验证：error_sink 没被动 → adapter 不知道是失败 → 不写入。
+    """
+    a = DouyinAdapter()
+    item = _mix_container()
+
+    async def _fake_iter_mix_awemes(mix_id, *, max_count=0, error_sink=None):
+        # webapi 返回真实空数据，error_sink 没被动 → happy path
+        return []
+
+    monkeypatch.setattr(a.webapi, "iter_mix_awemes", _fake_iter_mix_awemes)
+
+    children = asyncio.run(a.expand(item))
+
+    assert children == []
+    assert "expand_error" not in item.extra
+
+
+def test_adapter_expand_mix_happy_path_no_expand_error(monkeypatch):
+    """``expand()`` 正常返回 N 个 children → ``expand_error`` 不写入。"""
+    a = DouyinAdapter()
+    item = _mix_container()
+
+    async def _fake_iter_mix_awemes(mix_id, *, max_count=0, error_sink=None):
+        return [
+            _fake_aweme("aweme_1", desc="第一条"),
+            _fake_aweme("aweme_2", desc="第二条"),
+        ]
+
+    monkeypatch.setattr(a.webapi, "iter_mix_awemes", _fake_iter_mix_awemes)
+
+    children = asyncio.run(a.expand(item))
+
+    assert len(children) == 2
+    assert item.children == children
+    assert "expand_error" not in item.extra
+
+
+# ---------------------------------------------------------------------------
+# M6.47: USER 容器 expand() 失败 → expand_error 留痕（与 MIX 路径对称）
+# ---------------------------------------------------------------------------
+
+
+def _user_container(sec_uid: str = "MS4wLjABAAAA-MsFakesUid") -> MediaItem:
+    """构造一个 ready-to-expand USER 容器。"""
+    return MediaItem(
+        platform=Platform.DOUYIN,
+        item_id=sec_uid,
+        title="抖音用户 MS4wLjABAAAA-MsFakesUid",
+        author=Author(id=sec_uid, name=""),
+        media_type=MediaType.USER,
+        source_url=f"https://www.douyin.com/user/{sec_uid}",
+    )
+
+
+def test_adapter_expand_user_argus_403_sets_expand_error(monkeypatch):
+    """USER 容器展开 → webapi 403 → ``expand_error.hint=need_login``。
+
+    M6.47：补齐 USER 路径，让「MIX 支持 / USER 不支持」的 UX 不对称消失。
+    验证：
+    * children = []
+    * app 已记录 applied_strategy="post"
+    * expand_error.hint=need_login / status_code=403
+    """
+    a = DouyinAdapter()
+    item = _user_container()
+
+    async def _fake_iter_user_posts(sec_uid, *, max_count=0, error_sink=None):
+        if error_sink is not None:
+            error_sink["reason"] = "HTTP 403"
+            error_sink["status_code"] = 403
+            error_sink["hint"] = "need_login"
+        return []
+
+    # 替 webapi 替 PostStrategy 内部的 iter_user_posts 调用
+    monkeypatch.setattr(a.webapi, "iter_user_posts", _fake_iter_user_posts)
+
+    children = asyncio.run(a.expand(item))
+
+    assert children == []
+    assert item.children == []
+    assert item.extra["applied_strategy"] == "post"
+    err = item.extra["expand_error"]
+    assert err["hint"] == "need_login"
+    assert err["status_code"] == 403
+
+
+def test_adapter_expand_user_happy_path_no_expand_error(monkeypatch):
+    """USER 容器正常返回 N 个 children → ``expand_error`` 不写入。"""
+    a = DouyinAdapter()
+    item = _user_container()
+
+    async def _fake_iter_user_posts(sec_uid, *, max_count=0, error_sink=None):
+        return [
+            _fake_aweme("aweme_u1", desc="用户视频1"),
+            _fake_aweme("aweme_u2", desc="用户视频2"),
+            _fake_aweme("aweme_u3", desc="用户视频3"),
+        ]
+
+    monkeypatch.setattr(a.webapi, "iter_user_posts", _fake_iter_user_posts)
+
+    children = asyncio.run(a.expand(item))
+
+    assert len(children) == 3
+    assert item.children == children
+    assert item.extra["applied_strategy"] == "post"
+    assert "expand_error" not in item.extra
+
+
+def test_adapter_expand_user_no_cookies_like_strategy(monkeypatch):
+    """``strategy="like"`` 且 ``api.cookies_file=None`` → LikeStrategy
+    主动往 sink 写 ``hint=need_login``（M6.47 增强），让 GUI 在未设置
+    OAuth + cookie 的「我的收藏夹」场景也能看到「需要登录抖音」徽章。
+    """
+    a = DouyinAdapter()
+    item = _user_container()
+
+    # 关键 — 不 monkeypatch like.expand，只清 cookies，让真
+    # LikeStrategy 跑完整逻辑验证 sink 写入。
+    a._strategies["like"].api.cookies_file = None
+
+    children = asyncio.run(a.expand(item, strategy="like"))
+
+    assert children == []
+    assert item.children == []
+    assert item.extra["applied_strategy"] == "like"
+    err = item.extra["expand_error"]
+    assert err["hint"] == "need_login"
+    assert err["status_code"] is None
+    assert "no cookies" in err["reason"]
 
 
 def test_pipeline_renders_output_template_before_engine_call(monkeypatch, tmp_path):

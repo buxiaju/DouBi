@@ -347,7 +347,7 @@ setWindowIcon(icon) + QApplication.setWindowIcon(icon)
 | `PySide6` | 550.6 MB | **92.3 MB** | `--exclude-module` 排 38 个 Qt 模块 |
 | `playwright_browsers` | 701 MB | **430.3 MB** | 不打包 `chromium_headless_shell`（270.7 MB） |
 | `imageio_ffmpeg` | 83.6 MB | **0** | 换成仓库自带的 `ffmpeg.exe`（10.91 MB） |
-| `PIL` | 12.8 MB | **0** | `--exclude-module PIL` |
+| `PIL` | 12.8 MB | **12.8 MB** | M6.16 起 `--exclude-module PIL` 已撤销：``QRCode.render_pil`` + ``QImage.Format_Grayscale8`` 需要 PIL 把二维码转 raw bytes 给 Qt。Pillow 已是 `qrcode` 的运行时依赖,排掉等于引入运行时 ImportError。 |
 
 #### 为什么会胖：`--collect-all` 的过度收集
 
@@ -393,6 +393,14 @@ except ImportError:
 而 DouBi 全仓 `Acrylic` / `gaussianBlur` / `isAcrylicAvailable` 零引用，
 所以排掉 PIL 连降级路径都走不到。
 
+> **M6.16 撤销**：「PIL 12.8 MB → 0」这条精简路径已撤销。B 站登录对话框
+> 用 ``QRCode.render_pil`` 把二维码转 8-bit grayscale raw bytes 给 Qt
+> ``QImage.Format_Grayscale8``,而 ``qrcode.make_image(image_factory=PilImage)``
+> 本身就需要 PIL——Pillow 早就是 ``qrcode`` 的运行时依赖,排掉 PIL 等于
+> 隐式把 qfluentwidgets 的 image_utils 一起干掉的同义词,只会让发布版在
+> 用户扫码时抛 ``ImportError: No module named 'PIL'``。体积表已同步更新,
+> PIL 这一行从「0 MB」改回「12.8 MB」。
+
 #### 三条不能动的约束
 
 这三条互相咬合，**动其中任何一条都会让发布版在用户机上炸**：
@@ -409,9 +417,10 @@ launch 失败。`channel="chromium"` 改用完整 Chromium 内置的 "new headle
 
 **② `EXCLUDE_MODULES` 只在「没人 import 它们」时才安全**
 
-以后若要引入视频预览、内嵌浏览器、PIL 图像处理，必须先从
+以后若要引入视频预览、内嵌浏览器，必须先从
 `scripts/build_exe.py::EXCLUDE_MODULES` 里删掉对应项，否则打包能过、
-运行时 `ImportError`。
+运行时 `ImportError`。PIL 不在此列——M6.16 起已经是隐式运行时依赖
+（见上），`EXCLUDE_MODULES` 里那条 `PIL` 已经撤销并加了注释。
 
 **③ ffmpeg 必须继续靠 `--add-data` 带进去**
 

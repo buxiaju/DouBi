@@ -33,16 +33,20 @@ import argparse
 import asyncio
 import json
 import logging
+import re
 import sys
 import uuid
-from typing import Any, Awaitable, Callable
+from collections.abc import Callable
+from typing import Any, Optional
 
-from .. import __version__
+from .. import (
+    __version__,
+    platforms,  # noqa: F401  -- ensure all platform adapters are registered on startup
+)
+from ..core.config import load_config
 from ..core.engine_loader import build_default_pipeline
 from ..core.models import DownloadOptions
-from ..core.config import load_config
 from ..core.registry import PlatformRegistry
-from .. import platforms  # noqa: F401  -- ensure all platform adapters are registered on startup
 
 logger = logging.getLogger("doubi.mcp.server")
 
@@ -142,6 +146,156 @@ def _tool_sniff_status(arguments: dict) -> dict:
         "duration_sec": cfg.sniff_duration_sec,
         "headless": cfg.sniff_headless,
         "auto_play": cfg.sniff_auto_play,
+    }
+
+
+# ---------------------------------------------------------------------------
+# list_supported_sites — yt-dlp 1800+ extractor 列表查询
+# ---------------------------------------------------------------------------
+
+
+#: 进程级缓存：``yt_dlp.list_extractors()`` 返回的是 generator，遍历后
+#: 即耗尽；同一进程多次调用必须缓存。版本/路径不变时缓存命中。
+_YT_EXTRACTORS_CACHE: Optional[list[dict[str, Any]]] = None
+
+
+def _load_ytdlp_extractors() -> list[dict[str, Any]]:
+    """遍历 ``yt_dlp.list_extractors()`` 并序列化成 dict 列表。
+
+    每个 extractor dict 包含：``ie_key``（yt-dlp 内部标识）、
+    ``name``（人类可读） 、``host``（主域名，可能为空）、
+    ``valid_url``（示例 URL，可能为空）、``age_limit``、``description``。
+
+    字段值通过 :func:`_safe_scalar` 强转标量——某些 extractor 子类定义了
+    额外属性（如 bound method、class reference），直接 json.dumps 会抛
+    ``TypeError: Object of type method is not JSON serializable``。
+    """
+    global _YT_EXTRACTORS_CACHE
+    if _YT_EXTRACTORS_CACHE is not None:
+        return _YT_EXTRACTORS_CACHE
+    import yt_dlp
+    extractors: list[dict[str, Any]] = []
+    for ie in yt_dlp.list_extractors():
+        valid_url = getattr(ie, "_VALID_URL", None)
+        host = _first_host(valid_url)
+        desc = _safe_scalar(getattr(ie, "IE_DESC", None), "")
+        # 一些 extractor 把 IE_DESC 定义成 bool / int（非字符串），下游
+        # ``[:200]`` 切片会炸——统一 str() 一下再截断。
+        desc = str(desc)[:200] if desc else ""
+        extractors.append({
+            "ie_key": _safe_scalar(getattr(ie, "ie_key", None), type(ie).__name__),
+            "name": _safe_scalar(getattr(ie, "name", None), type(ie).__name__),
+            "host": host,
+            "valid_url": host,
+            "age_limit": _safe_scalar(getattr(ie, "AGE_LIMIT", None), None),
+            "description": desc,
+            "working": bool(getattr(ie, "_WORKING", True)),
+        })
+    _YT_EXTRACTORS_CACHE = extractors
+    return extractors
+
+
+def _safe_scalar(value: Any, fallback: Any = None) -> Any:
+    """把任意值归一成 JSON 友好的标量（str / int / bool / None / list / tuple）。
+
+    yt-dlp extractor 子类偶尔定义 ``_VALID_URL = some_callable`` 或
+    ``age_limit = property(...)`` 这类非标量属性——直接 json.dumps 会抛
+    ``TypeError``。这里把 method / property / function 等「非数据」对象
+    替换成 fallback，避免缓存结果里出现不可序列化的字段。
+
+    注意：``value is None`` 时仍走 fallback 路径——上层调用方通常传
+    ``fallback=str()`` 之类，避免下游 ``[:200]`` 切片 / ``.lower()`` 失败。
+    """
+    if isinstance(value, (str, int, bool, float)):
+        return value
+    if value is None:
+        return fallback
+    if isinstance(value, (list, tuple)):
+        return [
+            _safe_scalar(v, None) for v in value
+            if not callable(v)
+        ]
+    # callable（method / function / class）/ 自定义对象 → fallback
+    return fallback
+
+
+def _first_host(urls: Any) -> Optional[str]:
+    """``_VALID_URL`` 通常是 list[str] | str（regex pattern），抽第一条
+    URL 的 host 段返回。空 / 非 str 时返回 None。
+    """
+    if isinstance(urls, str):
+        candidates = [urls]
+    elif isinstance(urls, (list, tuple)):
+        candidates = [u for u in urls if isinstance(u, str)]
+    else:
+        return None
+    for u in candidates:
+        if not u:
+            continue
+        m = re.match(r"https?://(?:www\.)?([^/]+)", u, re.IGNORECASE)
+        if m:
+            return m.group(1)
+        return u
+    return None
+
+
+def _first(urls) -> Optional[str]:  # pragma: no cover - kept for compat
+    """``_VALID_URL`` 是 list[str] | str，取第一个 host 段。"""
+    if not urls:
+        return None
+    if isinstance(urls, str):
+        urls = [urls]
+    for u in urls:
+        if not u:
+            continue
+        # ``_VALID_URL`` 通常是 ``https?://(?:www\.)?example\.com/...``
+        m = re.match(r"https?://(?:www\.)?([^/]+)", u, re.IGNORECASE)
+        if m:
+            return m.group(1)
+        return u
+    return None
+
+
+def _tool_list_supported_sites(arguments: dict) -> dict:
+    """MCP 客户端（AI agent）查询 DouBi 真正支持的下载站点。
+
+    返回两类信息：
+
+    * ``builtin_adapters``：4 个内置适配器（douyin / bilibili / youtube / ytdlp）
+    * ``ytdlp_extractors``：yt-dlp 内置的全部 extractor（1800+ 站）
+
+    可选参数 ``filter`` 关键字匹配 ``name`` 或 ``host``，agent 排查「这个站
+    能不能下」时不用读完整列表。
+    """
+    filter_kw = (arguments.get("filter") or "").strip().lower()
+    from ..core.registry import PlatformRegistry
+    builtin = [
+        {
+            "name": a.name,
+            "display_name": a.display_name,
+            "platform": a.platform.value,
+            "priority": a.priority,
+            "media_types": a.supported_media_types(),
+        }
+        for a in PlatformRegistry.all()
+    ]
+    extractors = _load_ytdlp_extractors()
+    if filter_kw:
+        extractors = [
+            e for e in extractors
+            if filter_kw in (e.get("name") or "").lower()
+            or filter_kw in (e.get("host") or "").lower()
+            or filter_kw in (e.get("description") or "").lower()
+        ]
+    return {
+        "builtin_adapters": builtin,
+        "ytdlp_extractor_count": len(extractors),
+        "ytdlp_extractors": extractors,
+        "note": (
+            "Call parse_url with the URL directly — ytdlp_generic will route "
+            "to the matching extractor automatically. This list is for "
+            "discovery / debugging only."
+        ),
     }
 
 
@@ -251,6 +405,31 @@ TOOLS: dict[str, dict[str, Any]] = {
         ),
         "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
+    "list_supported_sites": {
+        "description": (
+            "List every site DouBi can download from: the 4 built-in adapters "
+            "(douyin / bilibili / youtube / ytdlp_generic) plus the full "
+            "yt-dlp extractor list (~1800 sites — Twitter, Instagram, Vimeo, "
+            "Reddit, Pixiv, AcFun, 网易云, QQ音乐, 喜马拉雅, 央视频, 虎牙, 斗鱼, "
+            "西瓜视频, 优酷, …). Optional `filter` keyword narrows the list "
+            "by name/host. Call parse_url with the URL directly to download — "
+            "ytdlp_generic routes to the matching extractor automatically. "
+            "Use this list for discovery / debugging."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filter": {
+                    "type": "string",
+                    "description": (
+                        "Optional keyword; matches against extractor name, "
+                        "host, or description (case-insensitive)."
+                    ),
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
 }
 
 _HANDLERS: dict[str, Callable[[dict], Any]] = {
@@ -260,6 +439,7 @@ _HANDLERS: dict[str, Callable[[dict], Any]] = {
     "get_status": _tool_get_status,
     "list_jobs": _tool_list_jobs,
     "sniff_status": _tool_sniff_status,
+    "list_supported_sites": _tool_list_supported_sites,
 }
 
 

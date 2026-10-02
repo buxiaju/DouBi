@@ -50,7 +50,7 @@ def test_tools_list_includes_all_registered():
     # 用 == 而非 >= 是刻意的：新增工具时这里必须同步更新，删掉工具时也会立刻变红。
     assert names == {
         "platforms", "parse_url", "add_to_queue", "get_status", "list_jobs",
-        "sniff_status",
+        "sniff_status", "list_supported_sites",   # M6.17+ 暴露 yt-dlp 1800+ extractor
     }
 
 
@@ -123,13 +123,14 @@ def test_call_parse_url_missing_argument_returns_error_in_content():
     assert "url" in payload["error"]
 
 
-def test_call_parse_url_unknown_returns_generic_sniff_error():
-    """不认识的 URL 走 generic adapter，测试环境无 Playwright 时返回
-    带「嗅探失败」标题的 MediaItem payload（M6.16 新增）。
+def test_call_parse_url_unknown_returns_ytdlp_error():
+    """不认识的 URL 现在先走 ytdlp_generic（M6.17+）——yt-dlp 也解析不了时
+    返回带 ``error`` 字段的失败 payload，pipeline 不再自动 chain 到 generic 嗅探。
 
-    之前是返回 ``{"error": "no platform matches ..."}``——M6.16 加了
-    GenericAdapter 兜底后，unknown URL 不再无匹配，而是被 generic 接住
-    尝试嗅探。测试环境无 Playwright → 返回错误 item。
+    行为变化：
+
+    * M6.16: registry.detect → generic (priority=-1) → sniff 失败 → 错误 item
+    * M6.17+: registry.detect → ytdlp_generic (priority=-1) → yt-dlp DownloadError → 返回 ``{"error": "..."}``
     """
     async def _run():
         return await mcp_server._dispatch({
@@ -138,9 +139,10 @@ def test_call_parse_url_unknown_returns_generic_sniff_error():
         })
     resp = asyncio.run(_run())
     payload = json.loads(resp["result"]["content"][0]["text"])
-    # 不再返回 error 字段——而是返回错误 MediaItem 的 payload
-    assert payload["platform"] == "generic"
-    assert "嗅探" in payload["title"] or "Playwright" in payload["title"]
+    # ytdlp_generic 解析失败 → 返回 error 字段（不是 MediaItem payload）
+    assert "error" in payload, (
+        f"M6.17+ ytdlp_generic 解析失败应返回 error 字段，实际 {payload!r}"
+    )
 
 
 def test_call_parse_url_bilibili_succeeds():
@@ -253,3 +255,88 @@ def test_tool_handler_exception_is_caught(monkeypatch):
     assert resp["result"]["isError"] is True
     payload = json.loads(resp["result"]["content"][0]["text"])
     assert "tool exploded" in payload["error"]
+
+
+# ===========================================================================
+# list_supported_sites (M6.17+)
+# ===========================================================================
+
+
+def test_call_list_supported_sites_returns_both_lists():
+    """list_supported_sites 同时返回内置适配器和 yt-dlp extractor 列表。"""
+    async def _run():
+        return await mcp_server._dispatch({
+            "jsonrpc": "2.0", "id": 70, "method": "tools/call",
+            "params": {"name": "list_supported_sites", "arguments": {}},
+        })
+    resp = asyncio.run(_run())
+    payload = json.loads(resp["result"]["content"][0]["text"])
+    # 4 个内置适配器：douyin / bilibili / youtube / ytdlp
+    names = {a["name"] for a in payload["builtin_adapters"]}
+    assert {"douyin", "bilibili", "youtube", "ytdlp"}.issubset(names)
+    # yt-dlp 列表非空，且 extractor 数量 > 1000（保守）
+    assert payload["ytdlp_extractor_count"] > 1000
+    assert len(payload["ytdlp_extractors"]) == payload["ytdlp_extractor_count"]
+    # 第一个 extractor 至少有 name / host 字段
+    sample = payload["ytdlp_extractors"][0]
+    assert "name" in sample and "host" in sample
+
+
+def test_call_list_supported_sites_filter_narrows_results():
+    """``filter`` 关键字按 name/host 过滤 yt-dlp extractor 列表。"""
+    async def _run():
+        return await mcp_server._dispatch({
+            "jsonrpc": "2.0", "id": 71, "method": "tools/call",
+            "params": {"name": "list_supported_sites",
+                       "arguments": {"filter": "twitter"}},
+        })
+    resp = asyncio.run(_run())
+    payload = json.loads(resp["result"]["content"][0]["text"])
+    # 至少命中 1 条 Twitter 相关
+    assert payload["ytdlp_extractor_count"] >= 1
+    for e in payload["ytdlp_extractors"]:
+        combined = (e.get("name", "") + e.get("host", "") + e.get("description", "")).lower()
+        assert "twitter" in combined, f"filter 没过滤掉 {e}"
+
+
+def test_call_list_supported_sites_caches_within_process(monkeypatch):
+    """同一进程多次调用应命中缓存（不再遍历 yt_dlp.list_extractors）。
+
+    验证手法：把 ``yt_dlp.list_extractors`` mock 成 ``call_count`` 自增的
+    函数——第二次调用 list_supported_sites 不应再触发它。
+    """
+    import yt_dlp as _yt
+    call_count = {"n": 0}
+
+    real = _yt.list_extractors
+
+    def counting_list_extractors():
+        call_count["n"] += 1
+        yield from real()
+
+    monkeypatch.setattr(_yt, "list_extractors", counting_list_extractors)
+    # 重置缓存：上一次单测已经把真实 list_extractors 跑过了，缓存非空，
+    # 后续测试会直接命中缓存——这次我们要测的是「缓存命中后不再调」。
+    mcp_server._YT_EXTRACTORS_CACHE = None
+
+    payload1 = _call_list_supported_sites_sync()
+    payload2 = _call_list_supported_sites_sync()
+    # list_extractors 只应被第一次调用触发（建立缓存）；第二次直接命中
+    assert call_count["n"] == 1, (
+        f"缓存未生效，list_extractors 被调用 {call_count['n']} 次"
+    )
+    # 两次返回的 extractor 数量 / 内容相同（json.dumps/loads 丢失 object identity，
+    # 所以这里用 == 比较语义而不是 is 比较身份）
+    assert payload1["ytdlp_extractor_count"] == payload2["ytdlp_extractor_count"]
+    assert len(payload1["ytdlp_extractors"]) == len(payload2["ytdlp_extractors"])
+
+
+def _call_list_supported_sites_sync() -> dict:
+    """测试用 helper：同步触发 list_supported_sites 工具，返回 payload dict。"""
+    async def _run():
+        return await mcp_server._dispatch({
+            "jsonrpc": "2.0", "id": 80, "method": "tools/call",
+            "params": {"name": "list_supported_sites", "arguments": {}},
+        })
+    resp = asyncio.run(_run())
+    return json.loads(resp["result"]["content"][0]["text"])

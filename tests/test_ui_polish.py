@@ -418,16 +418,17 @@ def test_about_dialog_uses_brand_window_icon(qapp):
 
 
 def test_login_dialogs_use_brand_window_icon(qapp):
-    """B 站扫码、抖音 browser 两个 dialog 同样要带品牌 icon。
+    """B 站 / 抖音登录 dialog 都要带品牌 icon。
 
     这两个 dialog 是用户登账号的入口——窗口标题栏 / Alt+Tab 显示
     Python 默认图标会显得很「不专业」，也容易和别的 Python 工具混淆。
+    M6.16 起 B 站的 QR dialog 改名为 ``build_bilibili_login_dialog``。
     """
     _require_gui()
     from doubi.ui.dialogs.login_dialog import (
-        build_bilibili_qr_dialog, build_douyin_browser_dialog,
+        build_bilibili_login_dialog, build_douyin_browser_dialog,
     )
-    for factory in (build_bilibili_qr_dialog, build_douyin_browser_dialog):
+    for factory in (build_bilibili_login_dialog, build_douyin_browser_dialog):
         dlg = factory()()
         try:
             icon = dlg.windowIcon()
@@ -678,6 +679,75 @@ def test_load_splash_pixmap_uses_min_side(qapp):
     assert load_splash_pixmap(0, 0) is None
 
 
+def test_douyin_headed_checkbox_persists_across_dialogs(qapp):
+    """M6.41 regression guard: 抖音 dialog 的「显示浏览器」复选框
+    状态必须持久化到 QSettings —— 关 dialog 后下次打开还是用户上次
+    的选择(勾上 / 取消),不用每次重设。
+    """
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QApplication
+    _require_gui()
+    # The qapp fixture creates QApplication without setApplicationName,
+    # so QSettings() falls back to a per-QApplication unique path.
+    # Use the same key the production dialog uses, but scoped to the
+    # test so we don't pollute the user's real registry.
+    QApplication.setApplicationName("DouBi")
+    QApplication.setOrganizationName("DouBi")
+    from doubi.ui.dialogs.login_dialog import build_douyin_browser_dialog
+
+    settings = QSettings()
+    # Start clean.
+    settings.remove("login.dy.headed_checkbox")
+
+    # First open: nothing persisted yet, must default to True (M6.37).
+    dlg1 = build_douyin_browser_dialog()()
+    try:
+        assert dlg1.headed_checkbox.isChecked() is True, (
+            "M6.41: first open should default to True (M6.37 decision "
+            "that 抖音 must run headed because headless always gets "
+            "verify-captcha'd)"
+        )
+        # User toggles it OFF and closes the dialog.
+        dlg1.headed_checkbox.setChecked(False)
+        # Drive closeEvent directly — QDialog.close() may skip our
+        # override depending on result state.
+        from PySide6.QtGui import QCloseEvent
+        dlg1.closeEvent(QCloseEvent())
+    finally:
+        dlg1.deleteLater()
+    QApplication.processEvents()
+    # QSettings is lazy-write: force a sync so the next dialog
+    # (built fresh) actually sees the persisted value.
+    QSettings().sync()
+
+    # Second open: must restore the user's last choice (False).
+    dlg2 = build_douyin_browser_dialog()()
+    try:
+        assert dlg2.headed_checkbox.isChecked() is False, (
+            "M6.41: second open should restore the persisted state "
+            "(user toggled it OFF on the first dialog)"
+        )
+        # User toggles it back ON and closes.
+        dlg2.headed_checkbox.setChecked(True)
+        from PySide6.QtGui import QCloseEvent
+        dlg2.closeEvent(QCloseEvent())
+    finally:
+        dlg2.deleteLater()
+    QApplication.processEvents()
+    QSettings().sync()
+
+    # Third open: should now be True again.
+    dlg3 = build_douyin_browser_dialog()()
+    try:
+        assert dlg3.headed_checkbox.isChecked() is True, (
+            "M6.41: third open should restore True (last persisted value)"
+        )
+    finally:
+        dlg3.deleteLater()
+    # Cleanup so we don't leak state to other tests.
+    settings.remove("login.dy.headed_checkbox")
+
+
 def test_clear_icon_cache_is_safe(qapp):
     _require_gui()
     from doubi.ui.resources import clear_icon_cache, load_app_icon
@@ -694,6 +764,55 @@ def test_fallback_png_is_high_resolution():
     size = QImageReader(str(icon_path())).size()
     assert size.width() >= 1024, f"兜底图标只有 {size.width()}px"
     assert size.width() == size.height(), "图标应当是正方形"
+
+
+# ---------------------------------------------------------------------------
+# M6.46: MIX 容器展开失败 → 「需要登录抖音」徽章文案 + tooltip
+# ---------------------------------------------------------------------------
+
+
+def test_expand_hint_text_need_login():
+    """``need_login`` hint（Argus 风控 / 403）→ 中文标签「需要登录抖音」。"""
+    from doubi.ui.pages.parse import _expand_hint_text
+    assert _expand_hint_text(
+        {"hint": "need_login", "reason": "HTTP 403", "status_code": 403},
+    ) == "需要登录抖音"
+
+
+def test_expand_hint_text_server_error():
+    """5xx 提示「抖音服务器异常」。"""
+    from doubi.ui.pages.parse import _expand_hint_text
+    assert _expand_hint_text(
+        {"hint": "server_error", "reason": "HTTP 502", "status_code": 502},
+    ) == "抖音服务器异常"
+
+
+def test_expand_hint_text_unknown_hint_falls_back():
+    """未知 hint（或非 dict）→ 「展开失败」，不让 UI 拿到 None/空。"""
+    from doubi.ui.pages.parse import _expand_hint_text
+    assert _expand_hint_text({"hint": "nope_never_heard", "reason": "x"}) == "展开失败"
+    assert _expand_hint_text({}) == "展开失败"
+    assert _expand_hint_text("not a dict") == "展开失败"  # type: ignore[arg-type]
+
+
+def test_expand_tooltip_text_includes_reason_and_status():
+    """tooltip 把 reason + status_code 一起呈现（power-user 排查用）。"""
+    from doubi.ui.pages.parse import _expand_tooltip_text
+    tip = _expand_tooltip_text(
+        {"hint": "need_login", "reason": "HTTP 403", "status_code": 403},
+    )
+    assert "HTTP 403" in tip
+    assert "403" in tip
+
+
+def test_expand_tooltip_text_handles_transport_error():
+    """``status_code=None``（连接超时 / DNS 失败）→ 显示 "no response"。"""
+    from doubi.ui.pages.parse import _expand_tooltip_text
+    tip = _expand_tooltip_text(
+        {"hint": "transient", "reason": "ConnectError: timeout", "status_code": None},
+    )
+    assert "no response" in tip
+    assert "ConnectError" in tip
 
 
 # ---------------------------------------------------------------------------

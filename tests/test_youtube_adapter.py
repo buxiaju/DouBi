@@ -271,16 +271,24 @@ def test_registry_detect_routes_to_youtube(url):
     )
 
 
-def test_registry_detect_unknown_falls_back_to_generic():
-    """非平台 URL 现在走 generic adapter 兜底（M6.16 新增）。
+def test_registry_detect_unknown_falls_back_to_ytdlp_generic():
+    """非平台 URL 走 ytdlp_generic 优先兜底（M6.17+），generic 是更下一层。
 
-    之前是返回 None——M6.16 加了 GenericAdapter (priority=-1) 后，
-    任意 http(s):// URL 都会被它接住。空串 / 非 http 仍然返回 None。
+    兜底链变更：
+
+    * M6.16: 任意 http(s) → generic (priority=-1)
+    * M6.17+: 任意 http(s) → ytdlp_generic (priority=-1, yt-dlp 1800+ extractor)
+              → generic (priority=-2, Playwright 嗅探)
+
+    空串 / 非 http 仍然返回 None（match_url 永真只对 ``http(s)://`` 生效）。
     """
     adapter = PlatformRegistry.detect("https://example.com/")
     assert adapter is not None
-    assert adapter.name == "generic"
-    # 空串 / 非 http(s) URL 不匹配 generic
+    # ytdlp_generic 优先匹配（priority=-1 > generic.priority=-2）
+    assert adapter.name == "ytdlp", (
+        f"M6.17+ 非平台 URL 应优先匹配 ytdlp_generic，实际 {adapter.name}"
+    )
+    # 空串 / 非 http(s) URL 不匹配任何适配器
     assert PlatformRegistry.detect("") is None
     assert PlatformRegistry.detect("javascript:void(0)") is None
 

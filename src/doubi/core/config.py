@@ -41,6 +41,11 @@ DEFAULTS: dict[str, Any] = {
     "filename_template": "{title}_{item_id}",
     "rate_limit": None,
     "proxy": None,
+    # 全局默认 cookie 文件路径（Netscape 格式）。喂给 yt-dlp ``cookiefile``；
+    # ``None`` 表示不传，由每个 DownloadOptions.cookies_file（per-任务）覆盖。
+    # README §数据与配置：``~/.doubi/cookies/*.txt``——这里只支持单个文件路径，
+    # 多平台 cookie 由用户在 GUI 设置页选 / CLI --cookies-file 指定。
+    "cookies_file": None,
     "database": True,
     "database_path": "doubi.db",
     "manifest_path": "download_manifest.jsonl",
@@ -97,6 +102,7 @@ class AppConfig:
     filename_template: str = DEFAULTS["filename_template"]
     rate_limit: Optional[str] = DEFAULTS["rate_limit"]
     proxy: Optional[str] = DEFAULTS["proxy"]
+    cookies_file: Optional[Path] = DEFAULTS["cookies_file"]
     database: bool = DEFAULTS["database"]
     database_path: Path = Path(DEFAULTS["database_path"])
     manifest_path: Path = Path(DEFAULTS["manifest_path"])
@@ -123,6 +129,8 @@ class AppConfig:
         d["output_root"] = str(self.output_root)
         d["database_path"] = str(self.database_path)
         d["manifest_path"] = str(self.manifest_path)
+        if self.cookies_file is not None:
+            d["cookies_file"] = str(self.cookies_file)
         return d
 
 
@@ -191,6 +199,7 @@ def load_config(path: Optional[Path] = None, *, env_prefix: str = "DOUBI_") -> A
         "MAX_QUALITY": "max_quality",
         "PROXY": "proxy",
         "RATE_LIMIT": "rate_limit",
+        "COOKIES_FILE": "cookies_file",
         "DATABASE_PATH": "database_path",
         "MANIFEST_PATH": "manifest_path",
         "THEME": "theme",
@@ -216,6 +225,10 @@ def load_config(path: Optional[Path] = None, *, env_prefix: str = "DOUBI_") -> A
         filename_template=str(data["filename_template"]),
         rate_limit=data["rate_limit"],
         proxy=data["proxy"],
+        cookies_file=_coerce(
+            data.get("cookies_file", DEFAULTS["cookies_file"]),
+            DEFAULTS["cookies_file"],
+        ),
         database=_coerce(data["database"], DEFAULTS["database"]),
         database_path=_coerce(data["database_path"], DEFAULTS["database_path"]),
         manifest_path=_coerce(data["manifest_path"], DEFAULTS["manifest_path"]),

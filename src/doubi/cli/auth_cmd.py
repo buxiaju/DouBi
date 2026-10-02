@@ -270,9 +270,6 @@ def cmd_auth_douyin(args: argparse.Namespace) -> int:
     if args.import_file:
         return _cmd_douyin_import(args.import_file, args.output)
 
-    if args.legacy_json:
-        return _cmd_douyin_legacy(args.legacy_json, args.output)
-
     target = args.output or dy_auth.default_cookie_path()
     print("Opening a Chromium window to log in to 抖音...", flush=True)
     print("In the browser, click the '登录' button, then scan the QR with the",
@@ -294,8 +291,6 @@ def cmd_auth_douyin(args: argparse.Namespace) -> int:
     print("Browser-based login didn't work. Try:")
     print("  - Install Playwright:  pip install playwright && python -m playwright install chromium")
     print("  - Or import a cookie file:  doubi auth douyin --import <cookies.txt>")
-    print("  - Or import a legacy douyin-downloader JSON:")
-    print("      doubi auth douyin --legacy-json config/cookies.json")
     return 1
 
 
@@ -307,19 +302,6 @@ def _cmd_douyin_import(src: Path, dst: Optional[Path]) -> int:
     cookies = dy_auth.parse_json_cookies(src) if suffix == ".json" else dy_auth.parse_netscape_file(src)
     if not cookies:
         print(f"Error: no cookies parsed from {src}.", file=sys.stderr)
-        return 1
-    target = dst or dy_auth.default_cookie_path()
-    return 0 if _save_and_validate(cookies, target, "douyin") else 1
-
-
-def _cmd_douyin_legacy(src: Path, dst: Optional[Path]) -> int:
-    if not src.exists():
-        print(f"Error: file not found: {src}", file=sys.stderr)
-        return 1
-    cookies = dy_auth.parse_legacy_json(src)
-    if not cookies:
-        print(f"Error: no cookies parsed from {src} (is it a valid cookies.json?).",
-              file=sys.stderr)
         return 1
     target = dst or dy_auth.default_cookie_path()
     return 0 if _save_and_validate(cookies, target, "douyin") else 1

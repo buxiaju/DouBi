@@ -332,7 +332,56 @@ LIST  → mix      HISTORY → favlist    POPULAR → space
 5. `Platform` 枚举加 `YOUTUBE = "youtube"`（已经预置了）。
 6. 测试：复制 `tests/test_douyin_adapter.py` 的骨架，mock 掉网络。
 
----
+### 6.5 yt-dlp 通用兜底适配器（`platforms/ytdlp_generic/`，M6.17+）
+
+**这是 §6.4 的一个特例**：当具体平台不写、但 yt-dlp 已经内置 extractor 时，
+不需要为每个站写 adapter——直接把 URL 丢给 yt-dlp 让它挑 extractor。
+
+```text
+platforms/ytdlp_generic/
+├── __init__.py           # 注册 YtDlpGenericAdapter 到 PlatformRegistry
+├── adapter.py            # YtDlpGenericAdapter（match_url 永真，priority=-1）
+└── strategies.py         # info_to_author / info_to_cover / entries_to_children
+                          # —— InfoDict → MediaItem 字段归一化
+```
+
+**为什么单独一个适配器而不是让 yt-dlp 引擎直接接管**：pipeline 调
+`PlatformRegistry.detect(url)` 拿 adapter，adapter 负责「单条 URL →
+MediaItem」结构化数据（title / author / duration / cover_url / children）。
+让引擎直接处理会让 pipeline 跳过解析层、无法填充 `MediaItem`、
+DB / manifest 写不进去。
+
+**为什么 `priority=-1` 而不是 `0`**：具体平台（douyin / bilibili /
+youtube）默认 `priority=0`，拿到的元数据通常更丰富（自家 API 拿 B 站
+弹幕 / 抖音合集列表等 yt-dlp 没有的信息）。把它们排在 ytdlp_generic 前面，
+URL 仍是 B 站 / 抖音 / YouTube 时走具体平台特化路径；只有具体平台不匹配
+才进 ytdlp_generic。generic（Playwright 嗅探）则再降到 `priority=-2`。
+
+**`fail-open` 设计**：`parse(url)` 在 worker thread 里跑
+`yt_dlp.YoutubeDL.extract_info(url, download=False)`，捕获所有
+`DownloadError` / `ExtractorError` / 网络异常 → 返回 `None`，pipeline
+不挂。**没有自动 chain fallback 到 generic 嗅探**——只有用户主动触发
+（如 CLI `--force-sniff` 或 GUI 重试按钮）才走 Playwright 嗅探。
+
+**InfoDict 字段归一化（`strategies.py`）**：不同 extractor 命名差异大
+（Twitter 没 `duration`、Reddit 用 `channel` 而非 `uploader`、Pixiv 用
+`artist`）。按 `(_UPLOADER_KEYS, _UPLOADER_ID_KEYS, _AVATAR_KEYS)`
+顺序挑第一个非空值；`_type` in `{playlist, multi_video}` 时拍平
+`entries` 构造容器 MediaItem。
+
+**复用契约**：
+
+- `engines/yt_dlp.py` 的 `DEFAULT_USER_AGENT`（避免 YouTube 解析能过、下载挂的不对称失败）
+- `AppConfig.cookies_file` / `proxy` / `rate_limit` 全透传给 yt-dlp opts
+- `set_config(cls, cfg)` 类方法供 4 个入口（CLI / GUI / REST / MCP）注入
+
+**何时**才**应该新增自己的 adapter 而不是依赖 ytdlp_generic**：
+
+1. 需要平台特化元数据（B 站弹幕 / 抖音合集列表 / 大会员 cookie 编排）
+2. 需要做 yt-dlp 不支持的二次处理（命名规则引擎、NFO 侧车）
+3. 需要自定义下载策略（HLS 走 nm3u8dl / 嗅探走 aria2）
+
+否则一律走 ytdlp_generic——它覆盖 yt-dlp 内置的 1800+ 站点。
 
 ## 7. 下载引擎
 
@@ -574,13 +623,24 @@ increment_checkpoint  (platform, user_id, mode) 主键 · last_item_id/last_chec
 
 ### 11.2 登录方式
 
-| 平台 | 方式 | 实现 |
-|---|---|---|
-| B 站 | 扫码（二维码 + 轮询） | `qr_login.py` + `auth.py` |
-| B 站 | Playwright 自动抓取 | `core/auth/browser_login.py` 的 `URLChangeLogin` |
-| B 站 | 手动导入 cookie 文件 | `doubi auth bilibili --import cookies.txt`（Netscape/JSON） |
-| 抖音 | Playwright 浏览器登录 | `browser_login.py` 的 `CookieSetLogin`（轮询 4 个关键 cookie） |
-| 抖音 | 手动导入 | `--import` 或 `--legacy-json`（旧 douyin-downloader 的 cookies.json） |
+| 平台 | 方式 | 实现 | 是否开浏览器 |
+|---|---|---|---|
+| B 站 | **二维码图**(M6.25) | `qr_login.py::bilibili_login_via_qr` + `auth.py` | **否**（纯 httpx，QR 图直接显示在窗口内） |
+| B 站 | 手动导入 cookie 文件 | `import_bilibili_cookies()`（Netscape/JSON） | 否 |
+| B 站 | ASCII 二维码(CLI) | `qr_login.QRCode.render_ascii`（保留 CLI 终端用户的路径） | 否 |
+| 抖音 | **Playwright headless + 扒图**(M6.26) | `browser_login.py` 的 `CookieSetLogin` + `qr_callback` 钩子 | **默认否**(headless=True 在后台跑)。勾选「显示浏览器」fallback 到 headed |
+| 抖音 | 手动导入 | `--import` 或 `--legacy-json`（旧 douyin-downloader 的 cookies.json） | 否 |
+
+> **M6.25 起 B 站不再用 Playwright**：扫码成功的 `Set-Cookie` 在
+> `qrcode/poll` 成功响应里就直接下发，httpx client 吸收到 jar 后我们直接
+> 抽出来写 Netscape 文件。**省掉了一次「开浏览器拿 cookie」的中间环节**
+> + 用户再也不用看到一个独立的浏览器窗口被弹出来。
+>
+> **M6.26 起抖音改为 headless + 扒图**：Playwright 仍然跑（抖音 web 端
+> 反爬太严,纯 web API 走不通），但 `headless=True` 让 Chromium 进程
+> 隐藏在后台。`_qr_snapshot` 闭包在登录页加载后截 QR 元素 → PNG bytes
+> → 推回 GUI 居中显示。失败时勾「显示浏览器」一键 fallback 到 headed
+> 模式,会弹独立 Chromium 窗口。
 
 ### 11.3 登录态校验
 
@@ -589,7 +649,70 @@ increment_checkpoint  (platform, user_id, mode) 主键 · last_item_id/last_chec
 
 ### 11.4 GUI 登录入口
 
-设置页 → "账号与登录"卡片（B 站/抖音各一行）：扫码登录 / 导入 Cookie 文件 / 抖音 legacy JSON。底层 `ui/auth_actions.py` 是纯 Python 包装（无 Qt 依赖，可单测）。
+设置页 → "账号与登录"卡片（B 站/抖音各一行）：
+
+- **B 站**：登录（打开带 QR + 导入 Cookie 双 Tab 的统一对话框 `build_bilibili_login_dialog`）+ 导入 Cookie 文件（快捷入口）
+- **抖音**：扫码登录（**M6.26 起默认 headless + 仅显示二维码**;对话框内可勾选「显示浏览器」降级为 headed）+ 导入 Cookie 文件 + 导入 douyin-downloader JSON
+
+底层 `ui/auth_actions.py` 是纯 Python 包装（无 Qt 依赖，可单测）。
+
+### 11.5 M6.25 B 站登录新流程详解
+
+`platforms/bilibili/qr_login.py` 现在的公共 API 收口为 4 个：
+
+| API | 返回 | 用途 |
+|---|---|---|
+| `QRSession()` (async ctx mgr) | httpx 客户端 | 底层 generate + poll,CLI 仍可用 |
+| `QRCode.render_ascii()` | 多行 str | CLI 终端 |
+| `QRCode.render_pil()` | 8-bit grayscale `PIL.Image` | **GUI 新流程** |
+| `bilibili_login_via_qr(cookie_path, on_qr_ready, on_status)` | 写入的 `Path` | **GUI 顶层 orchestrator** |
+
+`auth_actions.bilibili_qr_login_image(...)` 包装上面的 orchestrator,
+跑在 daemon 线程,通过 `on_qr_ready(qr)` / `on_status(result)` /
+`on_done(path, error)` 三个 callback 把事件推回 GUI 主线程。
+
+`build_bilibili_login_dialog` 用 `qfluentwidgets.SegmentedWidget`
+做顶部 2 Tab 切换:
+
+- **Tab 1 二维码**:`QLabel` 居中放 `QRCode.render_pil()` 渲染的
+  `QPixmap`(260×260,平滑缩放)。`_on_qr_ready` 走
+  `QImage(bytes, w, h, w, QImage.Format_Grayscale8)` ——**不**用
+  `PIL.ImageQt`(0.3.0 把 PIL 拆了 12.8 MB,M6.25 又把它请回来,因为
+  qrcode 库 `PilImage` 工厂就是 PIL,排掉等于运行时 `ImportError`)
+- **Tab 2 导入 Cookie**:复用 `import_bilibili_cookies`,跟 settings
+  页的"导入 Cookie 文件"按钮同源
+
+**为什么不做账号密码 / 手机+验证码两个 Tab?** B 站 web 端被两道墙
+卡死,纯 API 走不通:
+
+1. **极验 GeeTest 滑块** — 密码登录与短信发送都要带
+   `validate + seccode`,需要 B 站自己的 JS 跑起来才能解开
+2. **`b_ret` / `b_wet` 设备指纹 WASM** — 密码登录必须带 `b_ret`,
+   由 `SecureCollectSDK` 收集 Canvas + WebGL 指纹,纯 httpx 客户端
+   无法伪造
+
+走 `QWebEngineView` 嵌登录页能解,但 0.3.0 才把它拆掉(节省 200 MB
+打包体积,BUILD §4.5),权衡后选择放弃,只保留 QR + 导入 Cookie。
+
+### 11.6 M6.26 抖音 headless + 扒图机制
+
+`core/auth/browser_login.py` 加了 `qr_callback` 钩子（在
+`on_page_ready` 之后、`_wait_for_success` 之前调一次），
+让上层在不破坏 Playwright 生命周期的前提下拿到 Page 实例。
+
+`platforms/douyin/auth.py::browser_login` 透传这个参数。
+
+`ui/auth_actions.py::douyin_login_via_browser` 在它自己线程里的
+`_qr_snapshot` 闭包按 4 个候选选择器依次试：
+`div[data-e2e='login-qrcode'] img` → `div.login-QRcode img` →
+`img[class*='qrcode']` → `div[class*='qrcode'] img`。全 miss 就
+`page.screenshot(type="png", full_page=False)` 兜底。
+
+**风险**:抖音 web 端对 headless 模式有反爬检测
+（`navigator.webdriver` / 鼠标行为 / canvas 指纹）。如果 headless
+模式下扫码不识别 / 出滑块,用户可在对话框内勾「显示浏览器」
+一键 fallback 到 headed 模式（会弹独立 Chromium 窗口）。**这条
+降级路径在我们环境里没法 CI 验证,需要你实测**。
 
 ---
 
@@ -597,10 +720,26 @@ increment_checkpoint  (platform, user_id, mode) 主键 · last_item_id/last_chec
 
 ### 12.1 CLI（`cli/main.py` + `cli/auth_cmd.py`）
 
-子命令：`platforms` / `download` / `auth` / `live` / `migrate`。
+**17 个子命令**，按职责分四类：
 
-- 入口：`python -m doubi.cli.main` 或 `doubi`。
+| 分类 | 子命令 | 作用 |
+|---|---|---|
+| 下载 | `download` | URL → 解析 → 下载（`-f` 文件批量、`--sniff` 嗅探） |
+| 采集 | `mix` / `search` / `hot` / `favorites` / `comments` / `user` / `hashtag` / `live` | 抖音签名 Web API 采集（M6.45–M6.59） |
+| 平台 | `platforms` / `bilibili` | 列平台 / B 站子命令 |
+| 运行 | `auth` / `serve` / `mcp` / `status` / `migrate` / `douyin` | 登录、REST、MCP 桥、向导、旧库迁移、抖音引擎 |
+
+- 入口：`python -m doubi.cli.main` 或 `doubi`。分发映射（`pyproject.toml`）：
+  `doubi` → `doubi.cli.main:main`、`doubi-gui` → `doubi.ui.app:main`、
+  `doubi-serve` → `doubi.server.app:main`、`doubi-mcp` → `doubi.mcp.server:main`。
 - **重要**：CLI 顶层 `from .. import platforms` 触发适配器注册。不要移除。
+- **采集子命令的统一形状**：每个都是
+  `_cmd_<name>`（同步壳，调 `asyncio.run`）+ `_cmd_<name>_sync`（真正的 async 逻辑）
+  两层。这样拆是为了让 async 主体可单独被测试直接 await，
+  不用拘注 subprocess。参数解析尽量放在子命令自己的 handler 里（不放顶层），
+  避免全局 argparse 膨胀。
+- **采集失败不能静默**：命中 `hint=need_login`（未登录 403）或回查 miss 时写 stderr，
+  并以非 0 退出码结束。宁可多一次「没查到」，不给看起来成功的假结果（见 M6.56）。
 
 ### 12.2 GUI（`ui/app.py`）
 
@@ -611,13 +750,16 @@ increment_checkpoint  (platform, user_id, mode) 主键 · last_item_id/last_chec
 
 ### 12.3 REST（`server/app.py`）
 
-- 入口：`doubi-serve`。端点：
+- 入口：`doubi-serve`。**8 条路由**：
   ```
   GET  /api/v1/health
   GET  /api/v1/platforms
-  POST /api/v1/download   {url}
-  GET  /api/v1/jobs/{job_id}
+  POST /api/v1/parse             {url}
+  POST /api/v1/download          {url}
   GET  /api/v1/jobs
+  GET  /api/v1/jobs/{job_id}
+  GET  /api/v1/sniff/status
+  GET  /api/v1/sniff/status/{task_id}
   ```
 - `JobManager`（`server/jobs.py`）内存任务队列，`max_concurrency=2`，TTL + cap 剪枝。
 - **pydantic 坑**：body schema 必须模块级定义（`server/schemas.py`），路由参数显式 `Body(...)`，否则 pydantic v2 + `from __future__ import annotations` 会把它当 query 参数。
@@ -625,7 +767,8 @@ increment_checkpoint  (platform, user_id, mode) 主键 · last_item_id/last_chec
 ### 12.4 MCP（`mcp/server.py`）
 
 - 入口：`doubi-mcp`。stdio 上行分隔 JSON-RPC 2.0。
-- 工具：`platforms` / `parse_url` / `add_to_queue` / `get_status` / `list_jobs`。
+- **7 个工具**：`platforms` / `parse_url` / `add_to_queue` / `get_status` / `list_jobs` /
+  `sniff_status` / `list_supported_sites`。
 - **stdout 只写协议**，日志全走 stderr。
 - Windows stdin 用 `loop.run_in_executor(None, sys.stdin.readline)` 读（`connect_read_pipe` 不可靠）。
 
@@ -1009,7 +1152,7 @@ header.add_action(my_button)       # 右侧动作槽
 
 **Windows .ico** (`icon.ico`)：多档位 PNG 合集，用于 PyInstaller 打包时
 嵌进 .exe 资源段——这是 Windows 任务栏读取「应用分组图标」的唯一渠道。
-详见 [docs/BUILD.md](../BUILD.md)。
+详见 [docs/BUILD.md](BUILD.md)。
 
 #### 13.5.2 资源模块 API
 
@@ -1123,7 +1266,7 @@ Qt 只实现 SVG Tiny 1.2，**任何**新贡献的 SVG 都可能踩 filter 坑�
 
 ### 13.6 打包成 Windows .exe 与安装包（`scripts/build_exe.py` / `build_installer.py`）
 
-详见 [docs/BUILD.md](../BUILD.md)。要点：
+详见 [docs/BUILD.md](BUILD.md)。要点：
 
 - **入口用「构建期生成的启动壳」，不是包内文件、也不是 `--module`**。
   `app.py` 内部是 `from .theme import ...` 相对导入，直接把它当入口，
@@ -1260,51 +1403,154 @@ Qt 只实现 SVG Tiny 1.2，**任何**新贡献的 SVG 都可能踩 filter 坑�
 
 `generate_buvid3()` 生成匿名标识（uuid 风格 + `infoc` 后缀），每次 `BilibiliAPI()` 新建时生成。能轻微缓解 412，但不是根治——真正要稳定得登录（SESSDATA）或走官方 API + WBI。
 
-### 14.6 抖音 Web API 签名与反爬（M6.7，`platforms/douyin/webapi.py` + `sign/`）
+### 14.6 抖音 Web API：签名栈与采集层（M6.7 → M6.59）
 
-抖音合列举/用户作品列举**没有 yt-dlp 抽取器**（2026.08 版离线 `ie.suitable()` 验证：user /
+抖音合集举例 / 用户作品列举**没有 yt-dlp 抽取器**（2026.08 版离线 `ie.suitable()` 验证：user /
 collection URL 均落到 generic fallback），只能走签名 Web API。
+M6.48 起这条通道从「能列合集」扩到覆盖搜索 / 热榜 / 收藏夹 / 评论 /
+关注粉丝 / 话题 / 直播全家族。**改这部分代码前必读本节。**
 
-**通道速查**：
+#### 14.6.1 目录与职责
 
-| 需求 | 端点 | 说明 |
+```
+platforms/douyin/
+├── webapi.py        # DouyinWebAPI：2141 行 / 30 个 async 方法，所有签名请求的唯一出口
+├── adapter.py       # 平台适配器：URL 分类 → 容器展开 → MediaItem 归一化
+├── strategies.py    # 容器策略（MIX / USER / FAVLIST…）
+├── live.py          # 直播详情与多清晰度
+├── url.py           # classify_douyin_url
+└── sign/
+    ├── abogus.py      # a_bogus（865 行，依赖 gmssl，非标准库）
+    ├── websign.py     # WebSign —— msToken + ttwid 的实请求签名包
+    ├── ms_token.py    # mssdk 签名与 strData blob（M6.53）
+    └── tt_wid.py      # ttwid 获取与缓存
+```
+
+#### 14.6.2 通道速查（全部实测可用）
+
+| 需求 | 端点 | 入口方法 |
 |---|---|---|
-| 合集分页列举 | `GET /aweme/v1/web/mix/aweme/?mix_id=&cursor=&count=` | 主力通道，实测可用 |
-| 合集详情 | `GET /aweme/v1/web/mix/detail/` | **实测 403（风控）**，不要依赖；合集标题改从列举第一页的 `mix_info.mix_name` 探测 |
-| 视频详情 | `GET /aweme/v1/web/aweme/detail/` | `aid` 参数 6383 / 1128 两候选，用于 `collection_of()` 反查 |
-| 用户作品 | `GET /aweme/v1/web/aweme/post/` | `iter_user_posts` 分页枚举 |
+| 单条详情 | `GET /aweme/v1/web/aweme/detail/` | `get_video_detail` |
+| 合集分页列举 | `GET /aweme/v1/web/mix/aweme/` | `iter_mix_awemes` / `get_mix_aweme` |
+| 合集详情 | `GET /aweme/v1/web/mix/detail/` | `get_mix_detail` |
+| 合集 ID 回查（统一入口） | 三步探测 | `resolve_mix_ref` |
+| 用户作品 | `GET /aweme/v1/web/aweme/post/` | `iter_user_posts` |
+| 搜索（综合/视频/用户/直播） | `/aweme/v1/web/general/search/single/` 等 4 端点 | `search_general` / `search_video` / `search_user` / `search_live` |
+| 热榜（热点/种草/娱乐/挑战） | `GET /aweme/v1/web/hot/search/list/` | `get_hot_list` |
+| 收藏夹全家族 | `/aweme/v1/web/collects/*`（5 端点） | `iter_collects*` |
+| 评论 + 回复 | `/aweme/v1/web/comment/list/` + `/comment/list/reply/` | `iter_aweme_comments` / `iter_comment_replies` |
+| 关注 / 粉丝 | `/aweme/v1/web/user/following/list/` 等 | `iter_user_following` / `iter_user_followers` |
+| 话题作品列表 | `GET /aweme/v1/web/challenge/aweme/` | `iter_challenge_awemes` |
+| 直播详情 | 见 `live.py` | `get_live_room` / `get_live_room_by_room_id` |
 
-**签名（a_bogus）**：
-- 值由 **query string + User-Agent + 浏览器指纹** 计算，实现在 `sign/abogus.py`
-  （865 行，sm3 依赖 `gmssl` 包，pip 装的不是标准库）。
-- msToken 策略：优先取 cookie 文件里的 msToken；没有则用 **182 随机字符伪 token** 兜底
-  （参考项目同款做法，风控放行）。
-- `_signed_url()` 签名失败时**降级为不签名**发出（不阻断主流程），由重试层兜底。
+> `mix/detail/` 属于「可用但不可靠」：风控会 403。合集标题优先从列举第一页
+> 的 `mix_info.mix_name` 提取（`extract_mix_ref`），只有拿不到时才退回去探测。
 
-**反爬信号与重试（`_request_json`）**：
+#### 14.6.3 签名栈（三层，按执行顺序）
+
+1. **a_bogus**（M6.7，`sign/abogus.py`）—— 值由 **query string + User-Agent +
+   浏览器指纹** 算出，865 行，sm3 依赖 `gmssl`。签名失败降级为不签名发出。
+2. **WebSign**（M6.48，`sign/websign.py`）—— msToken + ttwid 的**实请求**签名包。
+   `DOUYIN_SIGNED_PATHS` 白名单现 **26 条**，只有在名单上的路径才过签。
+   新增端点时**必须同步加进白名单**，否则拿不到数据。
+3. **msToken**（M6.48 起，M6.53 补全）—— 优先取 cookie 文件里的 msToken；
+   没有则走 mssdk 签名拿真 token；再不行才用 182 随机字符**伪 token**兜底。
+
+**关于白名单的一条经验规则**：有上游参考时跟上游（M6.55 直播路径上游明确不签，
+那就不签）；没有上游时按**过签无害**惯例加上（M6.57 话题路径）—— 多签一个参数
+不会被拒，少签则直接拿不到数据，两者风险不对称。
+
+#### 14.6.4 uifid 与设备标识（已知局限）
+
+`webapi.py` 里 `self._uifid = uuid.uuid4().hex[:16]` 是 **UUID4 占位**，不是真实设备身份。
+目前平台未校验，但若开始校验 uifid 来源会回 403。
+
+（TikTokDL 侧的 `device_id.py` 已核实为**死代码**：`get_device_id()` 无任何调用者，
+`device_id` 只是用户手填可选配置，缺失仅降级空串不报错。故本项不移植，详见 M6.59。）
+
+#### 14.6.5 反爬信号与重试（`_request_json`）
+
 - **HTTP 200 但 body 为空 = 反爬**（最阴险的一种，不是成功也不是失败）→ 重新签名重试。
 - 403 / 429 / 461 / 471 / 5xx 同样进重试；延迟 1s / 2s / 5s 递增，最多 3 次。
 - **每次尝试都重新取 msToken**——同一 token 连发更容易被识别。
+- 未登录时写 `hint=need_login` 到 stderr，**不静默返回空**。
 
-**分页枚举（`iter_mix_awemes` / `iter_user_posts`）**：
-- 响应归一化为 `{items, has_more, max_cursor}`；用 `max_cursor` 翻页直到 `has_more=False`。
-- **cursor 卡死保护**：服务端偶发返回与上页相同的 cursor 却仍有 has_more，直接 break，
-  否则死循环。
+> **静默失败是这个领域最贵的教训**：TikTokDL 的 `tiktok_sign.py` 在签名出错时，
+> `/api/post/item_list/` 返回 **HTTP 200 + 空 body + `tt_orcas_res: 1`**，**无法从状态码区分**。
+> 所以任何新端点都要先问：「失败长什么样？能不能从响应里看出来？」
 
-**归一化（`aweme_to_media_item`）**：
-- `source_url` 一律写成 canonical `https://www.douyin.com/video/{aweme_id}`——下载阶段
-  走 yt-dlp，它只认这个形态。
-- title 取 `desc` 首行（多行文案会把文件名撑爆）；duration 从 ms 转 s；
-- `mix_info` 写进 `extra["mix_id"] / extra["mix_name"]`（供 GUI 反查与目录用）。
+#### 常见坑（按发生频率排序）
+
+| 症状 | 根因 | 处理 |
+|---|---|---|
+| 200 + 空 body | 反爬，常见于 msToken 失效 | 重新取 token + 重签名重试 |
+| 403 + `need_login` | cookie 过期或缺失 | `doubi auth douyin` 后传 `--cookies-file` |
+| mssdk 200 但 Set-Cookie 缺 msToken | `_MSSDK_STRDATA` blob 随官方 `runtime_bundler_*.js` 升级而过期 | 重新逆向替换 blob，同步更新 pin 测试 |
+| cursor 卡死 | 服务端返回与上页相同的 cursor 却仍有 `has_more` | `_cursor_paginate` 直接 break，否则死循环 |
+| 合集标题两次请求 | 拿到 detail 后丢掉已到手的 `mix_name` 又重新探一次 | M6.56 已修：一次 `extract_mix_ref` 拿全 |
+| 新端点返回空 | 路径没进 `DOUYIN_SIGNED_PATHS` | 加白名单 |
+
+#### 14.6.6 分页枚举与归一化
+
+- **两套分页器**：`_cursor_paginate`（先请第一页拿 cursor，M6.51 抽出，供收藏夹 /
+  话题等复用）与 `_search_paginate`（offset 风格）。都把响应归一化为
+  `{items, has_more, max_cursor}`，用 `max_cursor` 翻页直到 `has_more=False`。
+- **空 ID 不发请求**：`iter_challenge_awemes` 在 `ch_id` 为空时直接返回，不发网络请求——
+  调用方传空参是程序 bug，发出去只会烧风控预算。新端点请沿用这个惯例。
+- **归一化（`aweme_to_media_item`）**：
+  - `source_url` 一律写成 canonical `https://www.douyin.com/video/{aweme_id}`——下载阶段
+    走 yt-dlp，它只认这个形态。
+  - title 取 `desc` 首行（多行文案会把文件名撑爆）；duration 从 ms 转 s。
+  - `mix_info` 写进 `extra["mix_id"] / extra["mix_name"]`（供 GUI 反查与目录用）。
+  - 图集判定：`is_image = bool(aweme.get("images") or aweme_type in (150, 68))`→
+    `MediaType.IMAGE_ALBUM`。
+
+#### 14.6.7 上游对照：哪些真移植，哪些是 DouBi 原生
+
+参考项目 TikTokDownloader（MIT）里，**存在大量看着在岗、实际从未被调用的代码**。
+移植前必须核**调用链**，不能只读文件内容。已发现的四类：
+
+| 上游文件 | 真实状态 | DouBi 处理 |
+|---|---|---|
+| `src/encrypt/tiktok_sign.py` | **真在岗**（413 行，TikTok 侧签名器） | 不移植（抖音侧无触发点，且与 DouBi 签名算法不同） |
+| `src/encrypt/xGnarly.py` | **死代码**（仅类定义自身 + 一个 `__main__` 演示打印） | 不移植（M6.59） |
+| `src/encrypt/device_id.py` | **死代码**（`get_device_id()` 无调用者） | 不移植（M6.59） |
+| `src/interface/hashtag.py` / `slides.py` | **空壳**（`run()` 正文只有 `pass`） | 无源可抄，**DouBi 原生实现**（M6.57）/ 不实装（M6.58） |
+
+此外上游尚有两处可复用的真实逻辑：`src/interface/mix.py` 的 `Mix.__get_mix_id`
+与 `src/extract/extractor.py` 的 `extract_mix_id`，已被 M6.56 抽象为 `resolve_mix_ref` 接入。
+
+**跳过的一项**：上游 `src/tools/session.py` 用 `curl_cffi` 做 TLS 指纹伪装（默认 `chrome146`），
+且签名与 UA 强耦合、海外出口硬门槛。DouBi 现有 `httpx` + `aiohttp` 都不提供这个能力，
+移植量约 740 行且需新增依赖（影响安装体积与 NSIS 打包产物）。**2026-10-03 用户拍板不做**。
 
 ---
 
 ## 15. 测试体系
 
-**35 个测试文件，948 个用例收集**（0.3.1 实测）。pytest-asyncio `mode=auto`。
-发版基准回归是 **913 passed / 7 skipped**（排除 `test_theme_apply_gui.py` 的
-28 例，`QT_QPA_PLATFORM=offscreen`，**约 3 分钟**），跑法见 §15.2。
-（历史记录：M6.12 时是 27 文件 / 676 收集 / 672 passed。）
+**45 个测试文件，1264 个用例收集**（M6.59 实测）。pytest-asyncio `mode=auto`。
+发版基准回归（排除 `slow` 与 `gui` 两个 marker）是
+**1001 passed / 263 deselected，约 64 秒**：
+
+```
+python -m pytest tests/ -q -m "not slow and not gui" --no-header
+```
+
+历史：M6.12 时 27 文件 / 676 收集 / 672 passed；0.3.1 时 35 文件 / 948 收集；
+0.3.2 在 0.3.1 基础上 +33（M6.25–M6.42）；M6.45–M6.59 再 +329，
+主要来自新增的 9 个抖音采集专题测试文件（见下表）。
+
+| 测试文件 | 例数 | 对应里程碑 |
+|---|---|---|
+| `test_douyin_sign.py` | 27 | M6.48 / M6.53 签名栈 |
+| `test_douyin_search.py` | — | M6.49 搜索 4 子类 |
+| `test_douyin_hot.py` | 14 | M6.50 热榜 4 榜单 |
+| `test_douyin_favorites.py` | 20 | M6.51 收藏夹全家族 |
+| `test_douyin_comments.py` | 14 | M6.52 评论 + 回复 |
+| `test_douyin_user.py` | 13 | M6.54 关注 / 粉丝（DouBi 原生） |
+| `test_douyin_live.py` | 40 | M6.55 直播详情 + 多清晰度 |
+| `test_douyin_mix.py` | 55 | M6.56 合集标题 / ID 回查 |
+| `test_douyin_hashtag.py` | 32 | M6.57 话题作品列表（DouBi 原生） |
 
 > **「全量跑一次接近半小时」这个旧结论已被推翻（0.3.1）**：慢的不是「真实
 > `asyncio.sleep` 的退避与超时用例」，而是**一个文件**——
@@ -1434,10 +1680,10 @@ python scripts/run_full_tests.py --mode ci
 
 三个口径一个脚本，退出码即 pytest 退出码：
 
-| 命令 | 做什么 | 0.3.1 基线 |
+| 命令 | 做什么 | 0.3.2 基线 |
 | --- | --- | --- |
-| `python scripts/run_full_tests.py` | 默认 `local` 口径：装齐 extras，排除 `test_theme_apply_gui.py` | **913 passed / 7 skipped**，164.67s / 181.81s（两次实测） |
-| `python scripts/run_full_tests.py --mode ci` | 屏蔽 9 个可选依赖，复刻 CI 的 `pytest -q --maxfail=5` | **670 passed / 175 skipped / 102.06s** |
+| `python scripts/run_full_tests.py` | 默认 `local` 口径：装齐 extras，排除 `test_theme_apply_gui.py` | **946 passed / 7 skipped**，263.73s（0.3.2 实测） |
+| `python scripts/run_full_tests.py --mode ci` | 屏蔽 9 个可选依赖，复刻 CI 的 `pytest -q --maxfail=5` | 待 0.3.2 发版前实测 |
 | `python scripts/run_full_tests.py --mode gui-slow` | 只跑 `test_theme_apply_gui.py` | 已知会挂住，只在动过 `ui/theme.py` 时手工付代价 |
 
 未识别的参数原样透传给 pytest，所以 `python scripts/run_full_tests.py -k tray`

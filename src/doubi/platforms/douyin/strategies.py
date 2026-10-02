@@ -22,7 +22,8 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Optional
+from collections.abc import MutableMapping
+from typing import Any, Optional
 
 from ...core.models import (
     Author,
@@ -55,11 +56,24 @@ class ContainerStrategy(ABC):
         self.webapi: Optional[DouyinWebAPI] = None
 
     @abstractmethod
-    async def expand(self, url: str, *, max_count: int = 0) -> list[MediaItem]:
+    async def expand(
+        self,
+        url: str,
+        *,
+        max_count: int = 0,
+        error_sink: Optional[MutableMapping[str, Any]] = None,
+    ) -> list[MediaItem]:
         """Return a list of children for the user URL.
 
         ``max_count=0`` means "all available". Callers should
         truncate the result if a limit was requested.
+
+        ``error_sink`` (M6.47, caller-owned mutable mapping): strategies
+        that ride on the signed web API forward it to
+        :meth:`DouyinWebAPI.iter_user_posts` so the caller (the adapter's
+        ``expand``) can stamp ``item.extra["expand_error"]`` with
+        ``{reason, status_code, hint}`` for the user-facing badge. Pass
+        ``None`` to keep legacy swallow-and-log behaviour.
         """
         raise NotImplementedError
 
@@ -95,7 +109,13 @@ class PostStrategy(ContainerStrategy):
         super().__init__(api)
         self.webapi = webapi
 
-    async def expand(self, url: str, *, max_count: int = 0) -> list[MediaItem]:
+    async def expand(
+        self,
+        url: str,
+        *,
+        max_count: int = 0,
+        error_sink: Optional[MutableMapping[str, Any]] = None,
+    ) -> list[MediaItem]:
         sec_uid = self._extract_sec_uid(url)
         if not sec_uid:
             logger.warning("PostStrategy: not a user URL: %s", url)
@@ -107,7 +127,7 @@ class PostStrategy(ContainerStrategy):
         if self.webapi is not None:
             try:
                 awemes = await self.webapi.iter_user_posts(
-                    sec_uid, max_count=max_count,
+                    sec_uid, max_count=max_count, error_sink=error_sink,
                 )
             except Exception:
                 logger.warning(
@@ -155,7 +175,13 @@ class LikeStrategy(ContainerStrategy):
     description = "Download a user's liked videos (login required)"
     requires_login = True
 
-    async def expand(self, url: str, *, max_count: int = 0) -> list[MediaItem]:
+    async def expand(
+        self,
+        url: str,
+        *,
+        max_count: int = 0,
+        error_sink: Optional[MutableMapping[str, Any]] = None,
+    ) -> list[MediaItem]:
         sec_uid = self._extract_sec_uid(url)
         if not sec_uid:
             logger.warning("LikeStrategy: not a user URL: %s", url)
@@ -166,6 +192,14 @@ class LikeStrategy(ContainerStrategy):
                 "LikeStrategy: no cookies configured. "
                 "Run `doubi auth douyin` (M2.1) or set DOUBI_DOUYIN_COOKIES."
             )
+            # No cookies → guaranteed-empty: stamp a structured hint so
+            # the GUI shows the same 「需要登录抖音」 badge as the MIX
+            # path (M6.47).
+            if error_sink is not None:
+                error_sink.clear()
+                error_sink["reason"] = "no cookies configured"
+                error_sink["status_code"] = None
+                error_sink["hint"] = "need_login"
             return []
 
         # yt-dlp does not have a dedicated "user likes" extractor for

@@ -11,18 +11,18 @@
 | 形态 | 入口 | 状态 |
 |---|---|---|
 | 内核（库） | `doubi` | **✓** 平台无关内核 |
-| CLI | `doubi download -u URL` | **✓** download / auth / live / migrate / platforms |
+| CLI | `doubi download -u URL` | **✓** 17 个子命令，覆盖下载 / 采集 / 登录 / 服务 |
 | REST 服务 | `doubi serve` | **✓** FastAPI + 内存任务队列 |
 | 桌面 GUI | `doubi-gui` | **✓** PySide6 Fluent，7 套主题 |
-| MCP 工具 | `doubi-mcp` | **✓** stdio JSON-RPC 2.0 |
+| MCP 工具 | `doubi-mcp` | **✓** stdio JSON-RPC 2.0，7 个工具 |
 
 ## 支持平台
 
-- ✅ **抖音**（单条 / 合集批量 / 用户作品 / 弹窗链接；合集列举走签名 Web API，下载走 yt-dlp）
+- ✅ **抖音**（单条 / 图文 / 合集批量 / 用户作品 / 弹窗链接；**采集**走签名 Web API，下载走 yt-dlp）—— 采集能力见下表
 - ✅ **B 站**（`Bili23-Downloader` 接入；下载走 yt-dlp）
 - ✅ **YouTube**（watch / shorts / embed / live / youtu.be 短链；元数据走 yt-dlp `extract_info`，下载走 yt-dlp）
 - ✅ **通用视频站**（silidm / sv.baidu.com 等任意 URL：Playwright 启动 Chromium 嗅探 `<video>` 与网络请求，抓出 `m3u8` 与真视频容器后缀的直链；解析列表**只显示视频容器**，不会把 ts/aac 分片混进结果里）
-- 🚧 计划：TikTok 国际版 / 小红书 / 微博 / 快手
+- 🚧 计划：小红书 / 微博 / 快手（TikTok 国际版**已评估不做**，理由见 [docs/ROADMAP.md](docs/ROADMAP.md)）
 
 ## 获取
 
@@ -122,6 +122,51 @@ pip install -e ".[server]"
 pip install -e ".[all]"
 ```
 
+---
+
+## 抖音采集能力（M6.48–M6.59）
+
+抖音 web API 有签名风控，yt-dlp 拿不到容器类内容（合集 / 用户作品 / 搜索 / 收藏夹等），
+因此 DouBi 自建了一套签名管线。**以下能力全部可用**：
+
+| 能力 | CLI | 说明 |
+|---|---|---|
+| 单条视频 / 图文 | `download` | 走 yt-dlp |
+| 合集（列表 + 批量） | `mix` / `download` | 标题回查 + 翻页枚举；`/collection/{id}/{seq}` 也认 |
+| 用户作品列表 | `download` | USER 容器自动展开 |
+| **搜索** | `search` | 综合 / 视频 / 用户 / 直播 4 个子类，支持排序 / 时间 / 时长 / 粉丝量筛选 |
+| **热点榜** | `hot` | 热点榜 / 种草榜 / 娱乐榜 / 挑战榜 4 个榜单 |
+| **收藏夹全家族** | `favorites` | 收藏夹 + 收藏视频 / 合集 / 音乐 / 短剧 5 类 |
+| **评论 + 回复** | `comments` | 一级评论 + 嵌套回复 |
+| **关注 / 粉丝列表** | `user` | `--kind following\|followers`（DouBi 原生实现） |
+| **话题作品列表** | `hashtag` | 输入话题 id 或 `/challenge/detail/{id}` URL（DouBi 原生实现） |
+| **直播详情 + 多清晰度** | `live` | `--info` 只查 / `--quality` 直录；原画~流畅 6 档 |
+
+> 需要登录的能力（收藏夹 / 关注列表 / 部分评论）先跑 `doubi auth douyin`，
+> 再给对应子命令传 `--cookies-file ~/.doubi/cookies/douyin.txt`。
+> 未登录时会拿到 `403` 并在 stderr 给出 `hint=need_login` 提示，而不是静默返回空。
+
+### CLI 子命令一览
+
+```
+doubi platforms                     列出已注册平台
+doubi download -u URL               下载（支持 -f 文件批量、--sniff 嗅探）
+doubi auth  {status,bilibili,douyin} 登录状态 / B 站扫码 / 抖音登录
+doubi live  -u URL                  直播录制（--info 查详情、--quality 选清晰度）
+doubi search KEYWORD                抖音搜索（--type general|video|user|live）
+doubi hot                           抖音热点榜（--board 选榜单）
+doubi favorites                     抖音收藏夹（--kind 选类型）
+doubi comments AWEME_ID             抖音评论（--replies 含回复）
+doubi user SEC_UID                  抖音关注 / 粉丝列表（--kind）
+doubi mix MIX_ID                    抖音合集回查（--list 枚举、--from-aweme 反查）
+doubi hashtag CH_ID                 抖音话题作品列表（--sort）
+doubi migrate                       从旧版数据库一次性迁移
+doubi serve                         REST API 服务
+doubi mcp                           MCP stdio 桥
+```
+
+全部子命令支持 `--help`。
+
 ## 快速使用
 
 ```bash
@@ -130,24 +175,30 @@ doubi platforms
 
 # 下载单条
 doubi download -u "https://www.bilibili.com/video/BV1xx411c7mD" -o ./Downloaded
-
-# 下载抖音
 doubi download -u "https://www.douyin.com/video/7123456789012345678" -o ./Downloaded
 
-# 下载 YouTube（watch / shorts / youtu.be 短链均可）
+# 下载 YouTube（watch / shorts / youtu.be 都行）
 doubi download -u "https://www.youtube.com/watch?v=dQw4w9WgXcQ" -o ./Downloaded
 doubi download -u "https://youtu.be/dQw4w9WgXcQ" -o ./Downloaded
 
-# 批量下载抖音合集（APP 分享的 iesdouyin 链接同样支持）
+# 下载抖音合集（APP 分享的 iesdouyin 链接同样支持）
 doubi download -u "https://www.douyin.com/collection/7647083357288957995" -o ./Downloaded
-```
 
-启动图形界面：
+# 采集（需要登录的先 doubi auth douyin）
+doubi search "猫" --type video --max 50
+doubi hot --board hot
+doubi favorites --kind mix --cookies-file ~/.doubi/cookies/douyin.txt
+doubi mix 7647083357288957995 --list
+doubi hashtag https://www.douyin.com/challenge/detail/1598294112437763 --sort latest
 
-```bash
+# 直播：先看有什么清晰度，再指定录制
+doubi live -u https://live.douyin.com/123456 --info
+doubi live -u https://live.douyin.com/123456 --quality UHD
+
+# 图形界面
 doubi-gui
 
-# 本次启动指定主题（default_light / default_dark / doubi / deep_sea / morandi / eye_care / high_contrast）
+# 指定主题（default_light / default_dark / doubi / deep_sea / morandi / eye_care / high_contrast）
 doubi-gui --theme deep_sea
 ```
 
@@ -275,7 +326,7 @@ DouBi/
 ├── tools/nsis/                    # 内置便携版 NSIS，clone 下来即可打包
 ├── screenshots/                   # 文档用截图
 ├── docs/                          # 见下方「文档」表
-└── tests/                         # 27 个测试文件，676 条用例
+└── tests/                         # 46 个测试文件，1276 条用例（其中逻辑层 1013）
 ```
 
 > 仓库里不含 `Bili23-Downloader-main/` 与 `douyin-downloader-main/` 这两个被整合的
@@ -293,12 +344,14 @@ DouBi/
 | [docs/ICONS.md](docs/ICONS.md) | 图标管线（SVG 模板 / 主题换色 / 多档位 QIcon） |
 | [docs/UI_DESIGN.md](docs/UI_DESIGN.md) | UI 设计语言：5 条视觉原则、7 套主题包配色表、token 与共享组件规范 |
 | [docs/BUILD.md](docs/BUILD.md) | 打包全流程：`.ico` 生成、PyInstaller onedir、NSIS 安装包、踩坑记录 |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | 后续待完善功能：排期、验收标准、已评估不做项与理由 |
 | [INTEGRATION_PLAN.md](INTEGRATION_PLAN.md) | 原始整合方案 |
 
 ## 整合来源
 
 - `douyin-downloader-main` —— URL 解析、命名规则、清单文件、Cookie 编排、UI 入口
 - `Bili23-Downloader-main` —— 桌面 GUI（Fluent Design）、MCP、命名规则引擎、附加产物（弹幕/字幕/NFO）
+- `TikTokDownloader-master` —— 抖音 / TikTok 签名与采集接口参考（M6.48–M6.59 的验证基准）
 - `yt-dlp` —— 实际下载与媒体探测引擎
 
 ## 许可
@@ -309,4 +362,5 @@ GPL-3.0。详见 `LICENSE`。
 
 - [jiji262/douyin-downloader](https://github.com/jiji262/douyin-downloader)（MIT）
 - [ScottSloan/Bili23-Downloader](https://github.com/ScottSloan/Bili23-Downloader)（GPL-3.0）
+- [JoeanAmier/TikTokDownloader](https://github.com/JoeanAmier/TikTokDownloader)（MIT）—— 采集接口与签名策略参考
 - [yt-dlp/yt-dlp](https://github.com/yt-dlp/yt-dlp)（Unlicense）

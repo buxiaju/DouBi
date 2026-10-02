@@ -171,7 +171,6 @@ def test_no_source_file_imports_an_excluded_module():
         "PySide6.QtWebEngineCore",
         "PySide6.QtWebEngineWidgets",
         "PySide6.QtMultimedia",
-        "PIL",
         "imageio_ffmpeg",
     ],
 )
@@ -180,6 +179,13 @@ def test_the_heavy_hitters_stay_excluded(must_exclude: str):
 
     QtWebEngineCore 一进依赖图就会拖来 Qt6WebEngineCore.dll(194MB)
     + devtools .pak(72MB) + qtwebengine_locales(44MB)，约 321 MB。
+
+    PIL 不在这个清单里——M6.16 起 B 站登录对话框用
+    ``QRCode.render_pil`` 输出真实二维码图片给 ``QImage`` 吃
+    (``QImage.Format_Grayscale8``)。Pillow 已经是 ``qrcode`` 的运行时
+    依赖,排掉 PIL 等于引入隐式 ImportError。这条历史决定见
+    ``scripts/build_exe.py::EXCLUDE_MODULES`` 注释与
+    ``docs/CHANGELOG.md`` M6.16 段。
     """
     mod = _load_build_module()
     assert must_exclude in mod.EXCLUDE_MODULES

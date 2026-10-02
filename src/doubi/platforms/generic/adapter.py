@@ -1,9 +1,15 @@
-"""Generic platform adapter — 任意 URL 的兜底嗅探。
+"""Generic platform adapter — 任意 URL 的最末兜底嗅探。
 
-注册到 :class:`doubi.core.registry.PlatformRegistry` 时 ``priority=-1``，
-让 ``registry.detect()`` 在所有 normal-priority 适配器（douyin / bilibili
-/ youtube）都不匹配后才走 generic。``match_url()`` 对任何 ``http(s)://``
-URL 返回 True，触发 Sniffer 跑 headless Chromium + catch_lite.js 嗅探。
+注册到 :class:`doubi.core.registry.PlatformRegistry` 时 ``priority=-2``，
+让 ``registry.detect()`` 在 ``ytdlp_generic``（priority=-1）都不匹配后才
+走 generic。``match_url()`` 对任何 ``http(s)://`` URL 返回 True，触发
+Sniffer 跑 headless Chromium + catch_lite.js 嗅探。
+
+兜底顺序（M6.17+）：
+
+1. 具体平台（douyin / bilibili / youtube，priority=0）
+2. ytdlp_generic（priority=-1，yt-dlp 1800+ extractor 全覆盖）
+3. **generic**（priority=-2，Playwright 嗅探——专攻 yt-dlp 不识别的国产 HLS）
 
 返回形态：COLLECTION 容器，N 个 child（每个 sniffed URL 一个）。复用
 抖音合集 / B 站合集的现有 pipeline.expand() 路径——UI 表格已支持层级展开。
@@ -50,7 +56,7 @@ class GenericAdapter(PlatformAdapter):
     platform = Platform.GENERIC
     display_name = "通用嗅探"
     url_patterns = [_URL_PATTERN]
-    priority = -1   # 兜底；normal 适配器优先匹配
+    priority = -2   # 最末兜底：ytdlp_generic (priority=-1) 解析失败后才走 Playwright 嗅探
 
     # 类级别 config 缓存：app 启动时调用 ``set_config(cfg)`` 注入；不调
     # 用就 ``parse()`` 时 lazy 调 ``load_config()`` 读默认 YAML。后者会

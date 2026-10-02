@@ -29,12 +29,16 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Any
 
-from .. import __version__
+from .. import (
+    __version__,
+)
+from .. import (
+    platforms as _platforms_module,  # noqa: F401  -- side-effect: trigger PlatformRegistry.register for all built-in adapters
+)
 from ..core.config import load_config
 from ..core.engine_loader import build_default_pipeline
 from ..core.models import DownloadOptions
 from ..core.registry import PlatformRegistry
-from .. import platforms  # noqa: F401  -- ensure all platform adapters are registered on startup
 from .jobs import JobManager
 from .schemas import DownloadRequest, ParseRequest
 from .security import (
@@ -152,6 +156,7 @@ def _build_options() -> DownloadOptions:
         manifest=cfg.manifest_path,
         proxy=cfg.proxy,
         rate_limit=cfg.rate_limit,
+        cookies_file=cfg.cookies_file,
     )
 
 

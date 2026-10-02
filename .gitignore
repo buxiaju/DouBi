@@ -142,9 +142,17 @@ cython_debug/
 /douyin-downloader-main/
 /cat-catch-master/
 /N_m3u8DL-CLI-master/
+# TikTokDownloader-master/ 是 M6.48–M6.59 采集能力移植时的上游参考物，
+# 与上面几个一样「只是参考、运行和构建都不依赖」，README 已声明不入库。
+# 此处补上排除规则——原先漏了这一条，git status 会一直挂着它。
+/TikTokDownloader-master/
 /Downloaded/
 # 本地调试草稿（截图脚本、渲染探针等，不进版本库）
 /.scratch/
+# 根目录一次性探针草稿：没有归属目录、任何文档都不引用，与 /scripts/diag_*
+# 那种「CHANGELOG 记录在案的工具」不同。要保留就移进 /scripts/ 再从忽略里去掉。
+/check_douyin_api.py
+/scratch_probe_ytdlp.py
 
 # 运行时产物：本机下载历史与任务库，含个人浏览痕迹，不入库
 /doubi.db

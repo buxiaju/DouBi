@@ -154,3 +154,164 @@ def test_available_languages_and_labels_same_length_and_order():
 
 def test_default_language_is_zh_cn():
     assert i18n.DEFAULT_LANGUAGE == "zh_CN"
+
+
+# ---------------------------------------------------------------------------
+# M6.27 — login dialog 词表完整性
+# ---------------------------------------------------------------------------
+#
+# M6.25 (B 站) + M6.26 (抖音) 改写了两套登录对话框，把硬编码中文搬进
+# ``tr()``。这两条测试钉死「未来谁动 dialog 字符串都得用 tr」，否则
+# 切换到 en 时 UI 会露出半中半英。
+
+
+#: M6.25 + M6.26 dialog 实际用到的 key 白名单。如果 dialog 里新增了
+#: 硬编码字符串，源语言会先有这个 key；测试做反向检查——这个白名单
+#: 里的 key 必须在源语言都有译文（保护性的，反向防止删 key 漏 UI）。
+M6_LOGIN_KEYS = frozenset(
+    {
+        # B 站 dialog — 窗口 / 标签
+        "login.bili.window_title",
+        "login.bili.tab.qr",
+        "login.bili.tab.import_cookie",
+        # B 站 dialog — QR tab
+        "login.bili.qr.hint",
+        "login.bili.qr.generating",
+        "login.bili.qr.preparing",
+        "login.bili.qr.waiting_scan",
+        "login.bili.qr.scanned_confirm",
+        "login.bili.qr.success_saving",
+        "login.bili.qr.expired",
+        "login.bili.qr.poll_error",
+        "login.bili.qr.url_label",
+        "login.bili.qr.refresh_button",
+        "login.bili.qr.copy_button",
+        "login.bili.qr.fail_prefix",
+        "login.bili.qr.success_path",
+        "login.bili.qr.render_fail",
+        # B 站 dialog — 导入 Cookie tab
+        "login.bili.import.title",
+        "login.bili.import.hint",
+        "login.bili.import.pick_button",
+        "login.bili.import.placeholder",
+        "login.bili.import.confirm_button",
+        # 抖音 dialog
+        "login.dy.window_title",
+        "login.dy.hint",
+        "login.dy.qr.loading",
+        "login.dy.qr.screenshot_decode_fail",
+        "login.dy.status.starting",
+        "login.dy.status.starting_headless",
+        "login.dy.status.qr_ready",
+        "login.dy.checkbox.headed",
+        "login.dy.checkbox.headed_tooltip",
+        "login.dy.fail_with_hint",
+        "login.dy.success",
+        # settings 卡片上的说明文案
+        "login.bili.settings_detail",
+        "login.dy.settings_detail",
+        # 共享
+        "common.close",
+    }
+)
+
+
+def test_m6_login_keys_all_present_in_source_locale():
+    """M6.25 + M6.26 dialog 实际用到的 key 都必须在源语言存在。
+
+    反向防漏：加白名单后，删 / 改 key 都会被这个测试拦下来。
+    """
+    source = _load_json(i18n.DEFAULT_LANGUAGE)
+    missing = sorted(M6_LOGIN_KEYS - set(source))
+    assert not missing, f"源语言缺 M6 login key: {missing}"
+
+
+def test_m6_login_keys_fully_translated_in_every_language():
+    """``available_languages`` 中每种语言都必须翻译这套 M6 词表。
+
+    ``test_translation_keys_cover_source_in_every_language`` 已经检查了
+    全量覆盖——这里把它收紧到 M6 子集，让失败信息更聚焦。
+    """
+    for lang in i18n.available_languages():
+        if lang == i18n.DEFAULT_LANGUAGE:
+            continue
+        table = _load_json(lang)
+        missing = sorted(M6_LOGIN_KEYS - set(table))
+        assert not missing, f"{lang}.json 缺 M6 login key: {missing}"
+
+
+@pytest.mark.parametrize(
+    "key, kwargs",
+    [
+        ("login.bili.qr.url_label", {"url": "https://x", "length": 32}),
+        ("login.bili.qr.poll_error", {"message": "boom"}),
+        ("login.bili.qr.fail_prefix", {"error": "ETIMEDOUT"}),
+        ("login.bili.qr.success_path", {"path": "/tmp/x.txt"}),
+        ("login.bili.qr.render_fail", {"error": "OOM"}),
+        ("login.dy.fail_with_hint", {"error": "nope"}),
+    ],
+)
+def test_m6_login_keys_format_placeholders(key, kwargs):
+    """所有带 ``{...}`` 占位符的 key 都能被 ``tr(**kwargs)`` 正常填充。
+
+    反向：M6.25/26 新加的 key 里好几个用了 ``{url}`` / ``{path}`` 等
+    占位符，缺一个会变成「KeyError 弹窗」——这个测试钉死每个 key 都能
+    用 happy-path kwargs 走通。
+    """
+    i18n.set_language("en")
+    out = i18n.tr(key, **kwargs)
+    # 译文不应再含裸 ``{name}`` 占位符——所有占位符必须已被填实
+    for k in kwargs:
+        assert f"{{{k}}}" not in out, (
+            f"placeholder {{{k}}} not substituted in {key}: {out!r}"
+        )
+    # 也应该非空
+    assert out.strip(), f"{key} produced empty translation"
+
+
+def test_login_dialog_strings_use_tr_not_hardcoded_zh():
+    """M6.25/26 改完后，``login_dialog.py`` 不应再出现 login.* 域外
+    硬编码的「扫码 / 登录 / 二维码 / 导入 / 抖音 / B 站」中文词
+    （这些都该走 tr()）。
+
+    这个测试刻意避开模块 docstring（顶层那些中文是给读者看的，可以
+    留）和工具提示字符串（\"\"\"…\"\"\" 多行也会被命中——放过）。它
+    只扫 setText / setPlaceholderText / setToolTip / addItem /
+    setWindowTitle 这五个实打实落在 UI 上的方法调用。
+    """
+    import re
+    from pathlib import Path
+    p = Path("src/doubi/ui/dialogs/login_dialog.py")
+    assert p.is_file()
+    text = p.read_text(encoding="utf-8")
+    # 找 setText / setWindowTitle / addItem / setToolTip / setPlaceholderText
+    # 后面的字符串字面量。允许 ``tr(...)``、空串 \"\"、其他变量赋值。
+    pattern = re.compile(
+        r"""(?P<call>\.set(?:Text|WindowTitle|PlaceholderText|ToolTip)\(|\.addItem\()
+            \s*
+            (?P<arg>
+                tr\([^)]*\)              # 走 tr
+              | \"\"                     # 空串
+              | f?[\"'][^\"']*[\"']      # 普通字符串
+            )
+        """,
+        re.VERBOSE,
+    )
+    hardcoded_zh: list[tuple[int, str]] = []
+    for m in pattern.finditer(text):
+        arg = m.group("arg")
+        if not arg or arg.startswith("tr(") or arg == "\"\"":
+            continue
+        # 跳过纯模板字符串 / 变量
+        if arg.startswith("f\"") or arg.startswith("f'"):
+            continue
+        # 看是否含 login.* 中文关键词
+        if any(zh in arg for zh in (
+            "扫码", "二维码", "导入", "抖音", "B 站", "确认", "关闭",
+        )):
+            line = text[: m.start()].count("\n") + 1
+            hardcoded_zh.append((line, arg))
+    assert not hardcoded_zh, (
+        "login_dialog.py 还有硬编码中文没走 tr():\n"
+        + "\n".join(f"  line {ln}: {a}" for ln, a in hardcoded_zh)
+    )

@@ -38,7 +38,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 logger = logging.getLogger("doubi.core.auth.browser_login")
 
@@ -111,11 +111,17 @@ class _BaseBrowserLogin:
         timeout: float = 180.0,
         wait_selector: Optional[str] = None,
         user_agent: Optional[str] = None,
+        qr_callback: Optional[Callable[["object"], None]] = None,
     ):
         self.headless = headless
         self.timeout = timeout
         self.wait_selector = wait_selector
         self.user_agent = user_agent
+        # M6.26: optional hook fired after ``on_page_ready`` but before
+        # ``_wait_for_success``. The GUI passes a callable that takes
+        # the Playwright ``Page`` and snapshots the QR element. The
+        # default headed flow (no callback) is unchanged.
+        self.qr_callback = qr_callback
 
     def _run_browser(self, on_page_ready=None) -> "LoginResult":
         """Open Chromium, navigate to a page set up by the subclass,
@@ -123,7 +129,12 @@ class _BaseBrowserLogin:
 
         ``on_page_ready(page)`` is called once after the page is
         loaded — subclasses can use it to render the QR or click
-        a "login" button. Returns a :class:`LoginResult`.
+        a "login" button. If a ``qr_callback`` was supplied it is
+        called **once** right after ``on_page_ready`` with the same
+        Page so the caller can take a screenshot of the QR element
+        and surface it in the GUI.
+
+        Returns a :class:`LoginResult`.
         """
         require_playwright()
         import time
@@ -147,6 +158,18 @@ class _BaseBrowserLogin:
                 page = context.new_page()
                 if on_page_ready is not None:
                     on_page_ready(page)
+                # M6.26: hand the Page to the QR snapshotter exactly
+                # once, *after* the page is set up but *before* we
+                # start polling for cookies — that way the QR is on
+                # screen by the time the user reaches for their phone.
+                if self.qr_callback is not None:
+                    try:
+                        self.qr_callback(page)
+                    except Exception:  # noqa: BLE001
+                        # QR snapshot is best-effort; if the selector
+                        # is wrong or the page isn't loaded yet, the
+                        # login should still proceed.
+                        logger.exception("qr_callback raised (continuing)")
                 self._wait_for_success(page, context)
                 # Cookies are visible via context.cookies() the moment
                 # _wait_for_success returns — the previous
@@ -200,6 +223,9 @@ class URLChangeLogin(_BaseBrowserLogin):
     Used by B 站: after the user scans the QR with the B 站 app,
     the page redirects to ``https://www.bilibili.com/`` (or similar
     domain-bearing URL) with the session cookies now set.
+
+    M6.31: 接受 ``qr_callback`` 钩子(对齐 M6.26 抖音 ``CookieSetLogin``),
+    让 GUI 能在不弹浏览器窗口的前提下把 QR 元素截图扒下来。
     """
 
     def __init__(
@@ -211,8 +237,12 @@ class URLChangeLogin(_BaseBrowserLogin):
         headless: bool = False,
         timeout: float = 180.0,
         user_agent: Optional[str] = None,
+        qr_callback: Optional[Callable[["object"], None]] = None,
     ):
-        super().__init__(headless=headless, timeout=timeout, user_agent=user_agent)
+        super().__init__(
+            headless=headless, timeout=timeout, user_agent=user_agent,
+            qr_callback=qr_callback,
+        )
         self.start_url = start_url
         self.success_url_pattern = success_url_pattern
         self.cookie_domains = list(cookie_domains)
@@ -266,8 +296,13 @@ class CookieSetLogin(_BaseBrowserLogin):
         timeout: float = 180.0,
         min_present: Optional[int] = None,
         user_agent: Optional[str] = None,
+        qr_callback: Optional[Callable[["object"], None]] = None,
+        pre_login_hook: Optional[Callable[["object"], None]] = None,
     ):
-        super().__init__(headless=headless, timeout=timeout, user_agent=user_agent)
+        super().__init__(
+            headless=headless, timeout=timeout, user_agent=user_agent,
+            qr_callback=qr_callback,
+        )
         self.start_url = start_url
         self.required_cookies = list(required_cookies)
         self.cookie_domains = list(cookie_domains)
@@ -277,10 +312,26 @@ class CookieSetLogin(_BaseBrowserLogin):
             raise ValueError("min_present must be >= 1")
         if self.min_present > len(self.required_cookies):
             raise ValueError("min_present cannot exceed len(required_cookies)")
+        # M6.37: optional hook fired after ``page.goto`` but before
+        # ``qr_callback`` / ``_wait_for_success``. Douyin uses this to
+        # click the "扫码登录" button on the homepage before the QR
+        # modal appears (headed-only — headless always gets verify-
+        # captcha'd by byte-dance, no QR to surface either way).
+        self.pre_login_hook = pre_login_hook
 
     def run(self) -> LoginResult:
         def _on_ready(page):
             page.goto(self.start_url, wait_until="domcontentloaded", timeout=30_000)
+            # M6.37: run the platform-specific pre-login hook (e.g.
+            # click the "扫码登录" button to surface the QR modal).
+            if self.pre_login_hook is not None:
+                try:
+                    self.pre_login_hook(page)
+                except Exception:  # noqa: BLE001
+                    # Pre-login is best-effort — if the click misses
+                    # the page may still load the QR via a different
+                    # selector, or fail outright via _wait_for_success.
+                    logger.exception("pre_login_hook raised (continuing)")
         return self._run_browser(on_page_ready=_on_ready)
 
     def _wait_for_success(self, page, context) -> None:

@@ -1,4 +1,17 @@
-"""Tests for M3.1: QR login, cookie validation/parsing, WBI signing, auth CLI."""
+"""Tests for M3.1: QR login, cookie validation/parsing, WBI signing, auth CLI.
+
+M6.16 added three new flows to :mod:`doubi.platforms.bilibili.qr_login`:
+
+* :meth:`QRCode.render_pil` — true QR image (8-bit grayscale) for the GUI.
+* :func:`cookies_to_netscape` + :func:`save_cookies_to_drive` — convert
+  the cookies that land in the QR session's httpx jar into a Netscape
+  file on disk, no Playwright involved.
+* :func:`bilibili_login_via_qr` — the end-to-end orchestrator the GUI
+  dialog calls. It generates → polls → extracts → persists in one go.
+
+These tests cover the new pieces in isolation and end-to-end with a
+mocked httpx layer; they do **not** touch the network.
+"""
 
 from __future__ import annotations
 
@@ -19,11 +32,17 @@ if str(SRC) not in sys.path:
 from doubi.cli import auth_cmd  # noqa: E402
 from doubi.platforms.bilibili import auth as bili_auth  # noqa: E402
 from doubi.platforms.bilibili.qr_login import (  # noqa: E402
+    BILIBILI_COOKIE_DOMAIN,
     CODE_NOT_SCANNED,
     CODE_SCANNED,
     CODE_SUCCESS,
+    QRCode,
     QRStatus,
     QRSession,
+    REQUIRED_BILIBILI_COOKIES,
+    bilibili_login_via_qr,
+    cookies_to_netscape,
+    save_cookies_to_drive,
     wait_for_login,
 )
 from doubi.platforms.bilibili.wbi import (  # noqa: E402
@@ -568,12 +587,12 @@ def test_cli_auth_bilibili_import_validation_fails(tmp_path, monkeypatch):
 
 
 def test_cli_auth_douyin_uses_browser_login(capsys, monkeypatch):
-    """Without an import / legacy-json path, douyin auth tries Playwright."""
+    """Without an import path, douyin auth tries Playwright."""
     # Mock out the browser login so we don't need a real browser
     monkeypatch.setattr(auth_cmd, "_try_browser_login", lambda *a, **kw: None)
 
     rc = auth_cmd.cmd_auth_douyin(argparse_stub(
-        import_file=None, legacy_json=None, output=None, headless=False, timeout=180.0,
+        import_file=None, output=None, headless=False, timeout=180.0,
     ))
     # _try_browser_login returns None → CLI falls through to the
     # "Browser-based login didn't work" message + return 1
@@ -597,3 +616,331 @@ class _NS:
 
 def argparse_stub(**kw) -> "_NS":
     return _NS(**kw)
+
+
+# ---------------------------------------------------------------------------
+# M6.16 — QR image rendering, Netscape serialization, end-to-end orchestrator
+# ---------------------------------------------------------------------------
+
+
+class _FakeResp:
+    """Minimal stand-in for ``httpx.Response`` used by the QR tests."""
+
+    def __init__(self, data, status_code=200):
+        self._data = data
+        self.status_code = status_code
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            import httpx
+            raise httpx.HTTPStatusError(
+                "error", request=MagicMock(), response=MagicMock()
+            )
+
+    def json(self):
+        return self._data
+
+
+def test_qrcode_render_pil_returns_l_mode_image():
+    """M6.16: QR is a real ``PIL.Image`` in 8-bit grayscale.
+
+    The GUI converts this directly to a ``QPixmap``. If Pillow is not
+    installed we skip the test (the project treats it as a hard dep,
+    but we don't want CI to fail on a stripped env).
+    """
+    pytest.importorskip("PIL")
+    pytest.importorskip("qrcode")
+    qr = QRCode(
+        qrcode_key="K" * 32,
+        url="https://passport.bilibili.com/h5-app/login?qrcode_key=" + "K" * 32,
+    )
+    img = qr.render_pil()
+    assert img.mode == "L", f"expected L, got {img.mode}"
+    assert img.size[0] > 100 and img.size[1] > 100
+
+
+def test_cookies_to_netscape_preserves_order_and_extras():
+    """Required cookies come first, extras appended; netscape tab-separated."""
+    cookies = {
+        # Note: not in REQUIRED order — should be reordered.
+        "bili_jct": "jct",
+        "SESSDATA": "sess,with,commas",   # commas must NOT break the row
+        "DedeUserID": "42",
+        "sid": "q1w2",
+        "extra_cookie": "foo",
+        "": "empty-name-should-be-skipped",
+    }
+    out = cookies_to_netscape(cookies)
+    lines = out.splitlines()
+    # Header + 5 cookies (SESSDATA, bili_jct, DedeUserID, sid, extra_cookie)
+    assert lines[0] == "# Netscape HTTP Cookie File"
+    assert len(lines) == 6, f"unexpected line count: {lines!r}"
+
+    # Required cookies in declared order
+    required_seq = [l for l in lines[1:] if l.split("\t")[5] in REQUIRED_BILIBILI_COOKIES]
+    actual_seq = [l.split("\t")[5] for l in required_seq]
+    assert actual_seq == list(REQUIRED_BILIBILI_COOKIES), (
+        f"order mismatch: {actual_seq} vs {REQUIRED_BILIBILI_COOKIES}"
+    )
+
+    # Comma-bearing SESSDATA value must be in the same line, not split
+    cookie_rows = [l for l in lines[1:] if l.count("\t") == 6]
+    sess_line = next(l for l in cookie_rows if l.split("\t")[5] == "SESSDATA")
+    assert sess_line.endswith("\tsess,with,commas")
+    # Domain is hardcoded
+    assert sess_line.split("\t")[0] == BILIBILI_COOKIE_DOMAIN
+    # include_subdomains = TRUE
+    assert sess_line.split("\t")[1] == "TRUE"
+    # Expiry is the long-lived sentinel
+    assert sess_line.split("\t")[4] == "9999999999"
+
+
+def test_save_cookies_to_drive_creates_parent_and_writes(tmp_path: Path):
+    """save_cookies_to_drive must ``mkdir -p`` the parent directory."""
+    target = tmp_path / "deep" / "nested" / "cookies" / "bilibili.txt"
+    res = save_cookies_to_drive(
+        {"SESSDATA": "x", "bili_jct": "y", "DedeUserID": "1", "sid": "2"},
+        target,
+    )
+    assert res == target
+    assert target.exists()
+    text = target.read_text(encoding="utf-8")
+    assert text.startswith("# Netscape HTTP Cookie File")
+    assert "SESSDATA\tx" in text
+
+
+def test_bilibili_login_via_qr_end_to_end(tmp_path: Path, monkeypatch):
+    """M6.31: the pure-httpx orchestrator can still drive the
+    generate→poll→SUCCESS protocol, but B 站's web app no longer
+    issues the login cookies via Set-Cookie on the poll response (or
+    even on a follow-up GET of ``data.url``). So the orchestrator
+    raises a "缺少关键 cookie" error after a successful scan.
+
+    This test pins that behaviour: the scan still completes (we see
+    a SUCCESS on_status callback, we get back a populated ``PollResult``),
+    but the orchestrator refuses to write a half-populated cookie
+    file.
+
+    Users who want the cookies to actually land on disk must go
+    through the Playwright path (:func:`bili_auth.browser_login`)
+    used by the GUI in M6.31 / by the CLI ``--browser`` flag.
+    """
+    import httpx
+
+    calls: list[tuple[str, dict | None]] = []
+
+    async def fake_get(self, url, params=None, **kw):
+        calls.append((url, params))
+        if "qrcode/generate" in url:
+            return _FakeResp(
+                {
+                    "code": 0,
+                    "message": "ok",
+                    "ttl": 1,
+                    "data": {
+                        "qrcode_key": "K" * 32,
+                        "url": "https://passport.bilibili.com/h5-app/login?qrcode_key=" + "K" * 32,
+                    },
+                }
+            )
+        if "qrcode/poll" in url:
+            n = sum(1 for u, _ in calls if "qrcode/poll" in u)
+            if n < 3:
+                return _FakeResp(
+                    {"code": CODE_NOT_SCANNED, "message": "not scanned", "data": {"timestamp": 0}}
+                )
+            # SUCCESS — but B 站's pure-httpx path no longer Set-Cookie here.
+            return _FakeResp(
+                {
+                    "code": CODE_SUCCESS,
+                    "message": "ok",
+                    "ttl": 1,
+                    "data": {
+                        "refresh_token": "rt_xyz",
+                        "timestamp": 1700000000,
+                        "url": "https://www.bilibili.com/follow-up",
+                    },
+                }
+            )
+        if "follow-up" in url:
+            # M6.30 used to seed cookies here; M6.31 explicitly
+            # documents that the follow-up GET does NOT yield
+            # Set-Cookie in real B 站, so this returns empty cookies.
+            return _FakeResp({"code": 0, "message": "ok"})
+        raise AssertionError(f"unexpected URL: {url}")
+
+    events: list[tuple] = []
+
+    def on_qr(qr):
+        events.append(("qr", qr.qrcode_key[:6]))
+
+    def on_status(result):
+        events.append(("st", result.status.name, result.code))
+
+    cookie_path = tmp_path / "cookies" / "bilibili.txt"
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    with pytest.raises(RuntimeError, match="缺少关键 cookie"):
+        asyncio.run(
+            bilibili_login_via_qr(
+                cookie_path,
+                poll_interval=0.0,
+                max_wait=5.0,
+                on_qr_ready=on_qr,
+                on_status=on_status,
+            )
+        )
+    # The orchestrator must NOT have written a half-populated cookie file.
+    assert not cookie_path.exists()
+    # The QR protocol ran end-to-end: we got on_qr with the key B 站 returned
+    # and the final on_status was SUCCESS.
+    assert any(e[0] == "qr" and e[1] == "K" * 6 for e in events)
+    assert ("st", "SUCCESS", CODE_SUCCESS) in events
+
+
+def test_bilibili_login_via_qr_raises_when_qrcode_expires(tmp_path: Path, monkeypatch):
+    """An EXPIRED poll result should raise ``RuntimeError``, not save cookies."""
+    import httpx
+
+    async def fake_get(self, url, params=None, **kw):
+        if "qrcode/generate" in url:
+            return _FakeResp(
+                {"code": 0, "message": "ok", "ttl": 1,
+                 "data": {"qrcode_key": "K" * 32, "url": "https://example/"}}
+            )
+        if "qrcode/poll" in url:
+            return _FakeResp(
+                {"code": 86038, "message": "expired", "data": {"timestamp": 0}}
+            )
+        raise AssertionError(url)
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    cookie_path = tmp_path / "cookies" / "bilibili.txt"
+    with pytest.raises(RuntimeError, match="QR 登录失败"):
+        asyncio.run(
+            bilibili_login_via_qr(
+                cookie_path, poll_interval=0.0, max_wait=5.0
+            )
+        )
+    assert not cookie_path.exists(), "no cookies file should be written on failure"
+
+
+def test_bilibili_login_via_qr_raises_when_required_cookies_missing(
+    tmp_path: Path, monkeypatch
+):
+    """If B 站 returned SUCCESS but no SESSDATA landed in the jar we fail loud.
+
+    This guards against the case where B 站 quietly changes the cookie
+    name in a future release — the GUI must show a clear error rather
+    than writing a half-populated cookie file that ``bilibili_login_via_browser``
+    would have to retry.
+    """
+    import httpx
+
+    async def fake_get(self, url, params=None, **kw):
+        if "qrcode/generate" in url:
+            return _FakeResp(
+                {"code": 0, "message": "ok", "ttl": 1,
+                 "data": {"qrcode_key": "K" * 32, "url": "https://example/"}}
+            )
+        if "qrcode/poll" in url:
+            # ``code: 0`` but we deliberately do NOT seed SESSDATA / bili_jct.
+            # Include a non-empty data.url so the orchestrator tries the
+            # follow-up GET — which our fake also does not seed cookies on.
+            return _FakeResp(
+                {"code": CODE_SUCCESS, "message": "ok", "ttl": 1,
+                 "data": {
+                     "refresh_token": "rt",
+                     "timestamp": 0,
+                     "url": "https://www.bilibili.com/follow-up-no-cookies",
+                 }}
+            )
+        if "follow-up-no-cookies" in url:
+            # No Set-Cookie; do nothing.
+            return _FakeResp({"code": 0, "message": "ok"})
+        raise AssertionError(url)
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    cookie_path = tmp_path / "cookies" / "bilibili.txt"
+    with pytest.raises(RuntimeError, match="缺少关键 cookie"):
+        asyncio.run(
+            bilibili_login_via_qr(
+                cookie_path, poll_interval=0.0, max_wait=5.0
+            )
+        )
+    assert not cookie_path.exists()
+
+
+def test_bilibili_login_via_qr_url_followup_raises_but_clear_error(
+    tmp_path: Path, monkeypatch
+):
+    """M6.30: when the follow-up GET of ``data.url`` *raises* (network
+    error / 4xx / 5xx), the orchestrator must still surface a
+    "缺少关键 cookie" error rather than a confusing ``httpx`` /
+    connection error. The user should know to retry or fall back to
+    "Import Cookie".
+    """
+    import httpx
+
+    async def fake_get(self, url, params=None, **kw):
+        if "qrcode/generate" in url:
+            return _FakeResp(
+                {"code": 0, "message": "ok", "ttl": 1,
+                 "data": {"qrcode_key": "K" * 32, "url": "https://example/"}}
+            )
+        if "qrcode/poll" in url:
+            return _FakeResp(
+                {"code": CODE_SUCCESS, "message": "ok", "ttl": 1,
+                 "data": {
+                     "refresh_token": "rt",
+                     "timestamp": 0,
+                     "url": "https://www.bilibili.com/will-fail",
+                 }}
+            )
+        if "will-fail" in url:
+            # Simulate a transport error on the follow-up GET.
+            raise httpx.ConnectError("simulated network blip")
+        raise AssertionError(url)
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    cookie_path = tmp_path / "cookies" / "bilibili.txt"
+    with pytest.raises(RuntimeError, match="缺少关键 cookie"):
+        asyncio.run(
+            bilibili_login_via_qr(
+                cookie_path, poll_interval=0.0, max_wait=5.0
+            )
+        )
+    assert not cookie_path.exists()
+
+
+def test_bilibili_login_via_qr_handles_no_data_url_on_success(
+    tmp_path: Path, monkeypatch
+):
+    """M6.30 defensive: if B 站 ever returns SUCCESS without a
+    ``data.url`` (older API variant / a-b test), the orchestrator
+    must not crash on ``result.url`` access — it should fall through
+    to the "缺少关键 cookie" branch.
+    """
+    import httpx
+
+    async def fake_get(self, url, params=None, **kw):
+        if "qrcode/generate" in url:
+            return _FakeResp(
+                {"code": 0, "message": "ok", "ttl": 1,
+                 "data": {"qrcode_key": "K" * 32, "url": "https://example/"}}
+            )
+        if "qrcode/poll" in url:
+            return _FakeResp(
+                {"code": CODE_SUCCESS, "message": "ok", "ttl": 1,
+                 "data": {"refresh_token": "rt", "timestamp": 0, "url": None}}
+            )
+        raise AssertionError(url)
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    cookie_path = tmp_path / "cookies" / "bilibili.txt"
+    with pytest.raises(RuntimeError, match="缺少关键 cookie"):
+        asyncio.run(
+            bilibili_login_via_qr(
+                cookie_path, poll_interval=0.0, max_wait=5.0
+            )
+        )
+    assert not cookie_path.exists()

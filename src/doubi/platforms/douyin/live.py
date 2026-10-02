@@ -1,4 +1,4 @@
-"""Douyin live-stream recording (M2.1).
+"""Douyin live-stream recording (M2.1) + room detail probe (M6.55).
 
 Thin wrapper around yt-dlp for ``https://live.douyin.com/{room_id}``
 URLs. yt-dlp already understands 抖音's FLV / HLS streams, so the
@@ -10,6 +10,11 @@ heavy lifting is delegated. We add:
 * Sidecar room-metadata JSON (``*_room.json``) mirroring the
   douyin-downloader behavior, so the user has a snapshot of the
   room at the moment the recording started.
+* (M6.55) Recording a *specific* quality: the signed web API hands us
+  a direct FLV / HLS pull URL, which we hand to yt-dlp instead of the
+  page URL. ``room_id`` / ``title`` / ``metadata`` become explicit
+  parameters then, because the pull URL carries none of them and the
+  page-URL probe would be both wrong and wasteful.
 
 Usage::
 
@@ -140,6 +145,9 @@ class LiveRecorder:
         output_root: Path,
         max_duration: float = 0.0,
         container: str = "mp4",
+        room_id: Optional[str] = None,
+        title: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
     ) -> LiveRecordResult:
         """Record ``url`` to ``output_root``.
 
@@ -147,25 +155,45 @@ class LiveRecorder:
         recorder will return when yt-dlp exits naturally (stream
         closed) or when the wall-clock duration exceeds
         ``max_duration``.
+
+        M6.55 additions (all optional, all keyword-only):
+
+        * ``room_id`` — skip URL parsing. Required when ``url`` is a
+          direct FLV / HLS pull URL rather than a ``live.douyin.com``
+          page URL.
+        * ``title`` — skip the room probe entirely for the filename.
+        * ``metadata`` — a pre-fetched room record (e.g. the
+          :func:`~doubi.platforms.douyin.webapi.normalize_live_room`
+          dict) to write into the sidecar instead of probing via
+          yt-dlp. Passing it also avoids a network round-trip.
         """
-        room_id = _extract_room_id(url)
-        if not room_id:
+        resolved_room_id = (room_id or "").strip() or _extract_room_id(url)
+        if not resolved_room_id:
             raise ValueError(f"could not extract room_id from {url!r}")
 
         output_root = Path(output_root).expanduser()
         output_root.mkdir(parents=True, exist_ok=True)
 
         started = time.monotonic()
-        probe = await asyncio.to_thread(_probe_room, room_id)
-        title = probe.get("title") or f"douyin_live_{room_id}"
-        safe_title = _safe_filename(title)
+        if metadata is None:
+            probe = await asyncio.to_thread(_probe_room, resolved_room_id)
+        else:
+            probe = dict(metadata)
+        resolved_title = (
+            (title or "").strip()
+            or str(probe.get("title") or "")
+            or f"douyin_live_{resolved_room_id}"
+        )
+        safe_title = _safe_filename(resolved_title)
 
-        out_path = output_root / f"{datetime.now():%Y%m%d_%H%M}_{safe_title}_{room_id}.{container}"
+        out_path = output_root / (
+            f"{datetime.now():%Y%m%d_%H%M}_{safe_title}_{resolved_room_id}.{container}"
+        )
 
         # Save room metadata sidecar
         meta_path = out_path.with_name(out_path.stem + "_room.json")
         meta = {
-            "room_id": room_id,
+            "room_id": resolved_room_id,
             "url": url,
             "probed_at": int(time.time()),
             "metadata": probe,
@@ -177,10 +205,11 @@ class LiveRecorder:
             logger.warning("could not write room metadata: %s", exc)
 
         result = await asyncio.to_thread(
-            self._record_sync, url, out_path, max_duration,
+            self._record_sync, url, out_path, max_duration, room_id=resolved_room_id,
         )
         result.elapsed = time.monotonic() - started
         result.room_metadata = probe
+        result.title = resolved_title
         return result
 
     # ------------------------------------------------------------------
@@ -188,7 +217,12 @@ class LiveRecorder:
     # ------------------------------------------------------------------
 
     def _record_sync(
-        self, url: str, out_path: Path, max_duration: float
+        self,
+        url: str,
+        out_path: Path,
+        max_duration: float,
+        *,
+        room_id: str = "",
     ) -> LiveRecordResult:
         # yt-dlp's `live_from_start` only works for HLS; FLV is
         # auto-detected. `hls_use_mpegts` makes HLS output a single
@@ -211,7 +245,9 @@ class LiveRecorder:
         if self.proxy:
             opts["proxy"] = self.proxy
 
-        room_id = _extract_room_id(url)
+        # M6.55: ``room_id`` may be supplied explicitly because ``url``
+        # can be a direct FLV / HLS pull URL, which carries no room id.
+        room_id = room_id or _extract_room_id(url)
         result = LiveRecordResult(
             room_id=room_id,
             title="",
