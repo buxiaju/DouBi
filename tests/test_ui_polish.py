@@ -55,13 +55,16 @@ def test_doubi_brand_theme_registered():
     from doubi.ui.theme import THEMES
     assert "doubi" in THEMES, "豆比紫主题应该作为品牌默认主题存在"
     pack = THEMES["doubi"]
-    # 配色与图标同色系
     assert pack.dark is True
-    # 强调色取自图标嘴巴/腮红的橙色
-    assert pack.accent.lower() in ("#f59e6a",), \
-        f"豆比紫主色应当是橙色 #f59e6a（图标嘴/腮红），实际是 {pack.accent}"
+    # 0.3.4：重调为「中性蓝灰 + 极少琥珀点缀」——
+    # 主色变 #5b8cd6，琥珀保留在 status_running/progress_normal。
+    assert pack.accent.lower() == "#5b8cd6", \
+        f"豆比紫主色应当是中性蓝灰 #5b8cd6，实际是 {pack.accent}"
     # 渐变要存在——品牌 hero 用得上
     assert pack.gradient_header, "豆比紫必须有 header 渐变"
+    # 琥珀保留在「进行中」视觉锚点
+    assert pack.tokens["status_running_fg"] == "#f59e6a"
+    assert pack.tokens["progress_normal"] == "#f59e6a"
 
 
 def test_every_theme_has_full_token_set():

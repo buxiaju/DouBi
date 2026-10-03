@@ -707,85 +707,169 @@ def _cmd_hot_sync(args: argparse.Namespace) -> int:
 # 0.3.3 P1-4 — share the actual fetching logic with MCP / REST so the
 # three frontends always emit the same record schema. See
 # ``mcp/server.py`` and ``server/app.py`` for callers.
+#
+# 0.3.4 — add ``platform=`` arg: ``douyin`` (default, the 0.3.3
+# behaviour) or ``bilibili``. Same record shape, different upstream.
+# Keeping a single function (instead of ``collect_*_douyin`` /
+# ``collect_*_bilibili``) means MCP / REST / GUI only need one set of
+# ``platform`` enum values.
 async def collect_search_async(
     *,
     keyword: str,
     channel: str = "general",
+    platform: str = "douyin",
     max_count: int = 20,
     cookies_file: Optional["Path"] = None,
     proxy: Optional[str] = None,
     timeout: float = 15.0,
 ) -> list[dict[str, Any]]:
-    """``doubi search`` core. Returns raw records (aweme / user / room).
+    """``doubi search`` core. Returns raw records (aweme / user / room
+    for 抖音; video / user for B 站).
 
     The CLI emits each record as one JSONL row with a synthesised
     ``share_url``; callers can do the same.
-    """
-    from doubi.platforms.douyin.webapi import DouyinWebAPI
 
-    api = DouyinWebAPI(
-        cookies_file=cookies_file,
-        proxy=proxy,
-        timeout=timeout,
+    :param platform: ``douyin`` (default) or ``bilibili``. The 4 抖音
+        channels stay unchanged; B 站 currently supports ``video`` and
+        ``user`` (mapping to ``search_type=video`` / ``bili_user``).
+    """
+    if platform == "douyin":
+        from doubi.platforms.douyin.webapi import DouyinWebAPI
+
+        api = DouyinWebAPI(
+            cookies_file=cookies_file,
+            proxy=proxy,
+            timeout=timeout,
+        )
+        error_sink: dict[str, Any] = {}
+        try:
+            if channel == "general":
+                results = await api.search_general(
+                    keyword, count=10, max_count=max_count, error_sink=error_sink,
+                )
+            elif channel == "video":
+                results = await api.search_video(
+                    keyword, count=10, max_count=max_count, error_sink=error_sink,
+                )
+            elif channel == "user":
+                results = await api.search_user(
+                    keyword, count=10, max_count=max_count, error_sink=error_sink,
+                )
+            elif channel == "live":
+                results = await api.search_live(
+                    keyword, count=10, max_count=max_count, error_sink=error_sink,
+                )
+            else:
+                raise ValueError(
+                    f"unknown douyin search channel: {channel!r} "
+                    "(expected general / video / user / live)"
+                )
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"search failed: {exc}") from exc
+        return list(results or [])
+
+    if platform == "bilibili":
+        from doubi.platforms.bilibili.webapi import BilibiliWebAPI
+
+        if channel not in {"video", "user"}:
+            raise ValueError(
+                f"unknown bilibili search channel: {channel!r} "
+                "(expected 'video' or 'user')"
+            )
+        api = BilibiliWebAPI(
+            cookies_file=str(cookies_file) if cookies_file else None,
+            proxy=proxy,
+            timeout=timeout,
+        )
+        try:
+            results = await api.search(
+                keyword, channel=channel, max_count=max_count,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"bilibili search failed: {exc}") from exc
+        finally:
+            await api.close()
+        return list(results or [])
+
+    raise ValueError(
+        f"unknown platform: {platform!r} (expected 'douyin' or 'bilibili')"
     )
-    error_sink: dict[str, Any] = {}
-    try:
-        if channel == "general":
-            results = await api.search_general(
-                keyword, count=10, max_count=max_count, error_sink=error_sink,
-            )
-        elif channel == "video":
-            results = await api.search_video(
-                keyword, count=10, max_count=max_count, error_sink=error_sink,
-            )
-        elif channel == "user":
-            results = await api.search_user(
-                keyword, count=10, max_count=max_count, error_sink=error_sink,
-            )
-        else:
-            results = await api.search_live(
-                keyword, count=10, max_count=max_count, error_sink=error_sink,
-            )
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(f"search failed: {exc}") from exc
-    return list(results or [])
 
 
 async def collect_hot_async(
     *,
     board: str = "all",
+    platform: str = "douyin",
     max_count: int = 50,
     cookies_file: Optional["Path"] = None,
     proxy: Optional[str] = None,
     timeout: float = 15.0,
 ) -> list[dict[str, Any]]:
-    """``doubi hot`` core. Returns hot-word rows annotated with ``board``."""
-    from doubi.platforms.douyin.webapi import (
-        ALL_HOT_BOARDS,
-        HOT_BOARD_NAMES,
-        DouyinWebAPI,
-    )
+    """``doubi hot`` core. Returns hot-word / video rows.
 
-    api = DouyinWebAPI(
-        cookies_file=cookies_file,
-        proxy=proxy,
-        timeout=timeout,
-    )
-    targets = list(ALL_HOT_BOARDS) if board == "all" else [board]
-    error_sinks = {b: {} for b in targets}
-    aggregate: list[dict[str, Any]] = []
-    for b in targets:
-        rows = await api.get_hot_list(
-            b, max_count=max_count, error_sink=error_sinks[b],
+    :param platform: ``douyin`` (default) → 抖音 4 牌榜; ``bilibili``
+        → ``main/hotword``（默认 top 50 热搜词）+ ``ranking/v2``（可选）。
+    :param board: 抖音 board 名（``all`` / ``positive`` / 等等）;
+        B 站模式下无效（保留是为了 CLI/MCP 参数不破坏）。
+    """
+    if platform == "douyin":
+        from doubi.platforms.douyin.webapi import (
+            ALL_HOT_BOARDS,
+            HOT_BOARD_NAMES,
+            DouyinWebAPI,
         )
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            record = dict(row)
-            record["board"] = b
-            record.setdefault("board_name", HOT_BOARD_NAMES.get(b, b))
-            aggregate.append(record)
-    return aggregate
+
+        api = DouyinWebAPI(
+            cookies_file=cookies_file,
+            proxy=proxy,
+            timeout=timeout,
+        )
+        targets = list(ALL_HOT_BOARDS) if board == "all" else [board]
+        error_sinks = {b: {} for b in targets}
+        aggregate: list[dict[str, Any]] = []
+        for b in targets:
+            rows = await api.get_hot_list(
+                b, max_count=max_count, error_sink=error_sinks[b],
+            )
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                record = dict(row)
+                record["board"] = b
+                record.setdefault("board_name", HOT_BOARD_NAMES.get(b, b))
+                aggregate.append(record)
+        return aggregate
+
+    if platform == "bilibili":
+        from doubi.platforms.bilibili.webapi import BilibiliWebAPI
+
+        api = BilibiliWebAPI(
+            cookies_file=str(cookies_file) if cookies_file else None,
+            proxy=proxy,
+            timeout=timeout,
+        )
+        try:
+            # B 站默认两条流一起拉：热搜词 (top 50) + 全站热门 (top 20)。
+            # GUI / CLI 的表格一屏装不下 50 行热搜词 + 20 行热门，
+            # 一起给反而更完整。
+            hot_words = await api.get_hotword(max_count=max_count)
+            popular = await api.get_popular(max_count=20)
+            for r in hot_words:
+                r["board"] = "hotword"
+                r["board_name"] = "B 站热搜词"
+            for r in popular:
+                r["board"] = "popular"
+                r["board_name"] = "B 站热门"
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"bilibili hot failed: {exc}") from exc
+        finally:
+            await api.close()
+        # 热搜词在前：用户的关注点是「现在大家在搜什么」，其次才是热门视频。
+        return hot_words + popular
+
+    raise ValueError(
+        f"unknown platform: {platform!r} (expected 'douyin' or 'bilibili')"
+    )
 
 
 async def _cmd_hot(args: argparse.Namespace) -> int:

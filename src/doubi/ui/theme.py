@@ -114,8 +114,12 @@ DEFAULT_THEME = "default_light"
 # 字体优先级：优先中文 / 跨平台通用名，回退到系统默认无衬线。
 # 不用"Microsoft YaHei"等带空格的本地化名：PySide6 在不同平台下
 # 字体匹配算法略有差异，无空格名能保证每处渲染一致。
+# 字体优先级：优先中文 / 跨平台通用名，回退到系统默认无衬线。
+# 不用"Microsoft YaHei"等带空格的本地化名：PySide6 在不同平台下
+# 字体匹配算法略有差异，无空格名能保证每处渲染一致。
+# Windows 上 hinting 关键——YaHei UI 的渲染器比 PingFang 稳得多。
 FONT_FAMILY = (
-    "'PingFang SC', 'HarmonyOS Sans SC', 'Microsoft YaHei UI', "
+    "'Microsoft YaHei UI', 'PingFang SC', 'HarmonyOS Sans SC', "
     "'Source Han Sans SC', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', "
     "Segoe UI, sans-serif"
 )
@@ -124,13 +128,16 @@ FONT_FAMILY_MONO = (
     "Consolas, 'Courier New', monospace"
 )
 
-# 排版尺度（所有主题共用）
-TYPE_H1 = 22       # 页面大标题
-TYPE_H2 = 16       # 卡片标题
-TYPE_H3 = 14       # 分组标题
-TYPE_BODY = 13     # 正文
-TYPE_CAPTION = 12  # 次级说明
-TYPE_TINY = 11     # 极小说明
+# 排版尺度（所有主题共用）。
+# 0.3.4 整体调大 1~4 px：上一版在 1080p/缩放 125% 下显得「糊」。
+# H1 22→26 是页面大标题的最高规格；H3 14→17 让卡片分组的下级标题与正文
+# 拉开明显档次（之前的 14 与 BODY 13 太接近，看着像同一行）。
+TYPE_H1 = 26       # 页面大标题
+TYPE_H2 = 18       # 卡片标题
+TYPE_H3 = 17       # 分组标题
+TYPE_BODY = 14     # 正文
+TYPE_CAPTION = 13  # 次级说明
+TYPE_TINY = 12     # 极小说明
 
 # 间距尺度
 SPACE_XS = 4
@@ -317,33 +324,43 @@ THEMES: dict[str, ThemePack] = {
         ),
     ),
     # ----------------------------------------------------------------
-    # 品牌主题——「豆比紫」
+    # 品牌主题——「豆比紫」0.3.4 重调
     #
-    # 配色直接来自产品图标：深紫底色 + 琥珀/朱砂强调色。
-    # 这是 DouBi 自家最有辨识度的视觉。
-    # 排在两套「默认」主题之后，让下拉与导航栏循环先出现中性选项。
+    # 0.3.3 是「深紫底 + 琥珀强调」——视觉太冲，深紫色在长会话里
+    # 容易显沉闷、文件多时整张界面糊在一起。重调后改为「中性蓝灰
+    # 底 + 极少琥珀点缀」：
+    #
+    # * bg_base  #1a2030  中性蓝灰，比深邃紫更冷静
+    # * bg_layer #212a3c  上浮一档，足够让卡片浮起来
+    # * accent   #5b8cd6  中性蓝；上一版琥珀橙在长列表里太抢眼
+    # * status_running / progress_normal 保留琥珀作为「正在进行」的
+    #   视觉锚点 — 这是这套主题里琥珀唯一出场的地方
+    #
+    # 仍排在两套「默认」主题之后，让下拉与导航栏循环先出现中性选项。
     # ----------------------------------------------------------------
     "doubi": ThemePack(
         name="doubi",
         label="豆比紫",
         dark=True,
-        accent="#f59e6a",          # 琥珀橙，取自图标嘴/腮红色
-        accent_soft="rgba(245, 158, 106, 0.16)",
-        accent_strong="#d97a45",
-        bg_elevated="#241a3d",     # 卡片/弹层上浮色
+        accent="#5b8cd6",          # 中性蓝灰，让琥珀回归「点缀」位
+        accent_soft="rgba(91, 140, 214, 0.16)",
+        accent_strong="#7aa4e1",
+        bg_elevated="#212a3c",     # 卡片/弹层上浮色
         shadow="rgba(0, 0, 0, 0.45)",
-        gradient_header=("#2c1d4a", "#1a1230"),
+        gradient_header=("#1f2a3d", "#161e2c"),
         tokens={
             **_dark_tokens(
-                bg_base="#1a1230",    # 图标主色：深邃紫
-                bg_layer="#211842",
-                bg_hover="#2d2160",
-                text_primary="#f5ecff",
-                text_muted="#a89dc4",
+                bg_base="#1a2030",    # 主背景：中性蓝灰（不再是深邃紫）
+                bg_layer="#212a3c",
+                bg_hover="#2c3650",
+                text_primary="#f0f4fa",  # 微微偏冷的白
+                text_muted="#8d9bb0",     # 与 bg 拉开对比度
             ),
             # 主题专属覆写
-            "row_odd": "rgba(255, 255, 255, 0.04)",
-            "row_even": "rgba(255, 255, 255, 0.08)",
+            "row_odd": "rgba(255, 255, 255, 0.035)",
+            "row_even": "rgba(255, 255, 255, 0.07)",
+            # 「正在运行」是这套主题里琥珀唯一出场的地方。
+            # 让进度条在静态蓝灰海里跳出来，而不是把所有强调色都染蓝。
             "status_running_fg": "#f59e6a",
             "status_running_bg": "rgba(245, 158, 106, 0.18)",
             "status_paused_fg": "#f0c879",
@@ -352,8 +369,8 @@ THEMES: dict[str, ThemePack] = {
             "status_completed_bg": "rgba(122, 223, 176, 0.18)",
             "status_failed_fg": "#ff8a8a",
             "status_failed_bg": "rgba(255, 138, 138, 0.18)",
-            "status_cancelled_fg": "#b0a8c8",
-            "status_cancelled_bg": "rgba(176, 168, 200, 0.16)",
+            "status_cancelled_fg": "#9aa6bc",
+            "status_cancelled_bg": "rgba(154, 166, 188, 0.16)",
             "progress_normal": "#f59e6a",
             "progress_success": "#7adfb0",
             "progress_error": "#ff8a8a",
@@ -538,19 +555,29 @@ def muted_qss(size: int = TYPE_CAPTION) -> str:
 
     原来各页面散落着 ``setStyleSheet("color: gray;")``：字面量 gray 在暗色
     背景上对比度不足，而且换主题时不会刷新。统一走本函数后四处行为一致。
+
+    字重 500：上一版默认 400 让次级说明看起来「糊」，与正文区分只靠颜色。
+    现在它和正文同字重，靠字号 + 颜色拉开层级。
     """
-    return f"font-family: {FONT_FAMILY}; font-size: {size}px; color: {token('text_muted')};"
+    return (
+        f"font-family: {FONT_FAMILY}; "
+        f"font-size: {size}px; "
+        f"font-weight: 500; "
+        f"color: {token('text_muted')};"
+    )
 
 
 def heading_qss(level: int = 1) -> str:
     """页面/卡片大标题的 QSS。
 
-    等级映射字号：1 → 22, 2 → 16, 3 → 14。统一用主题主色加粗，让标题
+    等级映射字号：1 → 26, 2 → 18, 3 → 17。统一用主题主色加粗，让标题
     在所有主题里都「跳出来」——而不是用 text_primary 的死黑色块。
+    字重：H1/H2 → 700（页面骨架最显眼）；H3 → 600（卡片分组）；
+    muted_qss → 500（次级说明，默认偏弱）。
     """
     sizes = {1: TYPE_H1, 2: TYPE_H2, 3: TYPE_H3}
     size = sizes.get(level, TYPE_BODY)
-    weight = "600" if level <= 2 else "500"
+    weight = "700" if level <= 2 else "600"
     color = token("text_primary")
     return (
         f"font-family: {FONT_FAMILY}; "
@@ -561,10 +588,15 @@ def heading_qss(level: int = 1) -> str:
 
 
 def body_qss(size: int = TYPE_BODY) -> str:
-    """正文文字的 QSS。"""
+    """正文文字的 QSS。
+
+    字重 500 而非默认 400：中文字符在低字重 + 默认渲染下会显得发灰，
+    尤其是在 125% 缩放场景。500 是「正常」的视觉重量。
+    """
     return (
         f"font-family: {FONT_FAMILY}; "
         f"font-size: {size}px; "
+        f"font-weight: 500; "
         f"color: {token('text_primary')};"
     )
 

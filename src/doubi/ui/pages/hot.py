@@ -1,8 +1,12 @@
-"""Hot page (0.3.3 / P1-3) — GUI front for ``doubi hot``.
+"""Hot page (0.3.3 / P1-3 + 0.3.4 / UI 完善) — GUI front for ``doubi hot``.
 
-Shows the 抖音 4 boards (positive / entertainment / society /
-challenge) in a single table. Mirrors :meth:`DouyinWebAPI.get_hot_list`
-exactly so the GUI stays in sync with the CLI / MCP / REST siblings.
+抖音 4 牌榜 + B 站热搜词 / 热门视频。所有数据共用同一个
+``collect_hot_async(platform=...)``，CLI / MCP / REST 同步。
+
+The ``platform`` segmented control at the top is the only switch
+between 抖音 (4 boards aggregated) and B 站 (hot-word list + popular
+videos together). ``board`` for 抖音 still maps to the original
+``positive`` / ``entertainment`` / ``society`` / ``challenge`` keys.
 """
 from __future__ import annotations
 
@@ -12,14 +16,31 @@ from typing import Optional
 logger = logging.getLogger("doubi.ui.pages.hot")
 
 
-#: Hot-board dropdown options, parallel to ``doubi hot --board``.
-BOARD_OPTIONS = [
-    ("all",          "全部榜单"),
-    ("positive",     "热搜"),
-    ("entertainment", "娱乐"),
-    ("society",      "社会"),
-    ("challenge",    "挑战"),
+#: Platforms shown on the page. Order matters: first = default.
+PLATFORM_OPTIONS = [
+    ("douyin",   "抖音"),
+    ("bilibili", "B 站"),
 ]
+
+#: Board dropdown options per platform. B 站 has no board — its ``hotword``
+#: + ``popular`` streams are aggregated inside :func:`collect_hot_async`,
+#: so the GUI shows just an "all" sentinel.
+PLATFORM_BOARDS: dict[str, list[tuple[str, str]]] = {
+    "douyin": [
+        ("all",           "全部榜单"),
+        ("positive",      "热搜"),
+        ("entertainment", "娱乐"),
+        ("society",       "社会"),
+        ("challenge",     "挑战"),
+    ],
+    "bilibili": [
+        ("all", "热搜词 + 热门视频"),
+    ],
+}
+DEFAULT_BOARD: dict[str, str] = {
+    "douyin":   "all",
+    "bilibili": "all",
+}
 
 
 def build_hot_widgets():
@@ -28,7 +49,8 @@ def build_hot_widgets():
         QWidget, QVBoxLayout, QHBoxLayout, QStackedWidget,
     )
     from qfluentwidgets import (
-        PushButton, ComboBox, TableWidget, InfoBar, InfoBarPosition,
+        PushButton, ComboBox, SegmentedWidget, TableWidget,
+        InfoBar, InfoBarPosition,
     )
 
     from ...core.config import load_config
@@ -59,25 +81,33 @@ def build_hot_widgets():
             self._header = PageHeader(self)
             self._header.set_title("热榜")
             self._header.set_subtitle(
-                "抖音官方榜单（热搜 / 娱乐 / 社会 / 挑战），"
-                "按 `--board` 选项过滤。数据来自 CLI `doubi hot` 同源。"
+                "抖音官方榜单（热搜 / 娱乐 / 社会 / 挑战）+ "
+                "B 站热搜词 / 热门视频。数据来自 CLI `doubi hot` 同源。"
             )
             self.refresh_btn = PushButton("刷新", self)
             self.refresh_btn.clicked.connect(self._on_refresh)
             self._header.add_action(self.refresh_btn)
             outer.addWidget(self._header)
 
+            # ---- 平台切换 ----
+            self._platform_tabs = SegmentedWidget(self)
+            for value, label in PLATFORM_OPTIONS:
+                self._platform_tabs.addItem(routeKey=value, text=label)
+            self._platform_tabs.setCurrentItem(PLATFORM_OPTIONS[0][0])
+            self._platform_tabs.currentItemChanged.connect(self._on_platform_changed)
+            outer.addWidget(self._platform_tabs)
+
+            # ---- 牌 / 类型选择 ----
             row = QHBoxLayout()
             row.setSpacing(SPACE_MD)
             self._board = ComboBox(self)
-            for value, label in BOARD_OPTIONS:
-                self._board.addItem(label, userData=value)
-            self._board.setCurrentIndex(0)
+            self._refresh_board_options(PLATFORM_OPTIONS[0][0])
             self._board.currentIndexChanged.connect(self._on_refresh)
             row.addWidget(self._board, 1)
             row.addStretch(3)
             outer.addLayout(row)
 
+            # ---- 状态条 ----
             stats_row = QHBoxLayout()
             stats_row.setSpacing(SPACE_MD)
             self._stat_hits = StatChip(self)
@@ -108,6 +138,22 @@ def build_hot_widgets():
 
             self._stack.setCurrentWidget(self._empty_state)
 
+        def _refresh_board_options(self, platform: str) -> None:
+            self._board.blockSignals(True)
+            self._board.clear()
+            for value, label in PLATFORM_BOARDS.get(platform, []):
+                self._board.addItem(label, userData=value)
+            default = DEFAULT_BOARD.get(platform)
+            if default is not None:
+                for i in range(self._board.count()):
+                    if self._board.itemData(i) == default:
+                        self._board.setCurrentIndex(i)
+                        break
+            self._board.blockSignals(False)
+
+        def _on_platform_changed(self, route_key: str) -> None:
+            self._refresh_board_options(route_key)
+
         # ----------------------------------------------------------
 
         def _on_refresh(self) -> None:
@@ -132,18 +178,28 @@ def build_hot_widgets():
                 )
 
         async def _run_hot(self) -> None:
-            from doubi.platforms.douyin.webapi import DouyinWebAPI
+            from doubi.cli.main import collect_hot_async
 
-            board = self._board.currentData() or "all"
+            platform_route = (
+                self._platform_tabs.currentItem()
+                or PLATFORM_OPTIONS[0][0]
+            )
+            board = self._board.currentData() or DEFAULT_BOARD[platform_route]
             cookies_file = (
                 self._cfg.cookies_file if self._cfg.cookies_file else None
             )
-            api = DouyinWebAPI(
-                cookies_file=cookies_file,
-                proxy=self._cfg.proxy,
-                timeout=15.0,
-            )
-            rows = await api.get_hot_list(board=board, max_rows=50)
+            try:
+                rows = await collect_hot_async(
+                    board=board,
+                    platform=platform_route,
+                    max_count=50,
+                    cookies_file=cookies_file,
+                    proxy=self._cfg.proxy,
+                    timeout=15.0,
+                )
+            except Exception as exc:
+                raise
+
             self._rows = list(rows or [])
             self._stat_hits.set_value(len(self._rows))
             if self._rows:
@@ -161,24 +217,30 @@ def build_hot_widgets():
 
             self.table.setRowCount(len(self._rows))
             for i, row in enumerate(self._rows):
-                # 抖音榜单里「榜单名」= ``board``，「标题」= ``title``，
-                # 「热度」= ``hot_value``，「详情」= ``share_url``。
-                # 任何字段缺失就用空串兜底，避免单元格显示 ``None``。
+                board_name = (
+                    row.get("board_name")
+                    or row.get("board")
+                    or ""
+                )
+                title = row.get("title") or row.get("word") or ""
+                hot_value = (
+                    row.get("hot_value")
+                    if row.get("hot_value") is not None
+                    else row.get("score")
+                    or ""
+                )
+                detail = row.get("share_url") or ""
                 self.table.setItem(
-                    i, 0,
-                    QTableWidgetItem(str(row.get("board") or "")),
+                    i, 0, QTableWidgetItem(str(board_name)),
                 )
                 self.table.setItem(
-                    i, 1,
-                    QTableWidgetItem(str(row.get("title") or "")),
+                    i, 1, QTableWidgetItem(str(title)),
                 )
                 self.table.setItem(
-                    i, 2,
-                    QTableWidgetItem(str(row.get("hot_value") or "")),
+                    i, 2, QTableWidgetItem(str(hot_value)),
                 )
                 self.table.setItem(
-                    i, 3,
-                    QTableWidgetItem(str(row.get("share_url") or "")),
+                    i, 3, QTableWidgetItem(str(detail)),
                 )
 
     return HotPage, None

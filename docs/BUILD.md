@@ -904,15 +904,17 @@ if ($p) {
       **passed+failed 与 CI 相等、skipped 也相等**（0.3.0 基线
       `629 passed / 146 skipped`；0.3.1 基线 `670 passed / 175 skipped`；
       0.3.2 基线 `981 passed / 181 skipped`；
-      **0.3.3 基线 `1004 passed / 184 skipped / 19.09s`**。耗时只是参考：
+      0.3.3 基线 `1004 passed / 184 skipped / 19.09s`；
+      **0.3.4 基线 `1029 passed / 188 skipped / 19.59s`**。耗时只是参考：
       同一台机器复跑秒数会浮动，**passed / skipped 必须逐项相等**，
       秒数对不上不算回归）
 - [ ] **本地全量回归拿准确数字**（0.3.1 新增，CHANGELOG 和 Release 正文里的
       回归数必须来自这一步）：`python scripts/run_full_tests.py`（默认 local
       口径）。它带真依赖跑，只排除 `tests/test_theme_apply_gui.py`——那 28 例
       带真 PySide6 会起 Qt 事件循环反复切主题，是「本地全量跑不动」的**唯一**
-      根因。**0.3.3 基线：1304 收集 − 28 排除 = 1276 → `1269 passed / 7 skipped
-      / 86.54s`**（0.3.2 是 1278−28=1250 → `1243 passed / 7 skipped / 154.37s`；
+      根因。**0.3.4 基线：`1298 passed / 7 skipped / 94.59s`**
+      （0.3.3 是 1304 收集 − 28 排除 = 1276 → `1269 passed / 7 skipped
+      / 86.54s`；0.3.2 是 1278−28=1250 → `1243 passed / 7 skipped / 154.37s`；
       0.3.1 是 948−28=920 → `913 passed / 7 skipped`）。
       **0.3.3 耗时从 ~154s 降到 ~87s 不是机器变快**：主要是把 11 个「靠真网络
       请求失败凑绿灯」的用例改成打桩——`test_pipeline_smoke.py` 36.64s→0.45s、

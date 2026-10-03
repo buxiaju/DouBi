@@ -1,5 +1,121 @@
 # Changelog
 
+## 0.3.4 (2026-10-03) — UI 完善：B 站采集 + 主题重调 + 字体清晰化
+
+> 本版回应用户「UI 完善下一轮」：搜索/热榜补 B 站通道、豆比紫主题换色、
+> 字号字重统一、设置页去重复入口。所有 P0/P1 已在 0.3.3 收口；本版
+> 无新 ROADMAP 条目，纯 GUI 打磨 + 一条新采集后端。
+>
+> 版本号单一真源 `src/doubi/__init__.py` 由 0.3.3 升至 0.3.4。
+
+### 一、B 站采集能力接入 GUI / CLI / MCP / REST
+
+之前 `collect_search` / `collect_hot` 只走抖音，本版让两条核心函数
+支持 `platform=douyin|bilibili` 参数，三层走相同 record schema。
+
+| 通道 | 抖音 (douyin) | B 站 (bilibili) |
+| --- | --- | --- |
+| 搜索 channels | general / video / user / live | **video / user** |
+| 搜索端点 | 抖音 4 个 aweme 通用接口 | `/x/web-interface/wbi/search/type`（WBI 签名 + buvid3） |
+| 热榜 | 4 牌榜聚合（热搜 / 娱乐 / 社会 / 挑战） | **hotword top 50 + popular top 20** |
+| 热榜端点 | `/aweme/v1/web/hot/search/list/` | `s.search.bilibili.com/main/hotword` + `/x/web-interface/popular` |
+
+新模块 `platforms/bilibili/webapi.py`（185 行）实现：
+
+- `BilibiliWebAPI.search(keyword, channel="video|user")` — 共用现有 `wbi.py` 签名工具，匿名调用返回 `[]` 并写 `error_sink`，不抛异常阻塞 GUI
+- `BilibiliWebAPI.get_hotword()` — top 50 热搜词，公开不需签名
+- `BilibiliWebAPI.get_popular()` — 20 条热门视频，公开不需签名
+- `BilibiliWebAPI.get_ranking()` — 全站 / 分区榜（默认全站 `rid=0`），保留作为下轮 GUI「分区榜」扩展点
+- 仅发送 `.bilibili.com` 域的 cookie（避免把 google / github 等无关 cookie 传给 B 站风控）
+
+**GUI**：搜索 / 热榜页顶部加 `SegmentedWidget`（平台 Tab），切换平台时下拉通道随之刷新——B 站搜索只剩 `video / user`，B 站热榜只剩「热搜词 + 热门视频」聚合档。Search 框提示文案改「在 抖音 / B 站站内按关键词搜索」。
+
+**共享三处入口**：
+
+| 形态 | 入口 | 调用 |
+| --- | --- | --- |
+| CLI | `doubi search --platform bilibili --type video --keyword <kw>` | `cli.main.collect_search_async` |
+| MCP | `collect_search(platform="bilibili", keyword="...")` | `mcp.server._tool_collect_search` |
+| REST | `GET /api/v1/collect/search?platform=bilibili&keyword=...` | `server.app.collect_search` |
+
+### 二、豆比紫主题重调：中性蓝灰 + 琥珀点缀
+
+用户反馈「豆比紫（深邃紫 + 琥珀橙）视觉太冲 / 在长会话里发沉」。
+0.3.4 改为「中性蓝灰底 + 极少琥珀点缀」：
+
+| 项 | 0.3.3 | **0.3.4** |
+| --- | --- | --- |
+| `accent`（主色） | `#f59e6a` 琥珀橙 | **`#5b8cd6` 中性蓝灰** |
+| `bg_base` | `#1a1230` 深邃紫 | **`#1a2030` 中性蓝灰** |
+| `bg_layer` | `#211842` 紫上浮 | **`#212a3c` 蓝灰上浮** |
+| `bg_hover` | `#2d2160` 紫悬停 | **`#2c3650` 蓝灰悬停** |
+| `text_primary` | `#f5ecff` 偏紫白 | **`#f0f4fa` 偏冷白** |
+| `text_muted` | `#a89dc4` 紫灰 | **`#8d9bb0` 中性灰** |
+| `status_running_fg` / `progress_normal` | 琥珀橙 | **琥珀橙（保留作为「进行中」视觉锚点）** |
+| `status_paused_fg` 等其他 | 偏紫色系 | **统一偏蓝灰 / 绿色系（琥珀不再蔓延到其他状态）** |
+
+主色变蓝后整张界面看起来「冷静、专业」，琥珀只剩一处出场——进度条在静态蓝灰海里跳出来，而不是把所有强调色都染橙。
+
+### 三、字体清晰化
+
+上一版在 1080p / 缩放 125% 下整张界面「发糊」。两个改动并行：
+
+**字号统一调大 1–4 px**：
+
+| 角色 | 0.3.3 | **0.3.4** |
+| --- | --- | --- |
+| `TYPE_H1`（页面大标题） | 22 | **26** |
+| `TYPE_H2`（卡片标题） | 16 | **18** |
+| `TYPE_H3`（分组标题） | 14 | **17** |
+| `TYPE_BODY`（正文） | 13 | **14** |
+| `TYPE_CAPTION`（次级说明） | 12 | **13** |
+| `TYPE_TINY`（极小说明） | 11 | **12** |
+
+**字重统一**：`H1/H2` 由 600 升到 700（页面骨架最显眼）；`H3` 由 500 升到 600（卡片分组）；`body_qss` / `muted_qss` 显式设 500（默认 400 让中文字符发灰，500 才是「正常」的视觉重量）。
+
+**字体链首位换 Microsoft YaHei UI**——上一版 PingFang 优先，部分机器渲染发糊。YaHei UI 的渲染器在 Windows 上稳得多。回退链保留 PingFang / HarmonyOS / Noto Sans / 思源黑体，跨平台一致。
+
+### 四、设置页改版：6 张卡 + 去重 + 嗅探折叠
+
+旧版 5 张卡里有两处「重复入口」分散用户的注意：
+
+| 旧位置 | 旧文案 | 0.3.4 处理 |
+| --- | --- | --- |
+| 「性能与网络」卡 | 启用数据库 开关 | **合并进「Cookie 与存储」卡**（都管 `~/.doubi/doubi.db`） |
+| 「通用嗅探」卡 | 5 个开关 + UA 输入 | **整卡可折叠**——默认收起（高级项）；99% 用不到的用户少看一整张 |
+| 「主题与外观」卡 | 仅主题 + 语言 | **保留并加上下载偏好**（下载前询问 / 下载完成通知）—— 这些都是 GUI 行为，集中在一张卡更合理 |
+
+新布局（6 张卡）：
+
+1. **账号**（最高优先级，没登录啥都干不了）
+2. **下载**（输出 / 文件名 / 容器 / 画质）
+3. **网络与性能**（代理 / 并发 / 限速）
+4. **通用嗅探**（**默认折叠**——点「显示高级」才展开）
+5. **主题与外观**（主题 / 语言 / 下载前询问 / 下载完成通知）
+6. **Cookie 与存储**（Cookie 目录 / 「启用下载历史数据库」开关——合并自旧「性能与网络」卡）
+
+### 五、单测 + 全量回归
+
+新增 / 改造用例：
+
+- `tests/test_bilibili_webapi.py`（新文件，10 例）—— search / hotword / popular / ranking 端点全部用 httpx mock 覆盖，含 WBI 签名检查、cookie 域过滤、错误 sink 落点
+- `tests/test_collect_tools.py` 增 8 例——多平台契约（MCP / CLI / REST 三处签名一致）
+- `tests/test_search_hot_pages.py` 改造——`PLATFORM_OPTIONS` / `PLATFORM_CHANNELS` / `DEFAULT_CHANNEL` 模块级常量
+- `tests/test_settings_page.py`（新文件）——6 张卡标题都在源代码里；「启用下载历史数据库」出现在 `_cookie_card` 块内、不出现在 `_download_card` 块
+- `tests/test_theme_typography.py`（新文件，5 例）——锁定重调后的 accent + bg；锁定字号 / 字重 / FONT_FAMILY 顺序
+
+### 六、回归
+
+| 口径 | 0.3.3 | **0.3.4** |
+| --- | --- | --- |
+| `local`（全量带真依赖） | 1269 / 7 / ~87s | **1298 / 7 / 94.59s** |
+| `ci`（屏蔽 9 个可选依赖） | 1004 / 184 / ~19s | **1029 / 188 / 19.59s** |
+| 断网扫描 | 0 次真实 `getaddrinfo` | **0 次真实 `getaddrinfo`** |
+
+`local` 通过数 +29、`ci` 通过数 +25 —— 新增 B 站 API + 主题/UI 锁定测试 + collect 工具多平台契约。
+
+---
+
 ## 0.3.3 (2026-10-03) — P1 三条收口 + 全量测试「零真实网络访问」
 
 > 本版做完 [ROADMAP](ROADMAP.md) 的三条 P1（数据路径迁移 / GUI 接入采集 /

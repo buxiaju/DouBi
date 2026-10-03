@@ -237,7 +237,7 @@ def build_settings_widgets():
             self._header = PageHeader(self)
             self._header.set_title("设置")
             self._header.set_subtitle(
-                "账号 / 主题 / 性能 / 路径。所有改动点「保存设置」后才会写入配置文件。"
+                "账号、下载、网络、嗅探、存储。所有改动点「保存设置」后才会写入配置文件。"
             )
             self.save_btn = PushButton("保存设置", self)
             self.save_btn.setFixedWidth(120)
@@ -265,14 +265,14 @@ def build_settings_widgets():
             body_layout.setContentsMargins(0, 0, 0, 0)
             body_layout.setSpacing(SPACE_LG)
 
-            # ---- 账号卡 ----
+            # ---- 1) 账号卡（最高优先级：没登录就啥都干不了） ----
             self.account_card = self._build_account_card()
             body_layout.addWidget(self.account_card)
 
-            # ---- 下载设置卡（输出 / 性能 / 画质） ----
+            # ---- 2) 下载设置卡（输出 / 画质 / 容器） ----
             self._download_card = self._build_card(
-                "下载设置",
-                "输出位置、画质、并发等运行时配置",
+                "下载",
+                "输出位置、文件名、容器、画质等下载相关配置",
             )
             download_form = QFormLayout(self._download_card["body"])
             download_form.setVerticalSpacing(SPACE_MD)
@@ -294,10 +294,10 @@ def build_settings_widgets():
             download_form.addRow("最高画质", self.max_quality)
             body_layout.addWidget(self._download_card["widget"])
 
-            # ---- 性能 / 网络卡 ----
+            # ---- 3) 网络与性能卡 ----
             self._network_card = self._build_card(
-                "性能与网络",
-                "代理、并发、限速、数据库等可选项",
+                "网络与性能",
+                "代理、并发、限速等连接层配置",
             )
             net_form = QFormLayout(self._network_card["body"])
             net_form.setVerticalSpacing(SPACE_MD)
@@ -310,15 +310,13 @@ def build_settings_widgets():
             self.concurrent.setPlaceholderText("3")
             self.rate_limit = LineEdit(self._network_card["body"])
             self.rate_limit.setPlaceholderText("如 5M（留空不限速）")
-            self.database = SwitchButton(self._network_card["body"])
 
             net_form.addRow("代理", self.proxy)
             net_form.addRow("并发下载数", self.concurrent)
             net_form.addRow("限速", self.rate_limit)
-            net_form.addRow("启用数据库", self.database)
             body_layout.addWidget(self._network_card["widget"])
 
-            # ---- 通用嗅探 ----
+            # ---- 4) 通用嗅探卡（折叠，默认收起——高级项） ----
             # 只有「未知站点」才会走这条路：registry 里 GenericAdapter 的
             # priority=-1，抖音 / B 站等具体平台永远先匹配，这些开关对它们无效。
             self._sniff_card = self._build_card(
@@ -343,9 +341,21 @@ def build_settings_widgets():
             sniff_form.addRow("无头模式", self.sniff_headless)
             sniff_form.addRow("自动播放触发", self.sniff_auto_play)
             sniff_form.addRow("User-Agent", self.sniff_user_agent)
+            # 把整个 body 收起来，默认折叠。0.3.4 起改为可折叠，
+            # 让 99% 用不到嗅探的用户少看到一整张。
+            self._sniff_card["body"].setVisible(False)
+            # 标题加点击收折的小箭头：复用 header 右侧 + addStretch
+            # 留位，再加一个 SwitchButton 风格的「显示高级」按钮。
+            # 直接用 PushButton 的 checkable 模式最省事。
+            from qfluentwidgets import PushButton as _PB
+            self._sniff_toggle_btn = _PB("显示高级", self._sniff_card["widget"])
+            self._sniff_toggle_btn.setCheckable(True)
+            self._sniff_toggle_btn.setFixedWidth(96)
+            self._sniff_toggle_btn.toggled.connect(self._on_sniff_toggle)
+            self._sniff_card["title_row"].addWidget(self._sniff_toggle_btn)
             body_layout.addWidget(self._sniff_card["widget"])
 
-            # ---- 主题与外观 ----
+            # ---- 5) 主题与外观卡（合并了原「主题」与「下载前询问 / 通知」偏好） ----
             self._appearance_card = self._build_card(
                 "主题与外观",
                 "切换主题包会立即生效；点「保存设置」才会写入配置文件",
@@ -401,10 +411,13 @@ def build_settings_widgets():
 
             body_layout.addWidget(self._appearance_card["widget"])
 
-            # ---- Cookie 与存储 ----
+            # ---- 6) Cookie 与存储卡（合并了「启用数据库」） ----
+            # 0.3.4：把「启用数据库」开关收进本卡。
+            # 数据库、cookie、配置都在 ~/.doubi/ 下，让用户在一张卡里
+            # 完整看到「本地数据都藏在哪里」。
             self._cookie_card = self._build_card(
                 "Cookie 与存储",
-                "登录状态会写入 ~/.doubi/cookies/ 目录",
+                "登录状态与下载历史都在 ~/.doubi/ 目录",
             )
             cookie_form = QFormLayout(self._cookie_card["body"])
             cookie_form.setVerticalSpacing(SPACE_MD)
@@ -425,6 +438,9 @@ def build_settings_widgets():
             cookies_holder.setStyleSheet("background: transparent;")
             cookies_holder.setLayout(cookies_row)
             cookie_form.addRow("Cookie 目录", cookies_holder)
+
+            self.database = SwitchButton(self._cookie_card["body"])
+            cookie_form.addRow("启用下载历史数据库", self.database)
             body_layout.addWidget(self._cookie_card["widget"])
 
             body_layout.addStretch(1)
@@ -432,11 +448,20 @@ def build_settings_widgets():
             self._body_scroll.setWidget(body)
             outer.addWidget(self._body_scroll, 1)
 
-        def _build_card(self, title: str, subtitle: str) -> dict:
-            """构造一张带「标题 / 副标题 / body 容器」的可复用卡片。
+        def _on_sniff_toggle(self, on: bool) -> None:
+            """嗅探卡折叠/展开。0.3.4 默认折叠，少一张卡挤在主页面里。"""
+            self._sniff_card["body"].setVisible(on)
+            self._sniff_toggle_btn.setText("隐藏高级" if on else "显示高级")
 
-            返回值是 ``{"widget": QWidget, "body": QWidget}``——body 是
-            放表单行的容器，widget 是外层整个 Card。
+        def _build_card(self, title: str, subtitle: str) -> dict:
+            """构造一张带「标题 / 副标题 / 右侧动作槽 / body 容器」的可复用卡片。
+
+            返回值：
+                ``{"widget": QWidget, "body": QWidget, "title_row": QHBoxLayout, ...}``
+
+            ``title_row`` 是标题 + 副标题 + 右侧 action 槽的横向布局；
+            调用方可以 ``title_row.addWidget(...)`` 把按钮挂到标题右侧，
+            例如嗅探卡的「显示高级」折叠按钮。
             """
             SectionDivider = build_section_divider()
             from qfluentwidgets import CardWidget
@@ -447,19 +472,23 @@ def build_settings_widgets():
             layout.setContentsMargins(SPACE_LG, SPACE_MD, SPACE_LG, SPACE_LG)
             layout.setSpacing(SPACE_SM)
 
-            # 标题 + 副标题
-            header = QVBoxLayout()
-            header.setContentsMargins(0, 0, 0, 0)
-            header.setSpacing(2)
+            # 标题 + 副标题 + 右侧动作槽
+            title_row = QHBoxLayout()
+            title_row.setContentsMargins(0, 0, 0, 0)
+            title_row.setSpacing(SPACE_SM)
+            text_col = QVBoxLayout()
+            text_col.setContentsMargins(0, 0, 0, 0)
+            text_col.setSpacing(2)
             title_label = StrongBodyLabel(card)
             title_label.setText(title)
             title_label.setStyleSheet(heading_qss(3))
             sub_label = QLabel(subtitle, card)
             sub_label.setStyleSheet(muted_qss())
             sub_label.setWordWrap(True)
-            header.addWidget(title_label)
-            header.addWidget(sub_label)
-            layout.addLayout(header)
+            text_col.addWidget(title_label)
+            text_col.addWidget(sub_label)
+            title_row.addLayout(text_col, 1)
+            layout.addLayout(title_row)
 
             # 分隔线
             divider = SectionDivider(card)
@@ -470,7 +499,13 @@ def build_settings_widgets():
             body.setStyleSheet("background: transparent;")
             layout.addWidget(body)
 
-            return {"widget": card, "body": body, "title": title_label, "subtitle": sub_label}
+            return {
+                "widget": card,
+                "body": body,
+                "title": title_label,
+                "subtitle": sub_label,
+                "title_row": title_row,
+            }
 
         def _build_account_card(self) -> CardWidget:
             from ..i18n import tr

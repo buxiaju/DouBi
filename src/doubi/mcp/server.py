@@ -345,18 +345,28 @@ async def _tool_collect_search(arguments: dict) -> dict:
     """MCP wrapper around ``doubi search``.
 
     Returns the same JSON records the CLI emits (``aweme`` /
-    ``user`` / ``room`` dicts). Logged-in users get stable results;
-    logged-out callers will see empty results and should rely on the
-    ``need_login`` convention surfaced elsewhere.
+    ``user`` / ``room`` dicts for 抖音; ``video`` / ``user`` for B 站).
+    Logged-in users get stable results; logged-out callers will see
+    empty results and should rely on the ``need_login`` convention
+    surfaced elsewhere.
     """
     from doubi.cli.main import collect_search_async
 
     keyword = (arguments.get("keyword") or "").strip()
     if not keyword:
         return {"error": "the 'keyword' argument is required"}
-    channel = arguments.get("channel") or "general"
-    if channel not in {"general", "video", "user", "live"}:
-        return {"error": f"unknown channel: {channel!r}"}
+    platform = (arguments.get("platform") or "douyin").lower()
+    if platform not in {"douyin", "bilibili"}:
+        return {"error": f"unknown platform: {platform!r}"}
+    channel = arguments.get("channel") or _DEFAULT_SEARCH_CHANNEL[platform]
+    allowed_channels = _ALLOWED_SEARCH_CHANNELS[platform]
+    if channel not in allowed_channels:
+        return {
+            "error": (
+                f"channel {channel!r} not valid for platform {platform!r}; "
+                f"expected one of {sorted(allowed_channels)}"
+            ),
+        }
     try:
         max_count = int(arguments.get("max", 20))
     except (TypeError, ValueError):
@@ -366,19 +376,26 @@ async def _tool_collect_search(arguments: dict) -> dict:
         rows = await collect_search_async(
             keyword=keyword,
             channel=channel,
+            platform=platform,
             max_count=max_count,
             cookies_file=cfg.cookies_file,
             proxy=cfg.proxy,
         )
     except Exception as exc:  # noqa: BLE001
         return {"error": f"search failed: {exc}"}
-    return {"keyword": keyword, "channel": channel, "results": rows}
+    return {
+        "keyword": keyword, "platform": platform,
+        "channel": channel, "results": rows,
+    }
 
 
 async def _tool_collect_hot(arguments: dict) -> dict:
     """MCP wrapper around ``doubi hot``."""
     from doubi.cli.main import collect_hot_async
 
+    platform = (arguments.get("platform") or "douyin").lower()
+    if platform not in {"douyin", "bilibili"}:
+        return {"error": f"unknown platform: {platform!r}"}
     board = arguments.get("board") or "all"
     try:
         max_count = int(arguments.get("max", 50))
@@ -388,18 +405,33 @@ async def _tool_collect_hot(arguments: dict) -> dict:
     try:
         rows = await collect_hot_async(
             board=board,
+            platform=platform,
             max_count=max_count,
             cookies_file=cfg.cookies_file,
             proxy=cfg.proxy,
         )
     except Exception as exc:  # noqa: BLE001
         return {"error": f"hot fetch failed: {exc}"}
-    return {"board": board, "results": rows}
+    return {
+        "board": board, "platform": platform, "results": rows,
+    }
 
 
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
+
+
+# 0.3.4 — allow-list per platform + sensible default channel. Keeping the
+# pair in one place so the same constants back MCP / REST / GUI.
+_DEFAULT_SEARCH_CHANNEL: dict[str, str] = {
+    "douyin": "general",
+    "bilibili": "video",
+}
+_ALLOWED_SEARCH_CHANNELS: dict[str, set[str]] = {
+    "douyin": {"general", "video", "user", "live"},
+    "bilibili": {"video", "user"},
+}
 
 
 TOOLS: dict[str, dict[str, Any]] = {
@@ -491,23 +523,32 @@ TOOLS: dict[str, dict[str, Any]] = {
     },
     "collect_search": {
         "description": (
-            "0.3.3 P1-4 — search 抖音 by keyword. Returns the same JSON "
-            "records the CLI emits (aweme / user / room dicts). Channels: "
-            "general (综合), user (登录联动), live (直播联动). "
-            "Logged-in callers get stable results; logged-out callers "
-            "may get empty lists — surface a login hint in that case."
+            "0.3.3 P1-4 — search a platform by keyword. ``platform=douyin`` "
+            "(default) covers general / video / user / live channels (aweme / "
+            "user / room records); ``platform=bilibili`` covers video / user "
+            "channels (video / bili_user records, WBI-signed). "
+            "Returns the same JSON records the CLI emits. Logged-in "
+            "callers get stable results; logged-out callers may get empty "
+            "lists — surface a login hint in that case."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
+                "platform": {
+                    "type": "string",
+                    "enum": ["douyin", "bilibili"],
+                    "description": "Which platform to search (default: douyin).",
+                },
                 "keyword": {
                     "type": "string",
                     "description": "Search keyword (Chinese / English / mixed).",
                 },
                 "channel": {
                     "type": "string",
-                    "enum": ["general", "video", "user", "live"],
-                    "description": "Search channel (default: general).",
+                    "description": (
+                        "Channel depends on platform — see collect_search doc. "
+                        "Defaults: douyin→general, bilibili→video."
+                    ),
                 },
                 "max": {
                     "type": "integer",
@@ -520,22 +561,31 @@ TOOLS: dict[str, dict[str, Any]] = {
     },
     "collect_hot": {
         "description": (
-            "0.3.3 P1-4 — fetch 抖音 hot board entries. Records carry "
-            "``board`` / ``board_name`` so a downstream consumer can render "
-            "the row without re-mapping the key. Default board ``all`` "
-            "aggregates the four named boards."
+            "0.3.3 P1-4 — fetch trending entries. ``platform=douyin`` returns "
+            "the four named hot boards (aggregated when board=all). "
+            "``platform=bilibili`` returns the top 50 hot-search keywords + "
+            "the top 20 popular videos. Records carry ``board`` / "
+            "``board_name`` so downstream consumers can render the row without "
+            "re-mapping the key."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
+                "platform": {
+                    "type": "string",
+                    "enum": ["douyin", "bilibili"],
+                    "description": "Which platform to fetch (default: douyin).",
+                },
                 "board": {
                     "type": "string",
-                    "enum": ["all", "positive", "entertainment", "society", "challenge"],
-                    "description": "Which board to fetch (default: all).",
+                    "description": (
+                        "Board key. 抖音 has all/positive/entertainment/society/challenge. "
+                        "Ignored when platform=bilibili."
+                    ),
                 },
                 "max": {
                     "type": "integer",
-                    "description": "Max rows per board (default: 50).",
+                    "description": "Max rows per source (default: 50).",
                 },
             },
             "additionalProperties": False,

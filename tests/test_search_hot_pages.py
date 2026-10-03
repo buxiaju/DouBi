@@ -88,29 +88,35 @@ def test_i18n_keys_exist_in_zh_cn_and_en():
 
 
 def test_search_channel_options_covers_four_endpoints():
-    # The CLI exposes 4 channels — general / video / user / live — and
-    # the GUI search page must keep them in lock-step. Pin the values
-    # by reading the module-level tuple so a silent rename gets caught
-    # at unit-test time, not at runtime.
-    #
-    # CHANNEL_OPTIONS 是模块级的，读它**不需要** Qt：工厂里那句
-    # ``from PySide6.QtCore import Qt`` 只在真正调用工厂时才执行。所以这条
-    # 不叫 _require_gui()——无 GUI 的 CI 里它照样能守住「四个通道没漂移」。
+    # 0.3.4：搜索页改为「平台 + 通道」两级下拉，抖音保持原 4 通道；
+    # B 站 2 通道（video / user）。
     import doubi.ui.pages.search as mod
-    options = getattr(mod, "CHANNEL_OPTIONS", None)
-    assert options is not None, "CHANNEL_OPTIONS must be module-level for the test"
-    keys = [value for value, _ in options]
-    assert keys == ["general", "video", "user", "live"]
+    platform_channels = getattr(mod, "PLATFORM_CHANNELS", None)
+    platforms = getattr(mod, "PLATFORM_OPTIONS", None)
+    assert platform_channels is not None
+    assert platforms is not None
+    assert [v for v, _ in platforms] == ["douyin", "bilibili"]
+    douyin_keys = [v for v, _ in platform_channels["douyin"]]
+    bili_keys = [v for v, _ in platform_channels["bilibili"]]
+    assert douyin_keys == ["general", "video", "user", "live"]
+    assert bili_keys == ["video", "user"]
+    defaults = getattr(mod, "DEFAULT_CHANNEL", None)
+    assert defaults == {"douyin": "general", "bilibili": "video"}
 
 
 def test_hot_board_options_covers_all_boards():
-    # 同 test_search_channel_options_covers_four_endpoints：模块级常量，不需要 Qt。
+    # 0.3.4：热榜页改为「平台 + 牌」两级下拉。抖音 5 牌（all + 4 named）；
+    # B 站只有 all（hotword + popular 一起给）。
     import doubi.ui.pages.hot as mod
-    options = getattr(mod, "BOARD_OPTIONS", None)
-    assert options is not None
-    keys = [value for value, _ in options]
-    # "all" is the default; the four named boards match CLI.
-    assert keys == ["all", "positive", "entertainment", "society", "challenge"]
+    platform_boards = getattr(mod, "PLATFORM_BOARDS", None)
+    platforms = getattr(mod, "PLATFORM_OPTIONS", None)
+    assert platform_boards is not None
+    assert platforms is not None
+    assert [v for v, _ in platforms] == ["douyin", "bilibili"]
+    douyin_keys = [v for v, _ in platform_boards["douyin"]]
+    bili_keys = [v for v, _ in platform_boards["bilibili"]]
+    assert douyin_keys == ["all", "positive", "entertainment", "society", "challenge"]
+    assert bili_keys == ["all"]
 
 
 def test_main_window_imports_new_pages():
@@ -138,3 +144,27 @@ def test_main_window_imports_new_pages():
     assert "build_hot_widgets" in src
     assert 'tr("nav.search")' in src
     assert 'tr("nav.hot")' in src
+
+
+# 0.3.4 — new: page factories wire the platform tab + channel refresh.
+
+
+def test_search_factory_wires_platform_tab():
+    """0.3.4：搜索页用 SegmentedWidget 切 douyin / B 站，通道下拉随之刷新。"""
+    _require_gui()
+    from doubi.ui.pages.search import build_search_widgets
+
+    cls, _ = build_search_widgets()
+    # Required methods
+    assert hasattr(cls, "_on_platform_changed")
+    assert hasattr(cls, "_refresh_channel_options")
+
+
+def test_hot_factory_wires_platform_tab():
+    """0.3.4：热榜页同样有平台 Tab + 牌下拉随之刷新。"""
+    _require_gui()
+    from doubi.ui.pages.hot import build_hot_widgets
+
+    cls, _ = build_hot_widgets()
+    assert hasattr(cls, "_on_platform_changed")
+    assert hasattr(cls, "_refresh_board_options")

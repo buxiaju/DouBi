@@ -380,6 +380,7 @@ def build_app(*, token: str | None = None):
     async def collect_search(
         keyword: str,
         channel: str = "general",
+        platform: str = "douyin",
         max: int = 20,  # noqa: A002 — keep the public REST name
     ) -> dict[str, Any]:
         from doubi.cli.main import collect_search_async
@@ -389,14 +390,28 @@ def build_app(*, token: str | None = None):
             raise HTTPException(
                 status_code=400, detail="keyword query parameter required",
             )
-        if channel not in {"general", "video", "user", "live"}:
+        if platform not in {"douyin", "bilibili"}:
             raise HTTPException(
-                status_code=400, detail=f"unknown channel: {channel!r}",
+                status_code=400, detail=f"unknown platform: {platform!r}",
+            )
+        allowed = (
+            {"general", "video", "user", "live"}
+            if platform == "douyin"
+            else {"video", "user"}
+        )
+        if channel not in allowed:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"channel {channel!r} not valid for platform {platform!r}; "
+                    f"expected one of {sorted(allowed)}"
+                ),
             )
         try:
             rows = await collect_search_async(
                 keyword=kw,
                 channel=channel,
+                platform=platform,
                 max_count=max,
                 cookies_file=cfg.cookies_file,
                 proxy=cfg.proxy,
@@ -405,18 +420,27 @@ def build_app(*, token: str | None = None):
             raise HTTPException(
                 status_code=502, detail=f"search failed: {exc}",
             )
-        return {"keyword": kw, "channel": channel, "results": rows}
+        return {
+            "keyword": kw, "platform": platform,
+            "channel": channel, "results": rows,
+        }
 
     @app.get("/api/v1/collect/hot", dependencies=[Depends(require_token)])
     async def collect_hot(
         board: str = "all",
+        platform: str = "douyin",
         max: int = 50,  # noqa: A002
     ) -> dict[str, Any]:
         from doubi.cli.main import collect_hot_async
 
+        if platform not in {"douyin", "bilibili"}:
+            raise HTTPException(
+                status_code=400, detail=f"unknown platform: {platform!r}",
+            )
         try:
             rows = await collect_hot_async(
                 board=board,
+                platform=platform,
                 max_count=max,
                 cookies_file=cfg.cookies_file,
                 proxy=cfg.proxy,
@@ -425,7 +449,7 @@ def build_app(*, token: str | None = None):
             raise HTTPException(
                 status_code=502, detail=f"hot fetch failed: {exc}",
             )
-        return {"board": board, "results": rows}
+        return {"board": board, "platform": platform, "results": rows}
 
     @app.get("/api/v1/sniff/status", dependencies=[Depends(require_token)])
     async def sniff_capability() -> dict[str, Any]:

@@ -20,12 +20,13 @@
 > 现在 GUI 有独立页面、MCP 有 `collect_search` / `collect_hot`、REST 有
 > `/api/v1/collect/*`，且**三层共用同一套归一化记录结构**（实现落在
 > `cli/main.py` 的 `collect_search_async()` / `collect_hot_async()`，
-> 不是各写一遍）。
+> 不是各写一遍）。**0.3.4 进一步扩展到 B 站**——同一个 `platform=douyin|bilibili`
+> 参数走三层。
 
 ## 支持平台
 
 - ✅ **抖音**（单条 / 图文 / 合集批量 / 用户作品 / 弹窗链接；**采集**走签名 Web API，下载走 yt-dlp）—— 采集能力见下表
-- ✅ **B 站**（`Bili23-Downloader` 接入；下载走 yt-dlp）
+- ✅ **B 站**（`Bili23-Downloader` 接入；下载走 yt-dlp；**0.3.4 起**搜索 / 热榜 / 热门视频都走同一套 `platform=` 参数的 `collect_*_async`）
 - ✅ **YouTube**（watch / shorts / embed / live / youtu.be 短链；元数据走 yt-dlp `extract_info`，下载走 yt-dlp）
 - ✅ **通用视频站**（silidm / sv.baidu.com 等任意 URL：Playwright 启动 Chromium 嗅探 `<video>` 与网络请求，抓出 `m3u8` 与真视频容器后缀的直链；解析列表**只显示视频容器**，不会把 ts/aac 分片混进结果里）
 - 🚧 计划：小红书 / 微博 / 快手（TikTok 国际版**已评估不做**，理由见 [docs/ROADMAP.md](docs/ROADMAP.md)）
@@ -147,8 +148,8 @@ pip install -e ".[all]"
 | 单条视频 / 图文 | `download` | ✓ | 走 yt-dlp |
 | 合集（列表 + 批量） | `mix` / `download` | ✓ | 标题回查 + 翻页枚举；`/collection/{id}/{seq}` 也认 |
 | 用户作品列表 | `download` | ✓ | USER 容器自动展开 |
-| **搜索** | `search` | ✓ **搜索页** | 综合 / 视频 / 用户 / 直播 4 个子类，支持排序 / 时间 / 时长 / 粉丝量筛选 |
-| **热点榜** | `hot` | ✓ **热榜页** | 热点榜 / 种草榜 / 娱乐榜 / 挑战榜 4 个榜单 |
+| **搜索** | `search` | ✓ **搜索页** | 抖音（综合 / 视频 / 用户 / 直播）+ **0.3.4 B 站（视频 / 用户）**；平台 Tab 切换；支持排序 / 时间 / 时长 / 粉丝量筛选 |
+| **热点榜** | `hot` | ✓ **热榜页** | 抖音 4 牌榜（热搜 / 娱乐 / 社会 / 挑战）+ **0.3.4 B 站热搜词 + 热门视频**；B 站走匿名公开端点，无需登录 |
 | **收藏夹全家族** | `favorites` | — | 收藏夹 + 收藏视频 / 合集 / 音乐 / 短剧 5 类 |
 | **评论 + 回复** | `comments` | — | 一级评论 + 嵌套回复 |
 | **关注 / 粉丝列表** | `user` | — | `--kind following\|followers`（DouBi 原生实现） |
@@ -174,8 +175,8 @@ doubi platforms                     列出已注册平台
 doubi download -u URL               下载（支持 -f 文件批量、--sniff 嗅探）
 doubi auth  {status,bilibili,douyin} 登录状态 / B 站扫码 / 抖音登录
 doubi live  -u URL                  直播录制（--info 查详情、--quality 选清晰度）
-doubi search KEYWORD                抖音搜索（--type general|video|user|live）
-doubi hot                           抖音热点榜（--board 选榜单）
+doubi search KEYWORD                搜索（--platform douyin|bilibili，--type 按平台）
+doubi hot                           热点榜（--platform douyin|bilibili，--board 仅抖音）
 doubi favorites                     抖音收藏夹（--kind 选类型）
 doubi comments AWEME_ID             抖音评论（--replies 含回复）
 doubi user SEC_UID                  抖音关注 / 粉丝列表（--kind）
@@ -232,7 +233,7 @@ GUI 自带 7 套主题包，每套都有自己的底色、文字色与语义色�
 |---|---|---|
 | `default_light` | 默认亮 | 浅灰白 |
 | `default_dark` | 默认暗 | 深灰 |
-| `doubi` | 豆比紫 | 深紫 |
+| `doubi` | 豆比紫 | 中性蓝灰（**0.3.4 重调**——上一版「深紫 + 琥珀」视觉太冲；琥珀保留为「进行中」视觉锚点） |
 | `deep_sea` | 深海 | 墨蓝 |
 | `morandi` | 莫兰迪 | 暖米灰 |
 | `eye_care` | 护眼 | 米黄 |
@@ -250,8 +251,9 @@ GUI 自带 7 套主题包，每套都有自己的底色、文字色与语义色�
   <img src="screenshots/06_eye_care.png" alt="护眼主题" width="380">
 </p>
 
-`doubi` 是品牌主题——配色直接取自应用图标（深紫底 + 琥珀橙主色），
-`set_theme("doubi")` 拿到的是原图配色而不是「亮/暗 + 强调色」的近似。
+`doubi` 是品牌主题——配色取自应用图标的精神气质（**0.3.4 重调**：
+中性蓝灰底 + 极少琥珀点缀，「进行中」用琥珀橙当锚点）。`set_theme("doubi")`
+拿到的是品牌色而不是「亮/暗 + 强调色」的近似。
 
 三种切换方式：设置页下拉框、导航栏画笔按钮（循环切换）、启动参数 `--theme`。
 **只有在设置页点「保存设置」才会记住**，另两种只在本次运行生效。

@@ -119,11 +119,15 @@ def main() -> int:
         argv = ["-q", "--maxfail=5"]
         print(f"[run_full_tests] mode=ci: blocking {len(CI_ABSENT)} optional deps, "
               f"mirroring CI command `pytest -q --maxfail=5`")
+        print("[run_full_tests] 0.3.4 baseline: 1029 passed / 188 skipped / ~20s "
+              "(0.3.3 was 1004/184, 0.3.2 was 981/181)")
         print("[run_full_tests] 0.3.3 baseline: 1004 passed / 184 skipped / ~19s "
               "(0.3.2 was 981/181, 0.3.1 was 670/175)")
     elif args.mode == "local":
         argv = ["-q", f"--ignore={SLOW_GUI_FILE}"]
         print(f"[run_full_tests] mode=local: excluding {SLOW_GUI_FILE}")
+        print("[run_full_tests] 0.3.4 baseline: 1298 passed / 7 skipped / ~95s "
+              "(0.3.3 was 1269/7, 0.3.2 was 1243/7)")
         print("[run_full_tests] 0.3.3 baseline: 1269 passed / 7 skipped / ~87s "
               "(0.3.2 was 1243/7, 0.3.1 was 913/7)")
     else:
