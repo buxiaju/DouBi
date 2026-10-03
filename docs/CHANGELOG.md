@@ -1,5 +1,159 @@
 # Changelog
 
+## 0.3.6 (2026-10-04) — 搜索 / 热榜「没有结果」：三个独立缺陷
+
+> 本版回应用户上线后实测反馈「**搜索和热榜没有结果**」。定位到的是
+> **三个互不相干的缺陷**，各自都能单独造成空表：
+>
+> | # | 平台 | 缺陷 | 实测 |
+> | --- | --- | --- | --- |
+> | 1 | B 站 | `_read_cookie_dicts(None)` 直接返回 `[]`，没有默认路径兜底 | 搜索 **0 → 20 行** |
+> | 2 | 抖音 | `get_hot_list` 读 `data.word_list`，实际在 `data.data.word_list` | 热榜 **0 → 200 行** |
+> | 3 | 抖音 | 搜索被风控门拦截（200 + `verify_check`）时静默返回 `[]` | 从「暂无结果」→ 明确诊断 |
+>
+> 前两个是纯代码 bug，已修复；第三个是**平台侧风控，客户端修不掉**，
+> 能修的是「别再把拦截伪装成『没有结果』」。
+>
+> 三个口径：local **1337 passed / 7 skipped**（0.3.5 是 1315/7）、
+> ci **1053 passed / 203 skipped**（0.3.5 是 1031/203）、
+> 断网扫描 0 次 `getaddrinfo`。
+>
+> 版本号单一真源 `src/doubi/__init__.py` 由 0.3.5 升至 0.3.6。
+
+### 一、B 站：cookie 默认路径兜底（0 → 20 行）
+
+**根因是一个不对称**：
+
+| 平台 | `__init__(cookies_file=None)` 的行为 |
+| --- | --- |
+| 抖音 `DouyinWebAPI:467` | `p = Path(cookies_file) if cookies_file else default_cookie_path()` ✅ 有兜底 |
+| B 站 `BilibiliWebAPI` | `_read_cookie_dicts(None)` → **`if not cookies_file: return []`** ❌ 无兜底 |
+
+而 GUI / REST / MCP 三个入口**都**把 `cfg.cookies_file` 原样透传：
+
+- `ui/pages/search.py:208`、`ui/pages/hot.py:188`
+- `server/app.py:416` / `:445`
+- `mcp/server.py:381` / `:410`
+
+`~/.doubi/config.yml` 里出厂就是 `cookies_file: null`，用户在「设置 → 账号」
+登录时写的是 `~/.doubi/cookies/bilibili.txt`——**cookie 文件真实存在且非空**
+（实测 1471 B），但 `config.yml` 从没人改过。于是：
+
+```
+GUI → cfg.cookies_file = None → _read_cookie_dicts(None) → []
+    → httpx 客户端不带任何 cookie → wbi 搜索 code=-101 → 空表
+```
+
+**修法**：`_read_cookie_dicts` 在 `cookies_file` 为空时回退到
+`auth.default_cookie_path()`，并用 `has_cookie_file()` 判断存在性。
+显式传入的路径语义不变（即使存在性存疑也按它读，保持调用方语义）。
+抖音的 412 行注释「No cookies means *no* cookies argument」那段行为
+在 B 站这边现在也成立了。
+
+### 二、抖音热榜：读错了嵌套层级（0 → 200 行）
+
+`/aweme/v1/web/hot/search/list/` 的真实响应：
+
+```
+top-level: banner_dark, banner_light, data, extra, log_pb, status_code
+data:      active_time, banner_display, display_style, share_info,
+           trending_desc, trending_list, word_list      ← 51 条在这里
+```
+
+`get_hot_list` 读的是 **`data.get("word_list")`**——高了一层，永远拿到
+`None`，然后 `return []`。因为没有任何日志记录这个「结构不匹配」，失败
+长得和「网络问题 / 风控」一模一样，所以 4 个榜全空也没人看出是代码 bug。
+
+**修法**：新增模块级 `_extract_hot_word_list(data)`，优先读
+`data.data.word_list`，回退到扁平的 `data.word_list`（防御上游改回扁平
+或缓存旧响应），两种都没有时返回 `None` 而不是 `[]`——让调用方能区分
+「结构不对」和「真的没有数据」。
+
+**实测**（`cookies_file` 按 GUI 那样传 `None`）：
+
+| | 修复前 | 修复后 |
+| --- | --- | --- |
+| 抖音热榜 `board=all` | 0 行 | **200 行**（抖音热榜 / 娱乐榜 / 社会榜 / 挑战榜） |
+| B 站热榜 | 30 行 | 30 行（本来就正常，因为 hotword / popular 不需要 cookie） |
+
+### 三、抖音搜索：风控门被伪装成「没有结果」
+
+这条**不是能靠改代码修掉的 bug**，记录在这里是为了把边界说清楚。
+
+现象：四个搜索通道（general / video / user / live）全部返回 0 行，但
+HTTP 是 `200`、`status_code` 是 `0`。真实原因在响应里：
+
+```json
+{"status_code": 0, "data": [],
+ "search_nil_info": {"search_nil_type": "verify_check"}}
+```
+
+排查过程中**证伪了一个很自然的猜想**（记得把结论留下，免得下次重走）：
+
+> 猜想：`webapi.py` 用 `uuid.uuid4().hex[:16]` 当 `uifid` 占位
+> （ROADMAP P0-2），换成 cookie 里的真实 `UIFID` 就能过门。
+
+实测**五个** uifid 来源全部 `verify_check`，一个都没过：
+
+| uifid 来源 | 结果 |
+| --- | --- |
+| UUID4 占位（现状） | `rows=0 verify_check` |
+| cookie `UIFID` | `rows=0 verify_check` |
+| cookie `UIFID_TEMP` | `rows=0 verify_check` |
+| cookie `x-web-secsdk-uid` | `rows=0 verify_check` |
+| cookie `odin_tt` | `rows=0 verify_check` |
+
+同时验掉了另外几个方向：
+
+- **加不加密都一样**：`+WebSign` 与 `-WebSign`（临时把
+  `is_sign_protected` 改成恒 `False`）都是 `verify_check`；
+  而热榜同样两个方向都是 51 条——**WebSign 不是判别条件**。
+- **不是账号 / IP 级封禁**：同一个 cookie 下
+  `/aweme/v1/web/hot/search/list/` 正常返回、
+  `/aweme/v1/web/aweme/detail/` 正常返回 `aweme_detail`。
+- **不是登录态过期**：`/aweme/v1/web/user/profile/self/` 返回真实昵称
+  `Studing Everything`（uid `2291036440247028`），cookie 文件年龄 1.7 小时。
+
+结论：**这是搜索端点这一类特有的平台侧风控**（`verify_check` 要求设备 /
+短信验证，需要在真实浏览器里过），客户端无法绕过。
+
+**所以本版做的是**：`_search_paginate` 在遇到「200 + 空 data +
+`search_nil_info`」时，把 `search_nil_type` 写进 `error_sink`
+（`hint="verify"`、`reason` 带 `verify_check` 字样），并打 warning 日志。
+`_set_error_sink` 新增可选 `hint=` 参数，让「比状态码知道得更多」的调用方
+能覆盖默认推导——否则 `HTTP 200` 会被推成 `transient`，而重试根本没用。
+
+用户可见的差别：以前无论哪种情况都显示「暂无结果 / 请换个关键词」，现在
+被拦截时能明确区分出来。真正的修复要等平台放宽或走浏览器验证路径。
+
+### 四、测试
+
+新增 `tests/test_search_hot_no_results.py`（**22 例全绿**）：
+
+- B 站 cookie 兜底 5 例：显式路径生效、`None` 回退到默认、默认文件不
+  存在时仍返回 `[]`、类级端到端、域名过滤未被破坏
+- 抖音 hot 嵌套 5 例：嵌套结构读到、扁平结构兼容、优先取嵌套、未知结构
+  返回 `None`、`max_count` 截断、空嵌套列表
+- 搜索门 10 例：`verify_check` / `params_check` 识别、有结果时不报门、
+  无 `search_nil_info` 时保持安静（**避免把「关键词真的没结果」误报成
+  风控**）、成功时不污染 sink、`hint=` 覆盖、未传 `hint` 时原推导不变、
+  sink 被清空
+- 另 2 例守住 `_set_error_sink` 的既有语义
+
+`_set_error_sink` 的 `hint=` 是**加法**：所有没传该参数的既有调用点行为
+完全不变，已用断言守护。
+
+### 五、三口径回归
+
+| 口径 | 0.3.5 | 0.3.6 | 差值 |
+| --- | --- | --- | --- |
+| local | 1315 passed / 7 skipped | **1337 passed / 7 skipped** | +22（新文件） |
+| ci | 1031 passed / 203 skipped | **1053 passed / 203 skipped** | +22 |
+| 断网 | 0 次 getaddrinfo | **0 次 getaddrinfo** | — |
+
+`ruff check` 在改动的三个源文件上前后**同为 7 处**（用 `git stash` 对比
+确认，全是历史遗留）；新测试文件 `ruff check` 全过。
+
 ## 0.3.5 (2026-10-04) — 性能与 UI：字体族真修复 + 四处渲染热点收口
 
 > 本版回应用户「继续优化 UI 和软件的性能」。核心发现是：**0.3.1 → 0.3.4

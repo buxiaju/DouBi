@@ -72,14 +72,37 @@ _USER_AGENT = (
 
 
 def _read_cookie_dicts(cookies_file: Optional[str]) -> list[dict[str, Any]]:
-    """Load cookies.txt into the dict shape httpx wants."""
-    if not cookies_file:
-        return []
+    """Load cookies.txt into the dict shape httpx wants.
+
+    0.3.6 — ``cookies_file=None`` now falls back to
+    :func:`doubi.platforms.bilibili.auth.default_cookie_path` instead of
+    returning ``[]``. This mirrors :class:`DouyinWebAPI`, which has
+    always resolved the default path itself.
+
+    Before the fix the asymmetry was a silent dead end: the GUI / REST /
+    MCP layers all pass ``cfg.cookies_file`` straight through, and that
+    field is ``None`` in a stock ``~/.doubi/config.yml`` — the user logs
+    in via the settings page (writing ``~/.doubi/cookies/bilibili.txt``)
+    but never edits ``config.yml``. B 站 then received an empty cookie
+    jar, ``wbi`` search answered ``code=-101``, and 搜索 showed
+    「暂无结果」 even though the cookie file was right there.
+    """
     from pathlib import Path
-    from .auth import parse_netscape_file
+    from .auth import default_cookie_path, has_cookie_file, parse_netscape_file
+
+    path: Optional[Path] = None
+    if cookies_file:
+        # 显式传入的路径：即使存在性存疑也按它读，保持调用方语义。
+        path = Path(cookies_file)
+    else:
+        candidate = default_cookie_path()
+        if has_cookie_file(candidate):
+            path = candidate
+    if path is None:
+        return []
 
     try:
-        return parse_netscape_file(Path(cookies_file))
+        return parse_netscape_file(path)
     except Exception as exc:   # noqa: BLE001
         logger.debug("BilibiliWebAPI: failed to read cookie file: %s", exc)
         return []

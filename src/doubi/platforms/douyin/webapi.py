@@ -357,6 +357,7 @@ def _set_error_sink(
     *,
     reason: str,
     status_code: Optional[int],
+    hint: Optional[str] = None,
 ) -> None:
     """Stamp a structured error into a caller-provided mutable mapping so
     UI surfaces can surface user-facing hints (e.g. 「需要登录抖音」).
@@ -369,10 +370,18 @@ def _set_error_sink(
 
     The mapping is mutated in place so concurrent calls each keep their own
     state (the sink is caller-provided, never an instance attribute).
+
+    ``hint`` (0.3.6) lets a caller that has *more specific* knowledge than
+    the status code override the derived default — 抖音's search gate
+    arrives as ``HTTP 200``, which would otherwise be classified as
+    ``transient`` even though retrying will not help.
     """
     sink.clear()
     sink["reason"] = reason
     sink["status_code"] = status_code
+    if hint is not None:
+        sink["hint"] = hint
+        return
     # Status 403 with Argus / risk-control wording → 100% needs login.
     # Other failures get a generic "retryable" hint that the UI can map
     # to whatever makes sense (network blip, anti-bot, etc.).
@@ -448,6 +457,73 @@ def _normalize_page(raw: Any, *, item_keys: tuple[str, ...] = ()) -> dict[str, A
         "has_more": bool(data.get("has_more")),
         "max_cursor": int(cursor or 0),
     }
+
+
+def _search_gate_reason(data: dict[str, Any]) -> Optional[str]:
+    """Detect 抖音's silent search gate from a 200-with-empty-body response.
+
+    0.3.6 — the search endpoints answer ``HTTP 200`` + ``status_code: 0``
+    with ``data: []`` when the platform decides not to serve results.
+    The reason is carried in ``search_nil_info.search_nil_type``:
+
+    * ``verify_check`` — 抖音 wants a device/SMS verification for this
+      session or IP. Not fixable client-side; the user must pass the
+      challenge in a real browser.
+    * ``params_check`` — the query was rejected before the gate (missing
+      or malformed signature / required parameter).
+
+    Before this fix the caller saw a bare ``[]`` that was indistinguishable
+    from "no matches for the keyword", so 搜索 rendered 「暂无结果」 and
+    the user kept retrying with different keywords. Verified 2026-10-03
+    against a logged-in, 1.7-hour-old cookie: the gate returned
+    ``verify_check`` for all four search channels while
+    ``/aweme/v1/web/hot/search/list/`` and
+    ``/aweme/v1/web/aweme/detail/`` answered normally on the same
+    session — i.e. it is an endpoint-class gate, not an auth failure.
+
+    Returns ``None`` when the response is not a gated-empty search body,
+    so callers only surface a hint when there is real evidence of one.
+    """
+    if not isinstance(data, dict):
+        return None
+    if data.get("data"):
+        return None
+    nil = data.get("search_nil_info")
+    if not isinstance(nil, dict):
+        return None
+    nil_type = nil.get("search_nil_type")
+    if not nil_type:
+        return None
+    return str(nil_type)
+
+
+def _extract_hot_word_list(data: Any) -> Optional[list[dict[str, Any]]]:
+    """Pull ``word_list`` out of a hot-search payload, wherever it sits.
+
+    0.3.6 — the 抖音 ``/aweme/v1/web/hot/search/list/`` endpoint nests the
+    rows at ``data["data"]["word_list"]``. Before this fix we read
+    ``data["word_list"]`` (one level too high), got ``None`` every time,
+    and ``get_hot_list`` silently returned ``[]`` — so 热榜 rendered
+    「暂无榜单」 on every board even though the request had succeeded
+    with ``status_code: 0`` and 51 rows on the wire.
+
+    Because we never logged the shape mismatch, the failure looked
+    identical to a network / risk-control miss. Accept both layouts so a
+    future upstream flattening (or an older cached response) keeps
+    working, and let the caller distinguish "no rows" from "bad shape"
+    via the returned ``None``.
+    """
+    if not isinstance(data, dict):
+        return None
+    nested = data.get("data")
+    if isinstance(nested, dict):
+        word_list = nested.get("word_list")
+        if isinstance(word_list, list):
+            return word_list
+    word_list = data.get("word_list")
+    if isinstance(word_list, list):
+        return word_list
+    return None
 
 
 class DouyinWebAPI:
@@ -1063,6 +1139,12 @@ class DouyinWebAPI:
 
         Returns a flat list of dicts. Dedupes by ``aweme_id`` /
         ``user_id`` / ``room_id`` (whichever the response carries).
+
+        0.3.6 — when 抖音 gates the search (200 + ``data: []`` +
+        ``search_nil_info``), the reason is written to ``error_sink`` via
+        :func:`_search_gate_reason` so the caller can tell 「被风控拦了」
+        apart from 「这个关键词没有结果」. The return value stays ``[]``
+        either way — the gate is not a transport failure we can retry.
         """
         items: list[dict[str, Any]] = []
         offset = 0
@@ -1079,6 +1161,18 @@ class DouyinWebAPI:
             )
             page_items = data.get(data_key) or []
             if not page_items:
+                gate = _search_gate_reason(data)
+                if gate and error_sink is not None:
+                    _set_error_sink(
+                        error_sink,
+                        reason=f"search gated by 抖音 ({gate})",
+                        status_code=data.get("status_code"),
+                        hint="verify" if gate == "verify_check" else None,
+                    )
+                    logger.warning(
+                        "douyin search %s gated: search_nil_type=%s",
+                        endpoint, gate,
+                    )
                 break
             # Live search wraps each row in {lives: [...]}; unwrap.
             if unwrap_lives:
@@ -1862,7 +1956,7 @@ class DouyinWebAPI:
             max_retries=2,
             error_sink=error_sink,
         )
-        word_list = data.get("word_list") if isinstance(data, dict) else None
+        word_list = _extract_hot_word_list(data)
         if not isinstance(word_list, list):
             return []
         if max_count and len(word_list) > max_count:

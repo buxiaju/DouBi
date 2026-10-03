@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import re
 import sys
 from collections.abc import Iterable
@@ -31,6 +32,8 @@ from ..core.registry import PlatformRegistry
 from ..platforms.douyin.webapi import ALL_HOT_BOARDS
 from ..platforms.generic import GenericAdapter
 from . import auth_cmd
+
+logger = logging.getLogger("doubi.cli.main")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -766,6 +769,17 @@ async def collect_search_async(
                 )
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"search failed: {exc}") from exc
+        if not results:
+            # 0.3.6 — 抖音 answers 200 + status_code 0 + empty data when it
+            # gates a search; without this the caller cannot tell 「被风控
+            # 拦了」 from 「这个关键词没有结果」 and just shows an empty
+            # table. error_sink carries the discriminator.
+            gate = error_sink.get("hint")
+            if gate == "verify":
+                logger.warning(
+                    "douyin search gated by %s — user verification required",
+                    error_sink.get("reason"),
+                )
         return list(results or [])
 
     if platform == "bilibili":
