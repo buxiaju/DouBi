@@ -48,9 +48,11 @@ DEFAULT_CHANNEL: dict[str, str] = {
 
 
 def build_search_widgets():
-    from PySide6.QtCore import Qt
+    from PySide6.QtCore import Qt, QUrl
+    from PySide6.QtGui import QDesktopServices
     from PySide6.QtWidgets import (
-        QWidget, QVBoxLayout, QHBoxLayout, QStackedWidget,
+        QApplication, QMenu, QWidget, QVBoxLayout, QHBoxLayout,
+        QStackedWidget,
     )
     from qfluentwidgets import (
         PushButton, LineEdit, ComboBox, SegmentedWidget,
@@ -59,7 +61,7 @@ def build_search_widgets():
 
     from ...core.config import load_config
     from ..theme import (
-        SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL,
+        SPACE_LG, SPACE_MD, SPACE_XL,
         subscribe_theme,
     )
     from ..widgets import build_empty_state, build_page_header, build_stat_chip
@@ -70,8 +72,19 @@ def build_search_widgets():
             self.setObjectName("searchPage")
             self._cfg = load_config(None)
             self._rows: list[dict] = []
+            #: Set by ``main_window`` right after construction. Kept
+            #: ``None`` so the page still builds stand-alone (and so the
+            #: existing factory-only tests keep working).
+            self._task_manager = None
+            self._platform = PLATFORM_OPTIONS[0][0]
             self._build_ui()
             subscribe_theme(self, lambda: None)
+
+        # ---- public API ----------------------------------------------
+
+        def set_task_manager(self, manager) -> None:
+            """主窗口接线：右键「下载」需要它才能入队。"""
+            self._task_manager = manager
 
         def _build_ui(self):
             PageHeader = build_page_header()
@@ -133,6 +146,10 @@ def build_search_widgets():
             self.table.setEditTriggers(TableWidget.NoEditTriggers)
             self.table.setSelectionBehavior(TableWidget.SelectRows)
             self.table.verticalHeader().setDefaultSectionSize(32)
+            self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+            self.table.customContextMenuRequested.connect(
+                self._on_table_context_menu,
+            )
             self._stack.addWidget(self.table)
 
             self._empty_state = EmptyState(self)
@@ -160,6 +177,7 @@ def build_search_widgets():
             self._channel.blockSignals(False)
 
         def _on_platform_changed(self, route_key: str) -> None:
+            self._platform = route_key
             self._refresh_channel_options(route_key)
 
         # ----------------------------------------------------------
@@ -182,18 +200,12 @@ def build_search_widgets():
                 self._platform_tabs.currentRouteKey()
                 or PLATFORM_OPTIONS[0][0]
             )
+            # 记住本次实际搜索的平台：右键菜单的 URL 合成依赖它，
+            # 而用户完全可能在拿到结果后再切 Tab（切换只刷新通道
+            # 下拉，不会重搜）。用「发起搜索时」的平台才不会串台。
+            self._platform = platform_route
             try:
-                import asyncio
-                try:
-                    loop = asyncio.get_running_loop()
-                except RuntimeError:
-                    loop = None
-                if loop and loop.is_running():
-                    loop.create_task(
-                        self._run_search(platform_route, keyword),
-                    )
-                else:
-                    asyncio.run(self._run_search(platform_route, keyword))
+                self._run_async(self._run_search(platform_route, keyword))
             except Exception as exc:
                 logger.exception("search failed: %s", exc)
                 InfoBar.error(
@@ -221,7 +233,7 @@ def build_search_widgets():
                     proxy=self._cfg.proxy,
                     timeout=15.0,
                 )
-            except Exception as exc:
+            except Exception:
                 raise
 
             self._rows = list(rows or [])
@@ -271,5 +283,154 @@ def build_search_widgets():
                 self.table.setItem(i, 1, QTableWidgetItem(str(author)))
                 self.table.setItem(i, 2, QTableWidgetItem(str(item_id)))
                 self.table.setItem(i, 3, QTableWidgetItem(str(detail)))
+
+        # ---- 右键菜单 (0.3.6) ----------------------------------------
+
+        def _context_menu_entries(self, row: dict) -> list[tuple[str, bool]]:
+            """纯函数：该行应该出现哪些菜单项、各自是否可用。
+
+            拆出来是为了让「菜单项可用性」可以被单测直接断言——
+            不必驱动 Qt 菜单。Qt 侧只负责把结果变成 QAction。
+            """
+            from ..row_actions import share_url_for
+
+            url = share_url_for(row, self._platform)
+            has_url = bool(url)
+            return [
+                ("下载", has_url and self._task_manager is not None),
+                ("复制链接", has_url),
+                ("在浏览器中打开", has_url),
+            ]
+
+        def _on_table_context_menu(self, pos) -> None:
+            # ``QMenu`` / ``QDesktopServices`` / ``QApplication`` 刻意来自
+            # 工厂闭包（不是函数内 import）：测试需要一个非模态的 QMenu
+            # 子类替换掉 ``exec``，而 shiboken 会绕过 Python 层的
+            # ``QMenu.exec = ...`` 直接派发到 C++。唯一可靠的注入点是
+            # 闭包 cell —— 与 ``parse.py`` 的右键菜单保持一致。
+            row = self.table.rowAt(pos.y())
+            if row < 0 or row >= len(self._rows):
+                return
+            self.table.setCurrentCell(row, self.table.currentColumn())
+            record = self._rows[row]
+            labels = self._context_menu_entries(record)
+            by_label = {label: enabled for label, enabled in labels}
+
+            menu = QMenu(self.table)
+            download = menu.addAction("下载")
+            copy_link = menu.addAction("复制链接")
+            browser = menu.addAction("在浏览器中打开")
+            for action in (download, copy_link, browser):
+                action.setEnabled(by_label.get(action.text(), False))
+
+            chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
+            if chosen is None:
+                return
+
+            from ..row_actions import share_url_for
+
+            url = share_url_for(record, self._platform)
+            if not url:
+                return
+            if chosen is copy_link:
+                clipboard = QApplication.clipboard()
+                if clipboard is not None:
+                    clipboard.setText(url)
+                    self._toast("已复制链接", url)
+            elif chosen is browser:
+                QDesktopServices.openUrl(QUrl(url))
+            elif chosen is download:
+                self._enqueue_row(record, url)
+
+        def _enqueue_row(self, record: dict, url: str) -> None:
+            """把一行搜索结果解析成 MediaItem 并入队。"""
+            if self._task_manager is None:
+                self._toast(
+                    "未连接任务管理器",
+                    "请在主窗口中打开此页面。",
+                    kind="error",
+                )
+                return
+
+            async def _do():
+                from ..row_actions import build_media_item, row_label
+
+                item, children = await build_media_item(url)
+                targets = children or ([item] if item is not None else [])
+                if not targets:
+                    self._toast(
+                        "无法下载",
+                        f"没能解析出行内容：{row_label(record) or url}",
+                        kind="error",
+                    )
+                    return
+                opts = self._build_options()
+                for target in targets:
+                    self._task_manager.add(target, opts)
+                self._toast(
+                    "已加入下载队列",
+                    f"{row_label(record) or url}（{len(targets)} 项）",
+                )
+
+            self._run_async(_do())
+
+        def _run_async(self, coro) -> None:
+            """在本页既有的「有 loop 就 create_task，没有就 asyncio.run」
+            约定下跑一个协程。抽出来是因为右键动作与搜索按钮走的是
+            同一套调度规则。
+            """
+            import asyncio
+
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop and loop.is_running():
+                loop.create_task(coro)
+            else:
+                asyncio.run(coro)
+
+        def _build_options(self):
+            """``AppConfig -> DownloadOptions``。
+
+            与解析页同源：解析页的 ``_build_options`` 是唯一出口，
+            但它在 ``build_parse_widgets`` 的闭包里拿不到。这里只做
+            同一个搬运，字段与解析页保持一致（见
+            ``test_build_options_covers_every_shared_config_field``）。
+            """
+            from ...core.models import DownloadOptions
+
+            cfg = self._cfg
+            return DownloadOptions(
+                output_root=cfg.output_root,
+                output_dir_template=cfg.output_dir_template,
+                filename_template=cfg.filename_template,
+                container=cfg.container,
+                max_quality=cfg.max_quality,
+                write_thumbnail=cfg.write_thumbnail,
+                write_metadata_json=cfg.write_metadata_json,
+                write_nfo=cfg.write_nfo,
+                write_danmaku=cfg.write_danmaku,
+                write_subtitles=cfg.write_subtitles,
+                resume=cfg.resume,
+                duplicate_policy=cfg.duplicate_policy,
+                database=cfg.database_path if cfg.database else None,
+                manifest=cfg.manifest_path,
+                proxy=cfg.proxy,
+                rate_limit=cfg.rate_limit,
+                cookies_file=cfg.cookies_file,
+            )
+
+        def _toast(self, title: str, content: str, kind: str = "success") -> None:
+            fn = {
+                "success": InfoBar.success,
+                "warning": InfoBar.warning,
+                "error": InfoBar.error,
+                "info": InfoBar.info,
+            }[kind]
+            fn(
+                title=title, content=content, parent=self,
+                position=InfoBarPosition.TOP_RIGHT, duration=4000,
+            )
 
     return SearchPage, None

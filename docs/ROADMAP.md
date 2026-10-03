@@ -7,6 +7,11 @@
 > `InfoBar.*(message=...)` 参数名错导致 `TypeError` 被 Qt 静默吞掉。
 > 数据层的 1、2 与 UI 层的 4、5 都是代码 bug 已修；3 是平台侧风控，客户端
 > 修不掉，本版只做到「不再伪装」。
+>
+> 同版还加了**搜索 / 热榜右键下载**：两页此前只能看不能下。新增
+> `ui/row_actions.py` 把原始记录合成 URL → 走既有 `adapter.parse()` →
+> 入队；热搜词行语义为「搜该词条→视频入队」。实机实测 B 站两条路径
+> 全通（见 CHANGELOG 第六节）。
 > 详见 [CHANGELOG.md](CHANGELOG.md) 的 0.3.6 段。
 >
 > **本轮排查教训**：数据层用 `collect_hot_async` 直测拿到 200 行就以为修完了，

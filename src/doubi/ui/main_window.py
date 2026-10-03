@@ -137,6 +137,8 @@ def build_main_window():
                 tr("nav.search"),
                 position=NavigationItemPosition.TOP,
             )
+            # 0.3.6：搜索页右键「下载」需要任务管理器才能入队。
+            self.search_interface.set_task_manager(self.task_manager)
 
             self.hot_interface = HotPage(self)
             self.hot_interface.setObjectName("hotInterface")
@@ -146,6 +148,8 @@ def build_main_window():
                 tr("nav.hot"),
                 position=NavigationItemPosition.TOP,
             )
+            # 0.3.6：热榜页右键「下载」/「搜索该词条并下载」同理。
+            self.hot_interface.set_task_manager(self.task_manager)
 
             # ---- 设置 -----------------------------------------------
             self.settings_interface = SettingsPage(self)

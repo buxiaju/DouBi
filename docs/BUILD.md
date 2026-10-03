@@ -915,21 +915,33 @@ if ($p) {
       0.3.3 基线 `1004 passed / 184 skipped / 19.09s`；
       0.3.4 基线 `1029 passed / 188 skipped / 19.59s`；
       0.3.5 基线 `1031 passed / 203 skipped / 19.21s`；
-      **0.3.6 基线 `1056 passed / 208 skipped / 21.59s`**。耗时只是参考：
+      **0.3.6 基线 `1075 passed / 223 skipped / 20.12s`**。耗时只是参考：
       同一台机器复跑秒数会浮动，**passed / skipped 必须逐项相等**，
       秒数对不上不算回归）
+- [ ] **新测试文件别让「纯函数用例」跟着 GUI 一起被跳过**（0.3.6 教训）：
+      `ci` 口径下 PySide6 被 Blocker 屏蔽，凡 `_require_gui()` 的用例都变
+      skip。如果新文件的 `qapp` fixture 写成 `autouse=True`，**整份文件**
+      （含不需要 Qt 的纯逻辑用例）会一起折叠成 skip——0.3.6 的
+      `test_row_download_actions.py` 一开始就是这样：ci 下 34 例**全 skip**，
+      加进去 0 条真实保护。
+      改成「`qapp` 显式传参 + 构造函数走 `_page(qapp, factory)` 包装」后，
+      同一份文件在 ci 下变成 `19 passed / 15 skipped`——**19 条真的在跑**。
+      判据：`python scripts/run_full_tests.py --mode ci -- <新文件>`，
+      若输出只有 `N skipped` 一行、`passed` 为 0，就是这个毛病。
 - [ ] **本地全量回归拿准确数字**（0.3.1 新增，CHANGELOG 和 Release 正文里的
       回归数必须来自这一步）：`python scripts/run_full_tests.py`（默认 local
       口径）。它带真依赖跑，只排除 `tests/test_theme_apply_gui.py`——那 28 例
       带真 PySide6 会起 Qt 事件循环反复切主题，是「本地全量跑不动」的**唯一**
-      根因。**0.3.6 基线：`1345 passed / 7 skipped / 162.85s`**
+      根因。**0.3.6 基线：`1379 passed / 7 skipped / 104.85s`**
       （0.3.5 是 `1315 passed / 7 skipped / 100.05s`；
       0.3.4 是 `1298 passed / 7 skipped / 94.59s`；0.3.3 是 1304 收集 − 28
       排除 = 1276 → `1269 passed / 7 skipped / 86.54s`；0.3.2 是
       1278−28=1250 → `1243 passed / 7 skipped / 154.37s`；
       0.3.1 是 948−28=920 → `913 passed / 7 skipped`。
       0.3.5 的 +17 全部来自新增的 `tests/test_font_and_ui_caches.py`；
-      0.3.6 的 +22 全部来自新增的 `tests/test_search_hot_no_results.py`）。
+      0.3.6 的 +22 来自 `tests/test_search_hot_no_results.py`，
+      +8 来自 `tests/test_ui_qfluent_api_guards.py`，
+      +34 来自 `tests/test_row_download_actions.py`）。
       **0.3.3 耗时从 ~154s 降到 ~87s 不是机器变快**：主要是把 11 个「靠真网络
       请求失败凑绿灯」的用例改成打桩——`test_pipeline_smoke.py` 36.64s→0.45s、
       `test_server.py` 41.76s→1.12s。同样地，**拿 passed / skipped 当判据，别拿秒数**
