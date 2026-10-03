@@ -73,3 +73,58 @@ def test_spawn_refresh_schedules_on_running_loop():
 
     asyncio.run(_main())
     assert page.calls == 1
+
+
+def test_account_refresh_can_be_disabled_globally():
+    """``set_account_refresh_enabled(False)`` 必须让刷新彻底不跑（0.3.3）。
+
+    这条针对的是全量测试**真联网**的根因：设置页构造时
+    ``QTimer.singleShot(50, lambda: _spawn_account_refresh(self))`` 会排队一次
+    账号刷新。它由定时器驱动，实际执行时间是「构造它的用例之后的某次
+    ``processEvents()``」——于是触网被记在哪个用例上完全取决于运行顺序，
+    排查时会一路误导到不相干的文件上（实测最后落在
+    ``test_row_mapping_cache.py`` 的用例头上）。
+
+    执行链是 ``_spawn_account_refresh`` → 无 running loop → ``asyncio.run``
+    → ``bilibili_status()`` / ``douyin_status()`` → ``validate_cookies()``
+    → 真打 api.bilibili.com / www.douyin.com。
+
+    开关关掉后连协程都不该被构造，所以要同时断言「没执行」和「没建协程」。
+    """
+    from doubi.ui.pages import settings
+
+    page = _FakePage()
+    try:
+        settings.set_account_refresh_enabled(False)
+
+        # 1) 有可用 loop：不该被排进去
+        async def _main() -> None:
+            settings._spawn_account_refresh(page)
+            await asyncio.sleep(0)
+
+        asyncio.run(_main())
+        assert page.calls == 0, "关闭后不得再排刷新到 loop 上"
+
+        # 2) 没有可用 loop：也不该同步兜底跑
+        dead = asyncio.new_event_loop()
+        asyncio.set_event_loop(dead)
+        dead.close()
+        try:
+            settings._spawn_account_refresh(page)
+        finally:
+            asyncio.set_event_loop(None)
+        assert page.calls == 0, "关闭后不得走同步兜底分支"
+    finally:
+        settings.set_account_refresh_enabled(True)
+
+    # 复原后开关要恢复可用，否则会污染同进程后续用例
+    assert settings._ACCOUNT_REFRESH_ENABLED is True
+    asyncio.run(_run_once(page))
+    assert page.calls == 1
+
+
+async def _run_once(page) -> None:
+    from doubi.ui.pages import settings
+
+    settings._spawn_account_refresh(page)
+    await asyncio.sleep(0)

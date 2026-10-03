@@ -31,6 +31,22 @@ if str(SRC) not in sys.path:
 
 from doubi.cli import auth_cmd  # noqa: E402
 from doubi.platforms.bilibili import auth as bili_auth  # noqa: E402
+
+
+def _fail_network(monkeypatch) -> None:
+    """把 httpx 钉成「一用即炸」，让用例保证不碰真网络（0.3.3）。
+
+    两层防护里这是**第二层**：生产代码 ``validate_cookies`` 现在遇到
+    「没有 Cookie 文件」会直接返回未登录、根本不打 NAV_URL（0.3.3 加的
+    短路），所以下面两个用例其实已经走不到 httpx 了。保留这个钉子是为了
+    把「即使哪天短路被删掉，用例也不该真联网」钉死在测试侧——断言本身仍然
+    只验证「没有 Cookie 文件 ⇒ 未登录」这一件事。
+    """
+    def _boom(*args, **kwargs):  # noqa: ARG001
+        raise RuntimeError("[offline-test] network disabled")
+
+    monkeypatch.setattr("httpx.AsyncClient", _boom)
+
 from doubi.platforms.bilibili.qr_login import (  # noqa: E402
     BILIBILI_COOKIE_DOMAIN,
     CODE_NOT_SCANNED,
@@ -390,10 +406,42 @@ def test_validate_cookies_returns_login_info(monkeypatch, tmp_path):
     assert info.uid == 999
 
 
-def test_validate_cookies_no_file_returns_false(tmp_path):
+def test_validate_cookies_no_file_returns_false(tmp_path, monkeypatch):
+    # 0.3.3 修（两层）：生产代码原先先建 cookie dict、**再**打 NAV_URL，
+    # 文件缺失不会短路网络请求；现在 ``validate_cookies`` 在
+    # ``has_cookie_file()`` 为假时直接返回 ``LoginInfo(is_logged_in=False)``。
+    # 这里同时钉掉 httpx，保证即使那条短路将来被改掉，用例也不会去连
+    # api.bilibili.com。断言只关心「没有 cookie 文件 ⇒ 未登录」。
+    _fail_network(monkeypatch)
     p = tmp_path / "missing.txt"
     info = asyncio.run(bili_auth.validate_cookies(p))
     assert info.is_logged_in is False
+
+
+def test_validate_cookies_without_file_never_touches_httpx(tmp_path, monkeypatch):
+    """回归：没有 Cookie 文件时一个 HTTP 客户端都不许建（0.3.3）。
+
+    这条短路不是「顺手优化」——设置页构造 50ms 后会异步刷账号状态，
+    无 Cookie 环境下它以前每次都要真打 api.bilibili.com 才能拿到
+    「未登录」。全量断网扫描就是被这条路径污染的（触网用例随运行顺序
+    漂移，一路误导到不相干的测试文件上）。
+
+    判据用「探针」而不是「把 httpx 钉成抛异常」：只有真正**调用**了
+    ``httpx.AsyncClient`` 才算触网，构造被拦下来但代码走的是 except
+    分支时，测试仍会误判成通过。
+    """
+    calls: list[str] = []
+
+    class _Probe:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            calls.append("AsyncClient")
+            raise AssertionError("validate_cookies must not open a client here")
+
+    monkeypatch.setattr("httpx.AsyncClient", _Probe)
+    p = tmp_path / "missing.txt"          # 不存在 -> has_cookie_file() is False
+    info = asyncio.run(bili_auth.validate_cookies(p))
+    assert info.is_logged_in is False
+    assert calls == [], f"no cookie file must short-circuit before httpx: {calls}"
 
 
 def test_validate_cookies_network_failure(tmp_path):
@@ -523,6 +571,9 @@ def test_fetch_wbi_keys_missing_wbi_img(monkeypatch):
 
 
 def test_cli_auth_status_no_cookies(tmp_path, monkeypatch, capsys):
+    # 同 test_validate_cookies_no_file_returns_false：没有 cookie 文件时
+    # 生产代码已短路，这里再把网络钉掉做第二层防护（0.3.3 修）。
+    _fail_network(monkeypatch)
     monkeypatch.setattr(bili_auth, "default_cookie_path", lambda: tmp_path / "b.txt")
     rc = auth_cmd.cmd_auth_status(argparse_stub())
     assert rc == 0

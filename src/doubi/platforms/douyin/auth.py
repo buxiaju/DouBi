@@ -365,11 +365,18 @@ async def validate_cookies(cookies_file: Optional[Path] = None, *, timeout: floa
     p = cookies_file or default_cookie_path()
     cookies: dict[str, str] = {}
     has_login_state = False
-    if has_cookie_file(p):
+    has_file = has_cookie_file(p)
+    if has_file:
         for c in parse_netscape_file(p):
             cookies[c["name"]] = c["value"]
             if c["name"] in _LOGIN_STATE_COOKIES:
                 has_login_state = True
+    # 没有 Cookie 文件时**不要联网**：_login_state_from_cookie_file 的结果
+    # 就是「未登录」，请求 NAV_URL 只会白等一轮超时再走到同一个分支。
+    # 与 bilibili 侧同款短路，避免设置页在无 Cookie 环境下意外触网。
+    if not has_file:
+        logger.debug("validate_cookies: no cookie file at %s, skipping network", p)
+        return _login_state_from_cookie_file(p)
     try:
         async with httpx.AsyncClient(
             timeout=timeout,

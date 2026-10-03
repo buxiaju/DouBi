@@ -12,9 +12,15 @@
 |---|---|---|
 | 内核（库） | `doubi` | **✓** 平台无关内核 |
 | CLI | `doubi download -u URL` | **✓** 17 个子命令，覆盖下载 / 采集 / 登录 / 服务 |
-| REST 服务 | `doubi serve` | **✓** FastAPI + 内存任务队列 |
-| 桌面 GUI | `doubi-gui` | **✓** PySide6 Fluent，7 套主题 |
-| MCP 工具 | `doubi-mcp` | **✓** stdio JSON-RPC 2.0，7 个工具 |
+| REST 服务 | `doubi serve` | **✓** FastAPI + 内存任务队列（下载 + 采集双端点） |
+| 桌面 GUI | `doubi-gui` | **✓** PySide6 Fluent，7 套主题，6 个页面 |
+| MCP 工具 | `doubi-mcp` | **✓** stdio JSON-RPC 2.0，9 个工具 |
+
+> **0.3.3 起四形态覆盖面拉齐**：抖音采集能力（搜索 / 热榜）此前只有 CLI 能用，
+> 现在 GUI 有独立页面、MCP 有 `collect_search` / `collect_hot`、REST 有
+> `/api/v1/collect/*`，且**三层共用同一套归一化记录结构**（实现落在
+> `cli/main.py` 的 `collect_search_async()` / `collect_hot_async()`，
+> 不是各写一遍）。
 
 ## 支持平台
 
@@ -38,7 +44,7 @@ python scripts/build_installer.py
 
 | 形态 | 文件 | 体积（0.3.2 实测） | 说明 |
 |---|---|---|---|
-| **NSIS 安装包**（推荐给普通用户） | `dist/DouBi-Setup-0.3.2.exe` | **225.95 MB**（236,925,706 字节） | 双击安装到 `%LOCALAPPDATA%\DouBi`，**无 UAC 弹窗**；开始菜单 + 桌面快捷方式；控制面板正常卸载；卸载后仅剩一个 `doubi.db`（约 57 KB，见下），`~/.doubi` 配置默认保留 |
+| **NSIS 安装包**（推荐给普通用户） | `dist/DouBi-Setup-0.3.2.exe` | **225.95 MB**（236,925,706 字节） | 双击安装到 `%LOCALAPPDATA%\DouBi`，**无 UAC 弹窗**；开始菜单 + 桌面快捷方式；控制面板正常卸载；卸载后安装目录**零残留**（0.3.3 起，见下），`~/.doubi` 配置默认保留 |
 | **Onefile 便携版**（推荐给 U 盘/网盘） | `dist/doubi-gui.exe` | 体积精简后未重新量化 | 单文件即跑，启动时自解压到 `%TEMP%/_MEIxxxxx`；免安装；机器之间直接拷。**onefile 更容易被 Windows Defender 误报**（见 BUILD §5.5），对外分发优先用安装包 |
 | Onedir 绿色目录（内网分发） | `dist/doubi-gui/` | **706.6 MB / 1086 文件** | **启动最快**；直接 zip 打包即可发布「绿色版」 |
 
@@ -50,12 +56,12 @@ python scripts/build_installer.py
 > （只走 B 站 / 抖音 / YouTube 的 yt-dlp 路径），可以在
 > `scripts/build_exe.py` 里去掉 ms-playwright 的 `--add-data`，还能再砍一大块。
 >
-> **卸载残留一处（0.3.0 起已知，良性）**：卸载后安装目录、注册表、快捷方式都清干净，
-> 但会剩一个约 57 KB 的 `doubi.db`——数据库默认路径是相对路径，程序从安装目录
-> 启动时就写在那儿，NSIS 删不掉运行期生成的文件。里面只有下载历史，手动删除
-> 即可。**0.3.2 仍未修**：把默认位置挪到 `~/.doubi/` 要单独设计老用户迁移路径，
-> 见 ROADMAP P1-1。0.3.1 的 README 曾写「下一版会把默认位置挪过去」，那版没做到，
-> 这里改成指向 ROADMAP，不再留一个不兑现的承诺。
+> **卸载残留已清零（0.3.3 修复）**：0.3.0–0.3.2 卸载后会在安装目录里剩一个约
+> 57 KB 的 `doubi.db`——数据库当时是**相对路径**，程序以安装目录为 cwd 启动时
+> 就写在那儿，NSIS 删不掉运行期生成的文件。
+> **0.3.3 把 `doubi.db` 与 `download_manifest.jsonl` 的默认路径改到 `~/.doubi/`
+> 并带静默迁移**，安装目录不再产生任何运行期文件，卸载真正零残留。老用户的
+> `./var/*` 会在首次启动时自动搬到 `~/.doubi/`（目标已存在则不覆盖）。
 
 #### 下载后的 SHA256 校验（推荐做）
 
@@ -136,19 +142,27 @@ pip install -e ".[all]"
 抖音 web API 有签名风控，yt-dlp 拿不到容器类内容（合集 / 用户作品 / 搜索 / 收藏夹等），
 因此 DouBi 自建了一套签名管线。**以下能力全部可用**：
 
-| 能力 | CLI | 说明 |
-|---|---|---|
-| 单条视频 / 图文 | `download` | 走 yt-dlp |
-| 合集（列表 + 批量） | `mix` / `download` | 标题回查 + 翻页枚举；`/collection/{id}/{seq}` 也认 |
-| 用户作品列表 | `download` | USER 容器自动展开 |
-| **搜索** | `search` | 综合 / 视频 / 用户 / 直播 4 个子类，支持排序 / 时间 / 时长 / 粉丝量筛选 |
-| **热点榜** | `hot` | 热点榜 / 种草榜 / 娱乐榜 / 挑战榜 4 个榜单 |
-| **收藏夹全家族** | `favorites` | 收藏夹 + 收藏视频 / 合集 / 音乐 / 短剧 5 类 |
-| **评论 + 回复** | `comments` | 一级评论 + 嵌套回复 |
-| **关注 / 粉丝列表** | `user` | `--kind following\|followers`（DouBi 原生实现） |
-| **话题作品列表** | `hashtag` | 输入话题 id 或 `/challenge/detail/{id}` URL（DouBi 原生实现） |
-| **直播详情 + 多清晰度** | `live` | `--info` 只查 / `--quality` 直录；原画~流畅 6 档 |
+| 能力 | CLI | GUI | 说明 |
+|---|---|---|---|
+| 单条视频 / 图文 | `download` | ✓ | 走 yt-dlp |
+| 合集（列表 + 批量） | `mix` / `download` | ✓ | 标题回查 + 翻页枚举；`/collection/{id}/{seq}` 也认 |
+| 用户作品列表 | `download` | ✓ | USER 容器自动展开 |
+| **搜索** | `search` | ✓ **搜索页** | 综合 / 视频 / 用户 / 直播 4 个子类，支持排序 / 时间 / 时长 / 粉丝量筛选 |
+| **热点榜** | `hot` | ✓ **热榜页** | 热点榜 / 种草榜 / 娱乐榜 / 挑战榜 4 个榜单 |
+| **收藏夹全家族** | `favorites` | — | 收藏夹 + 收藏视频 / 合集 / 音乐 / 短剧 5 类 |
+| **评论 + 回复** | `comments` | — | 一级评论 + 嵌套回复 |
+| **关注 / 粉丝列表** | `user` | — | `--kind following\|followers`（DouBi 原生实现） |
+| **话题作品列表** | `hashtag` | — | 输入话题 id 或 `/challenge/detail/{id}` URL（DouBi 原生实现） |
+| **直播详情 + 多清晰度** | `live` | ✓ | `--info` 只查 / `--quality` 直录；原画~流畅 6 档 |
 
+> **GUI 侧（0.3.3 新增）**：导航栏多了「搜索」与「热榜」两个独立页面，对齐上表
+> 标 ✓ 的两项。未登录时不显示空表格，而是给明确的「去登录」引导——抖音搜索类
+> 接口在无 Cookie 时返回 403，空列表会让人误以为「搜不到东西」。
+>
+> **MCP / REST 侧（0.3.3 新增）**：MCP 工具 `collect_search` / `collect_hot`，
+> REST 端点 `GET /api/v1/collect/search` 与 `/api/v1/collect/hot`，参数与
+> 返回结构与 CLI **同构**（共用 `cli/main.py` 里的同一份实现）。
+>
 > 需要登录的能力（收藏夹 / 关注列表 / 部分评论）先跑 `doubi auth douyin`，
 > 再给对应子命令传 `--cookies-file ~/.doubi/cookies/douyin.txt`。
 > 未登录时会拿到 `403` 并在 stderr 给出 `hint=need_login` 提示，而不是静默返回空。
@@ -275,12 +289,20 @@ GUI 自带 7 套主题包，每套都有自己的底色、文字色与语义色�
 |---|---|---|
 | 配置文件 | `~/.doubi/config.yml` | GUI 设置页「保存设置」与 CLI 读的是同一份 |
 | 登录 Cookie | `~/.doubi/cookies/*.txt` | Netscape 格式，直接喂给 yt-dlp |
-| 下载记录库 | `doubi.db` | SQLite，去重 + 历史。**注意这是相对路径**：库落在程序启动时的当前工作目录，不在 `~/.doubi`——从开始菜单启动 GUI 就落在安装目录里。要固定位置就在 `config.yml` 里把 `database_path` 写成绝对路径（下一版会把默认值改到 `~/.doubi/`） |
-| 下载清单 | `download_manifest.jsonl` | 每行一条 JSON，便于外部工具消费。同样是相对路径，规则与 `doubi.db` 一致 |
+| 下载记录库 | `~/.doubi/doubi.db` | SQLite，去重 + 历史。**0.3.3 起默认落在这里**（此前是相对路径，落在 CWD） |
+| 下载清单 | `~/.doubi/download_manifest.jsonl` | 每行一条 JSON，便于外部工具消费。同上 |
 
-> `doubi.db` 与 `download_manifest.jsonl` 默认是**相对路径**，落在当前工作目录，
-> 不在 `~/.doubi` 里。想固定位置就在 `config.yml` 写绝对路径
-> （`database_path` / `manifest_path`），传空字符串则关闭该功能。
+> **0.3.3 之前的版本**把 `doubi.db` 与 `download_manifest.jsonl` 存成相对路径
+> （`./var/doubi.db`），从开始菜单启动 GUI 时会落在安装目录里——重装或被清理
+> 工具扫到就全丢，非管理员账户还写不进去。0.3.3 改成两个都在 `~/.doubi/`。
+>
+> **老用户自动迁移（静默）**：首次启动时若检测到原来的 `./var/doubi.db` /
+> `./var/download_manifest.jsonl`，程序会自动 `move` 到 `~/.doubi/`，不弹窗、
+> 不提示。**目标位置已存在文件时绝不覆盖**（放弃迁移，直接用新路径继续跑——
+> 覆盖等于删掉你的历史）。迁移失败只记日志，不阻断启动。
+>
+> 想指定别的位置：在 `config.yml` 里把 `database_path` / `manifest_path` 写成
+> 绝对路径即可；**传空字符串则关闭该功能**（不建库 / 不写清单）。
 
 卸载安装版时，`~/.doubi` 默认**保留**，重装后配置与登录状态还在；确实要清空，
 在卸载界面勾选对应选项。
@@ -320,20 +342,21 @@ DouBi/
 │   │   ├── widgets.py             # 共享组件（PageHeader / EmptyState / ...）
 │   │   ├── splash.py              # 闪屏
 │   │   ├── task_manager.py        # 暂停 / 继续 / 取消
-│   │   ├── pages/                 # parse / download / history / settings
-│   │   └── dialogs/               # login_dialog.py / about_dialog.py
+│   │   ├── pages/                 # parse / download / history / search / hot / settings
+│   │   └── dialogs/               # login_dialog.py / about_dialog.py / sms_verify_dialog.py
 │   └── mcp/                       # MCP 工具（stdio JSON-RPC）
 │       └── server.py
 ├── scripts/                       # 构建脚本
 │   ├── build_ico.py               # SVG → 多尺寸 .ico
 │   ├── build_exe.py               # PyInstaller onedir 打包
-│   └── build_installer.py         # 调 NSIS 生成安装程序
+│   ├── build_installer.py         # 调 NSIS 生成安装程序
+│   └── run_full_tests.py          # 全量测试两口径（local / ci）
 ├── installer/
-│   └── doubi.nsi                  # NSIS 安装脚本（免 UAC / 中文界面 / 卸载清理，仅剩 doubi.db）
+│   └── doubi.nsi                  # NSIS 安装脚本（免 UAC / 中文界面 / 卸载零残留）
 ├── tools/nsis/                    # 内置便携版 NSIS，clone 下来即可打包
 ├── screenshots/                   # 文档用截图
 ├── docs/                          # 见下方「文档」表
-└── tests/                         # 47 个测试文件，1278 条用例（其中逻辑层 1015）
+└── tests/                         # 51 个测试文件，1304 条用例（local 口径 1276）
 ```
 
 > 仓库里不含 `Bili23-Downloader-main/` 与 `douyin-downloader-main/` 这两个被整合的

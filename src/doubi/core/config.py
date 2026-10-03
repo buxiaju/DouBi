@@ -9,6 +9,7 @@ in during M5.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -19,6 +20,12 @@ try:
     _HAS_YAML = True
 except ImportError:  # pragma: no cover
     _HAS_YAML = False
+
+from .storage.paths import (
+    default_db_path as _default_db_path,
+    default_manifest_path as _default_manifest_path,
+    migrate_legacy_relpath as _migrate_legacy_relpath,
+)
 
 
 #: 无显式路径时读取的默认配置文件。GUI 设置页写入的就是这个文件，
@@ -47,8 +54,13 @@ DEFAULTS: dict[str, Any] = {
     # 多平台 cookie 由用户在 GUI 设置页选 / CLI --cookies-file 指定。
     "cookies_file": None,
     "database": True,
-    "database_path": "doubi.db",
-    "manifest_path": "download_manifest.jsonl",
+    # 0.3.3 P1-1 — defaults moved to ``~/.doubi/`` so uninstalling the
+    # NSIS package no longer leaves ``doubi.db`` next to ``doubi-gui.exe``.
+    # These strings are *sentinels*; :func:`load_config` rewrites them to
+    # the real absolute path via :func:`default_db_path` / :func:`default_manifest_path`
+    # at runtime so tests can monkeypatch ``Path.home``.
+    "database_path": "~/.doubi/doubi.db",
+    "manifest_path": "~/.doubi/download_manifest.jsonl",
     "theme": "default_light",
     # GUI 行为偏好：下载前是否弹出选项对话框让用户覆盖画质/容器等。
     # 默认 False 是有意为之——绝大多数下载用户就是「点一下就走」。
@@ -104,8 +116,25 @@ class AppConfig:
     proxy: Optional[str] = DEFAULTS["proxy"]
     cookies_file: Optional[Path] = DEFAULTS["cookies_file"]
     database: bool = DEFAULTS["database"]
-    database_path: Path = Path(DEFAULTS["database_path"])
-    manifest_path: Path = Path(DEFAULTS["manifest_path"])
+    # 0.3.3 P1-1 — use a factory so each ``AppConfig()`` invocation reads
+    # ``Path.home`` fresh (tests can monkey-patch it). ``DEFAULTS``
+    # carries the sentinel string ``"~/.doubi/..."``; the factory runs
+    # through :func:`_resolve_data_path` so the result is the canonical
+    # absolute path. See ``_resolve_data_path`` for the rationale.
+    database_path: Path = field(
+        default_factory=lambda: _resolve_data_path(
+            DEFAULTS["database_path"],
+            DEFAULTS["database_path"],
+            _default_db_path,
+        )
+    )
+    manifest_path: Path = field(
+        default_factory=lambda: _resolve_data_path(
+            DEFAULTS["manifest_path"],
+            DEFAULTS["manifest_path"],
+            _default_manifest_path,
+        )
+    )
     theme: str = DEFAULTS["theme"]
     prompt_before_download: bool = DEFAULTS["prompt_before_download"]
     duplicate_policy: str = DEFAULTS["duplicate_policy"]
@@ -165,6 +194,39 @@ def _coerce(value: Any, default: Any) -> Any:
     if isinstance(default, Path):
         return Path(str(value))
     return value
+
+
+#: 0.3.3 P1-1 sentinel — matches the strings set in :data:`DEFAULTS`.
+#: ``load_config`` rewrites them to ``data_home()``-relative absolute paths
+#: so a unit test that monkeypatches ``Path.home`` still sees the right
+#: default, and so a fresh install picks up the new home without a config
+#: migration.
+_DATA_PATH_SENTINELS = {
+    "~/.doubi/doubi.db",
+    "~/.doubi/download_manifest.jsonl",
+}
+
+
+def _resolve_data_path(
+    value: Any,
+    default: Any,
+    resolver: Any,
+) -> Path:
+    """Resolve ``database_path`` / ``manifest_path``.
+
+    * If ``value`` is the 0.3.3 sentinel string (``"~/.doubi/..."``) or
+      ``None``, call ``resolver()`` to expand to an absolute path.
+    * Otherwise, treat it as an explicit user choice — preserving any
+      relative-path-from-CWD layouts (e.g. ``./var/doubi.db``) that the
+      user might already have configured.
+    """
+    if value is None or (isinstance(value, str) and value in _DATA_PATH_SENTINELS):
+        return resolver()
+    if isinstance(value, Path):
+        return value
+    if isinstance(value, str):
+        return Path(value)
+    return _coerce(value, default)
 
 
 def load_config(path: Optional[Path] = None, *, env_prefix: str = "DOUBI_") -> AppConfig:
@@ -230,8 +292,12 @@ def load_config(path: Optional[Path] = None, *, env_prefix: str = "DOUBI_") -> A
             DEFAULTS["cookies_file"],
         ),
         database=_coerce(data["database"], DEFAULTS["database"]),
-        database_path=_coerce(data["database_path"], DEFAULTS["database_path"]),
-        manifest_path=_coerce(data["manifest_path"], DEFAULTS["manifest_path"]),
+        database_path=_resolve_data_path(
+            data["database_path"], DEFAULTS["database_path"], _default_db_path,
+        ),
+        manifest_path=_resolve_data_path(
+            data["manifest_path"], DEFAULTS["manifest_path"], _default_manifest_path,
+        ),
         theme=str(data["theme"]),
         prompt_before_download=_coerce(
             data.get("prompt_before_download", DEFAULTS["prompt_before_download"]),
@@ -264,4 +330,22 @@ def load_config(path: Optional[Path] = None, *, env_prefix: str = "DOUBI_") -> A
             data.get("notify_on_completion", DEFAULTS["notify_on_completion"]),
         ),
     )
+    # 0.3.3 P1-1 — best-effort one-shot migration of the legacy CWD-
+    # relative ``doubi.db`` / ``download_manifest.jsonl`` into the new
+    # data home. Silent on purpose (per the upgrade decision in
+    # ROADMAP): the user's history must follow them, but the only
+    # safe behaviour when nothing is left to migrate is no-op.
+    # Wrapped in ``try`` because a broken migration must never block
+    # application start — at that point the user can't even open the
+    # GUI to fix it.
+    try:
+        _migrate_legacy_relpath(
+            target_db=cfg.database_path,
+            target_manifest=cfg.manifest_path,
+        )
+    except OSError:
+        # OSError covers permission / disk-full / locked-file cases;
+        # :func:`migrate_legacy_relpath` already swallows the rest.
+        logger = logging.getLogger("doubi.core.config")
+        logger.warning("legacy db/manifest migration failed; ignoring", exc_info=True)
     return cfg

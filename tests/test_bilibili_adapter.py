@@ -317,6 +317,21 @@ def _fake_bili_info_dict(**overrides) -> dict:
     return base
 
 
+def _stub_view_api(monkeypatch, adapter, view_data: dict | None) -> None:
+    """把 adapter 的 view API 调用钉死，避免 parse 走到真网络。
+
+    0.3.3 修：``BilibiliAdapter._parse_single`` 除了 ``api.fetch`` 还会调
+    ``api.fetch_view_data``（打 ``api.bilibili.com/x/web-interface/view``）
+    来补分P / 合集信息。只 stub ``fetch`` 的用例仍在真联网——网络通畅时
+    靠「返回 None」侥幸变绿，网络被黑洞时整轮全量跑就挂死在这里
+    （实测 >2min 无返回）。传 ``None`` 表示「view API 查不到」。
+    """
+    async def _fake_view_data(bvid, *args, **kwargs):  # noqa: ARG001
+        return view_data
+
+    monkeypatch.setattr(adapter.api, "fetch_view_data", _fake_view_data)
+
+
 def test_api_to_media_item_basic():
     item = BilibiliAPI().to_media_item(_fake_bili_info_dict(), "https://www.bilibili.com/video/BV1xx411c7mD")
     assert item.platform is Platform.BILIBILI
@@ -612,6 +627,11 @@ def test_adapter_parse_video_populates_metadata(monkeypatch):
     async def _fake_fetch(url, *, allow_playlist=False):
         return _fake_bili_info_dict()
     monkeypatch.setattr(a.api, "fetch", _fake_fetch)
+    # 0.3.3 修：只 stub fetch 是不够的——adapter 之后还会调
+    # ``fetch_view_data`` 去补合集/分P 信息，那条路直接打
+    # api.bilibili.com。走真网络时这个用例既慢又看心情。这里把 view API
+    # 也钉成「查不到」，让断言落在 yt-dlp info 本身。
+    _stub_view_api(monkeypatch, a, None)
 
     item = asyncio.run(a.parse("https://www.bilibili.com/video/BV1xx411c7mD"))
     assert item is not None
@@ -624,6 +644,7 @@ def test_adapter_parse_video_populates_metadata(monkeypatch):
 def test_adapter_parse_multi_page_video_expands_to_container(monkeypatch):
     """BV 分P（多页）视频应被解析为 COLLECTION 容器 + children。"""
     a = BilibiliAdapter()
+    _stub_view_api(monkeypatch, a, None)
 
     async def _fake_fetch(url, *, allow_playlist=False):
         # 模拟 yt-dlp 对分P视频返回 playlist + entries
@@ -690,6 +711,7 @@ def test_adapter_parse_multi_page_video_expands_to_container(monkeypatch):
 def test_adapter_parse_single_page_video_not_container(monkeypatch):
     """只有 1 分P（真正单视频）时不应展开成容器。"""
     a = BilibiliAdapter()
+    _stub_view_api(monkeypatch, a, None)
 
     async def _fake_fetch(url, *, allow_playlist=False):
         # _type=playlist 但 entries 只有 1 个 => 按单视频处理

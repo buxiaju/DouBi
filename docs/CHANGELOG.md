@@ -1,5 +1,177 @@
 # Changelog
 
+## 0.3.3 (2026-10-03) — P1 三条收口 + 全量测试「零真实网络访问」
+
+> 本版做完 [ROADMAP](ROADMAP.md) 的三条 P1（数据路径迁移 / GUI 接入采集 /
+> MCP + REST 覆盖采集），并把发版前体检里发现的**测试套件真联网**问题彻底收敛：
+> 全量 1269 例在断网插件下 **0 次真实 `getaddrinfo`**（此前 13 个用例在真联网，
+> 其中一条会让全量跑挂死 150s+）。
+> 版本号单一真源 `src/doubi/__init__.py` 由 0.3.2 升至 0.3.3，GUI 标题栏 /
+> `doubi -V` / REST `/health` / MCP `serverInfo` / 安装包文件名全部派生自它。
+
+### 一、P1-1 `doubi.db` / `download_manifest.jsonl` 默认路径迁到 `~/.doubi/`
+
+**根因**：两者一直是**相对路径**（`./var/doubi.db`、`./var/download_manifest.jsonl`），
+从开始菜单启动 GUI 时 CWD 是安装目录，于是数据库与下载历史**落在 Program Files 里**——
+重装或被清理工具扫到就全丢，且非管理员账户写不进去。
+
+新增 `core/storage/paths.py` 作为**唯一真源**：
+
+| 函数 | 作用 |
+|---|---|
+| `DATA_HOME_NAME` / `data_home()` | `~/.doubi/` |
+| `default_db_path()` | `~/.doubi/doubi.db` |
+| `default_manifest_path()` | `~/.doubi/download_manifest.jsonl` |
+| `migrate_legacy_relpath()` | 老的 `./var/*` 静默搬到新位置 |
+
+**迁移按用户拍板走「静默」**：`load_config()` 里检测到老文件就 `shutil.move()`
+自动搬，不弹窗不提示。三条硬约束：
+
+- **目标已存在时绝不覆盖**（直接放弃迁移，用新路径继续跑）——覆盖等于删用户历史；
+- `OSError` 只记日志、不阻断启动；
+- 传空字符串仍然关闭该功能（老契约不变）。
+
+**实现上刻意不用「import 时求值绝对路径」**：`core/config.py` 存的是 sentinel
+字符串，靠 `_DATA_PATH_SENTINELS` + `_resolve_data_path()` + `field(default_factory=...)`
+在**构造 dataclass 时**才展开。否则单测无法 `monkeypatch` `Path.home`，
+「不同 HOME 下默认值不同」这条就没法验证。
+
+### 二、P1-3 GUI 接入抖音采集能力（两个新页面）
+
+此前 CLI 已有 8 个采集子命令，GUI 侧**一个都够不着**——只用 GUI 的用户完全
+看不到这个能力。本版补两个独立页面：
+
+| 页面 | 文件 | 内容 |
+|---|---|---|
+| 搜索 | `ui/pages/search.py` | 4 通道（综合/视频/用户/直播），对齐 CLI `search --type` |
+| 热榜 | `ui/pages/hot.py` | 5 榜（总榜/正能量/娱乐/社会/挑战），对齐 CLI `hot` |
+
+- `ui/main_window.py` 导航栏补 `searchInterface` / `hotInterface` 两项，
+  i18n 补 `nav.search` / `nav.hot`（中英双语）。
+- **未登录不再是空列表**：抖音搜索类接口在无 Cookie 时返回 403，页面识别这种情况
+  后给明确的「去登录」空状态引导，这正是 ROADMAP P1-3 写的验收点。
+- `CHANNEL_OPTIONS` / `BOARD_OPTIONS` 提到**模块级**，单测直接读常量即可锁住
+  「通道没漂移」，不必去碰 factory 的栈帧。
+
+### 三、P1-4 MCP / REST 覆盖采集能力
+
+- MCP 从 7 个工具增至 **9 个**，新增 `collect_search` / `collect_hot`。
+- REST 新增 `GET /api/v1/collect/search` 与 `GET /api/v1/collect/hot`。
+- **抽共享核心而非各层重写**：`collect_search_async()` / `collect_hot_async()`
+  落在 `cli/main.py`，MCP 与 REST 都 `from doubi.cli.main import ...`。
+  三层（CLI / MCP / REST）因此共用同一套参数校验与归一化记录结构，
+  不会出现「CLI 加了字段、MCP 没跟上」的漂移。
+
+### 四、测试套件真联网问题（本版最大的一块）
+
+用自建断网插件（拦截非 loopback 的 `socket.connect` / `getaddrinfo`）扫描全量，
+发现 **13 个用例在真联网**。逐条定位后修掉，其中第一条是**生产代码 bug**。
+
+#### 4.1 抖音 `DouyinAPI._ytdlp` 注入失效（生产 bug，最严重）
+
+`platforms/douyin/api.py` 的 `_extract_sync` 直接用**模块级** `yt_dlp.YoutubeDL`，
+而 `self._ytdlp` 注入槽从未被读取（全仓仅 `__init__` 一处赋值）。
+后果是 `tests/test_douyin_adapter.py::test_api_fetch_returns_none_on_error`
+的 monkeypatch **完全落空** → 真连 douyin / tiktok HTTPS，单独跑卡 150s+
+不返回。**这也是此前两个后台全量任务双双击穿 600s 超时的真根因**
+（当时误判成 `test_server.py` 的既有慢测试）。
+
+修法：按 bilibili / engines 同款加 `@property ytdlp`，`_extract_sync` 改走
+`self.ytdlp`；并加回归测试 `test_api_fetch_routes_through_injected_ytdlp_module`，
+用「一碰就记一笔」的探针断言模块级 `yt_dlp` **没被用过**。修后该文件
+**58 passed / 0.54s**。
+
+#### 4.2 设置页「启动后自动刷账号状态」导致跨用例触网
+
+全量扫描里始终有 **8 次 `getaddrinfo`**（`api.bilibili.com` / `www.douyin.com`
+各 4 次）收敛不掉。它的特征极易误诊：
+
+- 报的用例**随运行顺序漂移**（有时 `test_row_mapping_full_cycle`，
+  有时 `test_interleaved_page_rows_resolve_correctly`，
+  有时 `test_ui_polish.py::test_splash_*`）——**不在触网者自身**；
+- 调用来自 `ThreadPoolExecutor` worker 线程，不是测试主体线程；
+- 该用例**单独跑 0 触网**。
+
+用「在 `getaddrinfo` 被调用时 dump 线程栈 + 包装 `ThreadPoolExecutor.submit`
+记录提交栈」的插件（`.scratch/nonetpkg/nonetT.py`）抓到完整链路：
+
+```
+settings.py:192  QTimer.singleShot(50, lambda: _spawn_account_refresh(self))
+settings.py:76   _spawn_account_refresh        <- 无 running loop → asyncio.run
+settings.py:616  _refresh_account_status_async
+auth_actions.py:60  bilibili_status
+bilibili/auth.py    validate_cookies
+asyncio/base_events.py:940 in getaddrinfo      <- 真联网
+```
+
+**根因**：`SettingsPage.__init__` 排的那个 50ms `singleShot` 闭包持有 page 强引用，
+会在**构造它的用例之后**的任意一次 `processEvents()` 里执行。所以「哪个用例被记为
+联网」纯看运行顺序——排查时一路误导到不相干的文件上。
+
+修法两层：
+
+1. **生产侧**：`bilibili/auth.py` 与 `douyin/auth.py` 的 `validate_cookies`
+   在 `has_cookie_file()` 为假时**直接返回未登录、不打 HTTP**。这本身是正确性
+   修复（没有 Cookie 文件必然未登录，请求只是白等一轮超时）。
+2. **测试侧**：新增 `set_account_refresh_enabled(False)` 总开关，
+   `test_row_mapping_cache.py` 的 autouse fixture 关掉它。因为本机
+   `~/.doubi/cookies/` 下**确实存在** Cookie 文件，光靠第 1 条短路挡不住。
+
+回归测试 `test_account_refresh_can_be_disabled_globally` 已做 A/B 验证：
+把 guard 去掉即复现失败（`assert 1 == 0`），加回即转绿。
+
+#### 4.3 其余 11 个用例「靠真网络请求失败凑绿灯」
+
+| 文件 | 用例数 | 问题 |
+|---|---|---|
+| `test_mcp.py` | 2 | 收了 `monkeypatch` 却没用，`example.com` 真跑 yt-dlp |
+| `test_pipeline_smoke.py` | 5 | 4 个真跑适配器联网 + 1 个**真起 Chromium 烧 26s** |
+| `test_server.py` | 2 | 真跑适配器 parse |
+| `test_bilibili_adapter.py` | 3 | `_parse_single` 除 `api.fetch` 还会调 `fetch_view_data`，只 stub 前者不够 |
+| `test_bilibili_auth.py` | 2 | `validate_cookies` 无 cookie 文件也照打 `NAV_URL` |
+| `test_mcp.py` | 1 | P1-4 新增两个工具，刻意用 `==` 的断言过期 |
+
+打桩原则：**打生产代码的真实调用点，而不是绕过断言**。
+
+- pipeline 用「保留真 `platform` / `name` / `match_url`、只替换 `parse`」的 detect
+  包装，保住 registry 路由断言；
+- server 用「保留 `priority`」的桩，保住 `sniffing` 判据；
+- `test_generic_adapter_parse_returns_sniff_error_item` 改为 stub `Sniffer.sniff`
+  返回 `SniffResult(items=[], error=...)`（**生产同形态**），而不是伪造异常——
+  后者会绕过 `parse` 内部 except 直接冒泡。
+
+**修后耗时**：`test_pipeline_smoke.py` **36.64s → 0.45s**；
+`test_server.py` **41.76s → 1.12s**。
+
+### 五、`ci` 口径暴露的可选依赖缺陷（P1-3 引入，本版修掉）
+
+`tests/test_search_hot_pages.py` 的 3 个用例把 PySide6 当成必装依赖，没有
+`_require_gui()` 跳过。`scripts/run_full_tests.py --mode ci`（模拟 CI 的
+`pip install .`，9 个可选包全缺）下直接 `ModuleNotFoundError` 而非 skip，
+**3 failed**。
+
+修法按仓库既有契约补 `_require_gui()`；并顺带把「读模块级常量」的用例拆出来
+（`CHANNEL_OPTIONS` / `BOARD_OPTIONS` / i18n / `main_window` 源码检查）——
+这些**不需要 Qt**，无 GUI 环境下照样能守住「四个通道没漂移」，不该被一起跳过。
+
+### 六、回归
+
+- **`local` 口径**：**1269 passed / 7 skipped / ~87s**
+  （0.3.2 是 1243/7 / ~154s；耗时下降主要来自 4.3 的打桩）。
+- **`ci` 口径**：**1004 passed / 184 skipped / ~19s**（0.3.2 是 981/181 / ~53s）。
+- **断网口径**（`-p nonet`，全量）：**0 次真实 `getaddrinfo`**，1267 passed。
+- **新增测试文件 3 个**：`test_storage_paths.py`（9 例）、
+  `test_search_hot_pages.py`（7 例）、`test_collect_tools.py`（7 例）。
+- **新增回归用例 2 条**：`test_api_fetch_routes_through_injected_ytdlp_module`
+  （锁 `_ytdlp` 注入接缝）、`test_validate_cookies_without_file_never_touches_httpx`
+  （探针式断言，只有真**调用**了 `httpx.AsyncClient` 才算触网）、
+  `test_account_refresh_can_be_disabled_globally`（锁设置页总开关）。
+- **`scripts/run_full_tests.py` 基线数字重新标定**：`ci` 981/181 → 1004/184，
+  `local` 1243/7 → 1269/7（旧数字在每次新增用例后都会误导判绿）。
+- `ruff`：本次触碰的源文件 0 新增；仓库其余 139 处为历史遗留（ROADMAP P3-3）。
+
+---
+
 ## 0.3.2 (2026-10-02) — 抖音采集全家桶落地 + 注解可求值性修复 + Android 板块移出
 
 > 本版把此前一直躺在工作区、从未提交的 M6.48–M6.59 成果正式入库（68 个文件、

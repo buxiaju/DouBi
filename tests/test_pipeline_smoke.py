@@ -12,6 +12,7 @@ These tests cover:
 from __future__ import annotations
 
 import asyncio
+import copy
 import sys
 from pathlib import Path
 
@@ -25,6 +26,7 @@ if str(SRC) not in sys.path:
 
 # Import after path adjustment
 from doubi.core.models import (  # noqa: E402
+    Author,
     MediaItem,
     MediaType,
     Platform,
@@ -57,9 +59,72 @@ def _ensure_adapters_loaded():
     yield
 
 
+def _stub_adapter_parse(monkeypatch, **overrides):
+    """把 ``PlatformRegistry.detect`` 命中的适配器换成不联网的桩。
+
+    0.3.3 修：``test_pipeline_parse_*`` / ``..._uses_fake_engine`` 原先直接拿
+    真实 URL 走 ``pipeline.parse``，而 ``parse`` 会调适配器的真 ``parse`` →
+    yt-dlp → 真实网络。这些用例的本意只是验证「pipeline 正确路由到平台适配器、
+    并把返回值透传」，跟网络上有没有这个视频毫无关系。网络通畅时它们靠真请求
+    侥幸变绿，网络被黑洞时整轮全量跑就挂死在 ``/video/7123456789012345678``
+    这种不存在的资源上。
+
+    桩只替换 ``parse``，``platform`` / ``name`` / ``match_url`` 全部保留真值——
+    断言仍然覆盖 registry 的路由与平台识别。
+    """
+    async def _fake_parse(url, *args, **kwargs):  # noqa: ARG001
+        return _mk_item(url, **overrides)
+
+    monkeypatch.setattr(PlatformRegistry, "detect", _detect_with_stub(_fake_parse))
+
+
+def _detect_with_stub(fake_parse):
+    real_detect = PlatformRegistry.detect
+
+    def _detect(url, *args, **kwargs):
+        adapter = real_detect(url, *args, **kwargs)
+        if adapter is None:
+            return None
+        stub = copy.copy(adapter)
+        stub.parse = fake_parse
+        return stub
+
+    return _detect
+
+
+def _mk_item(url: str, **overrides) -> MediaItem:
+    """按 URL 造一个「平台识别正确」的最小 MediaItem。"""
+    from doubi.platforms.douyin.url import classify_douyin_url, DouyinURLType
+
+    platform = Platform.DOUYIN if "douyin.com" in url else Platform.BILIBILI
+    media_type = MediaType.VIDEO
+    item_id = "unknown"
+
+    if platform is Platform.DOUYIN:
+        kind = classify_douyin_url(url)
+        item_id = url.rstrip("/").rsplit("/", 1)[-1].split("?")[0]
+        if kind is DouyinURLType.LIVE:
+            media_type = MediaType.LIVE
+    else:
+        tail = url.rstrip("/").rsplit("/", 1)[-1].split("?")[0]
+        item_id = tail
+        if "/bangumi/" in url:
+            media_type = MediaType.BANGUMI
+
+    return MediaItem(
+        platform=platform,
+        item_id=item_id,
+        title=f"stub:{item_id}",
+        author=Author(id="stub", name="stub"),
+        media_type=media_type,
+        source_url=url,
+        extra={"stubbed": True},
+        **overrides,
+    )
+
+
 class _FakeEngine(Engine):
     """Engine that records calls and pretends to succeed."""
-
     name = "fake"
     supports_calls: list = []
     download_calls: list = []
@@ -209,7 +274,8 @@ def test_registry_detect_douyin_modal_id():
 # ---------------------------------------------------------------------------
 
 
-def test_pipeline_parse_douyin():
+def test_pipeline_parse_douyin(monkeypatch):
+    _stub_adapter_parse(monkeypatch)
     pipeline = DownloadPipeline(engine=_FakeEngine())
     item = asyncio.run(pipeline.parse("https://www.douyin.com/video/7123456789012345678"))
     assert item is not None
@@ -219,7 +285,8 @@ def test_pipeline_parse_douyin():
     assert item.source_url.startswith("https://www.douyin.com/")
 
 
-def test_pipeline_parse_bilibili_bvid():
+def test_pipeline_parse_bilibili_bvid(monkeypatch):
+    _stub_adapter_parse(monkeypatch)
     pipeline = DownloadPipeline(engine=_FakeEngine())
     item = asyncio.run(pipeline.parse("https://www.bilibili.com/video/BV1xx411c7mD"))
     assert item is not None
@@ -228,7 +295,8 @@ def test_pipeline_parse_bilibili_bvid():
     assert item.media_type is MediaType.VIDEO
 
 
-def test_pipeline_parse_bilibili_bangumi():
+def test_pipeline_parse_bilibili_bangumi(monkeypatch):
+    _stub_adapter_parse(monkeypatch)
     pipeline = DownloadPipeline(engine=_FakeEngine())
     item = asyncio.run(pipeline.parse("https://www.bilibili.com/bangumi/play/ss12345"))
     assert item is not None
@@ -236,7 +304,7 @@ def test_pipeline_parse_bilibili_bangumi():
     assert item.item_id == "ss12345"
 
 
-def test_pipeline_process_url_unknown_returns_none_ytdlp_failed():
+def test_pipeline_process_url_unknown_returns_none_ytdlp_failed(monkeypatch):
     """M6.17+ 兜底链变更：不认识的 URL 先走 ytdlp_generic（priority=-1），
 
     yt-dlp 解析失败时返回 ``None``——pipeline 不再自动 chain 到 generic
@@ -246,7 +314,27 @@ def test_pipeline_process_url_unknown_returns_none_ytdlp_failed():
 
     * M6.16: registry.detect → generic → sniff 失败 → 错误 MediaItem
     * M6.17+: registry.detect → ytdlp_generic → yt-dlp DownloadError → ``None``
+
+    0.3.3 修：本用例原先直接拿 ``https://example.com/something`` 去跑，靠
+    真实网络请求报错来凑出 ``None``。网络被黑洞时整个全量跑挂死在这里，
+    而且绿灯与否取决于当时能不能连上 example.com。这里把 yt-dlp 本身换成
+    「一进 with 就抛 DownloadError」的桩，把断言落回它真正想验证的那条
+    链路（yt-dlp 失败 → adapter 返回 None → pipeline 透传）。
     """
+    import yt_dlp
+
+    class _BoomYDL:
+        def __init__(self, opts):        # noqa: ARG002 - 对齐真实签名即可
+            pass
+
+        def __enter__(self):
+            raise yt_dlp.utils.DownloadError("simulated: 404 / 站点不存在")
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", _BoomYDL)
+
     pipeline = DownloadPipeline(engine=_FakeEngine())
     item = asyncio.run(pipeline.process_url(
         "https://example.com/something",
@@ -257,13 +345,32 @@ def test_pipeline_process_url_unknown_returns_none_ytdlp_failed():
     assert item is None
 
 
-def test_generic_adapter_parse_returns_sniff_error_item():
+def test_generic_adapter_parse_returns_sniff_error_item(monkeypatch):
     """保留 M6.16 的 sniff 错误 item 路径——直接测 GenericAdapter。
 
     M6.17 之后 pipeline.process_url 不再自动走 generic，但 GenericAdapter
     本身仍然返回 sniff 错误 item（用户可主动调，或 CLI ``--force-sniff`` 触发）。
+
+    0.3.3 修：本用例原先放真浏览器去嗅探 ``https://example.com/something``，
+    固定烧掉 ~26s（全量 local 口径里 `--durations` 的头号大户），且依赖网络与
+    本机 Playwright。断言关心的只是「嗅探失败 ⇒ 返回带 sniff_error 的错误
+    item」，所以把 ``Sniffer.sniff`` 换成「返回带 error 的结果」——正是生产
+    代码里 Playwright 缺失 / 超时 / 0 个 URL 的形态。
     """
+    from doubi.core.sniffer import SniffResult, Sniffer
     from doubi.platforms.generic import GenericAdapter
+
+    async def _no_urls(self, url, *args, **kwargs):  # noqa: ARG001
+        # 与真实嗅探失败同形：items 空 + error 有值，但拿到页面标题。
+        return SniffResult(
+            page_url=url,
+            page_title="Example Domain",
+            items=[],
+            error="simulated: 未嗅探到任何视频 URL",
+        )
+
+    monkeypatch.setattr(Sniffer, "sniff", _no_urls)
+
     adapter = GenericAdapter()
     item = asyncio.run(adapter.parse("https://example.com/something"))
     assert item is not None
@@ -272,7 +379,8 @@ def test_generic_adapter_parse_returns_sniff_error_item():
     assert "sniff_error" in item.extra or "sniffed_from" in item.extra
 
 
-def test_pipeline_process_url_uses_fake_engine():
+def test_pipeline_process_url_uses_fake_engine(monkeypatch):
+    _stub_adapter_parse(monkeypatch)
     _FakeEngine.download_calls = []
     pipeline = DownloadPipeline(engine=_FakeEngine(), max_concurrent=2)
     options = DownloadOptions(output_root=Path("./_test_out"))

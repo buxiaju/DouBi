@@ -449,6 +449,49 @@ def no_real_browser(monkeypatch):
     monkeypatch.setattr("doubi.platforms.generic.adapter.Sniffer", _Stub)
 
 
+@pytest.fixture
+def stub_adapter_parse(monkeypatch):
+    """把「适配器真解析」换成不联网的桩。
+
+    0.3.3 修：``no_real_browser`` 只拦了 GenericAdapter 的 Sniffer，但
+    ``POST /api/v1/parse`` 对**具体平台** URL（B 站 BV 号）会走真适配器 →
+    yt-dlp → api.bilibili.com；对未知 URL 也会先走 ytdlp_generic 打真网络。
+    这组用例只验证「提交 + 轮询」的路由契约，跟网络上有没有这个视频无关。
+
+    桩按 ``detect()`` 命中的适配器整份替换 ``parse``，``priority`` 等属性
+    保持真值——``sniffing`` / ``expected_sec`` 的判据正是 ``priority < 0``。
+    """
+    import copy
+
+    from doubi.core.models import Author, MediaItem, MediaType, Platform
+    from doubi.core.registry import PlatformRegistry
+
+    real_detect = PlatformRegistry.detect
+    calls: list[str] = []
+
+    async def _fake_parse(self, url, *args, **kwargs):  # noqa: ARG001
+        calls.append(url)
+        if "bilibili.com" in url:
+            return MediaItem(
+                platform=Platform.BILIBILI, item_id="BV1xx411c7mD", title="stub",
+                author=Author(name="stub"), media_type=MediaType.VIDEO,
+                source_url=url, extra={"stubbed": True},
+            )
+        # 未知 URL 走 ytdlp_generic 的真实形态：解析不出来
+        return None
+
+    def _detect(url, *args, **kwargs):
+        adapter = real_detect(url, *args, **kwargs)
+        if adapter is None:
+            return None
+        stub = copy.copy(adapter)
+        stub.parse = _fake_parse.__get__(stub, type(stub))
+        return stub
+
+    monkeypatch.setattr(PlatformRegistry, "detect", _detect)
+    return calls
+
+
 def test_sniff_capability_selfcheck(client):
     """``GET /api/v1/sniff/status`` 无 task_id 时回能力自检。
 
@@ -473,7 +516,7 @@ def test_parse_rejects_blank_url(client):
     assert 400 <= r.status_code < 500
 
 
-def test_parse_returns_task_id_and_is_pollable(client, no_real_browser):
+def test_parse_returns_task_id_and_is_pollable(client, no_real_browser, stub_adapter_parse):
     """解析走「提交 + 轮询」：POST 立刻回 task_id，GET 能查到同一条记录。
 
     同步返回是不行的——兜底嗅探要真起浏览器并等满 ``sniff_duration_sec`` 秒，
@@ -494,7 +537,7 @@ def test_parse_returns_task_id_and_is_pollable(client, no_real_browser):
     assert "_task" not in r2.json()
 
 
-def test_parse_flags_sniffing_only_for_generic_fallback(client, no_real_browser):
+def test_parse_flags_sniffing_only_for_generic_fallback(client, no_real_browser, stub_adapter_parse):
     """``sniffing`` 只对走兜底的 URL 为真。
 
     M6.16 起 ``detect()`` 对**任意** http(s) URL 都返回非 None（GenericAdapter

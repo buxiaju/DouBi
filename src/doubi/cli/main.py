@@ -624,86 +624,36 @@ async def _cmd_search(args: argparse.Namespace) -> int:
     ``DOUYIN_SIGNED_PATHS`` whitelist so the WebSign attachment is
     automatic.
 
+    0.3.3 P1-4 — the actual fetching lives in :func:`collect_search_async`
+    so MCP / REST callers get identical records. This function only
+    handles CLI plumbing: argparse → records → JSONL.
+
     Exit codes:
         0  results written (including 0 hits)
         2  no keyword supplied / argparse error (argparse already exits)
         3  search itself failed (network, 403, ...)
     """
-    from doubi.platforms.douyin.webapi import DouyinWebAPI
-
     keyword = (args.keyword or "").strip()
     if not keyword:
         print("Error: keyword required.", file=sys.stderr)
         return 2
 
-    api = DouyinWebAPI(
-        cookies_file=args.cookies_file,
-        proxy=args.proxy,
-        timeout=15.0,
-    )
-
-    error_sink: dict[str, Any] = {}
     try:
-        if args.type == "general":
-            results = await api.search_general(
-                keyword,
-                count=args.count,
-                max_count=args.max,
-                sort_type=args.sort,
-                publish_time=args.days,
-                duration=args.duration,
-                search_range=args.follow,
-                content_type=args.content,
-                error_sink=error_sink,
-            )
-        elif args.type == "video":
-            results = await api.search_video(
-                keyword,
-                count=args.count,
-                max_count=args.max,
-                sort_type=args.sort,
-                publish_time=args.days,
-                duration=args.duration,
-                search_range=args.follow,
-                error_sink=error_sink,
-            )
-        elif args.type == "user":
-            results = await api.search_user(
-                keyword,
-                count=args.count,
-                max_count=args.max,
-                fans=args.fans,
-                user_type=args.user_type,
-                error_sink=error_sink,
-            )
-        else:  # "live"
-            results = await api.search_live(
-                keyword,
-                count=args.count,
-                max_count=args.max,
-                error_sink=error_sink,
-            )
+        results = await collect_search_async(
+            keyword=keyword,
+            channel=args.type,
+            max_count=args.max,
+            cookies_file=args.cookies_file,
+            proxy=args.proxy,
+        )
     except Exception as exc:  # noqa: BLE001
         print(f"Error: search failed: {exc}", file=sys.stderr)
         return 3
 
     if not results:
-        if error_sink:
-            reason = error_sink.get("reason", "unknown")
-            hint = error_sink.get("hint", "transient")
-            print(
-                f"No results. error_sink: {reason} (hint={hint})",
-                file=sys.stderr,
-            )
-            if hint == "need_login":
-                print(
-                    "Hint: try `--cookies-file ~/.doubi/cookies/douyin.txt` "
-                    "after running `doubi auth douyin`.",
-                    file=sys.stderr,
-                )
-        else:
-            print("No results.", file=sys.stderr)
-        return 0  # 0 hits is not an error
+        # 0 hits is not an error; the GUI surfaces the empty table.
+        print("No results.", file=sys.stderr)
+        return 0
 
     # Emit JSONL — each record is the raw aweme / user / room dict.
     for item in results:
@@ -754,6 +704,90 @@ def _cmd_hot_sync(args: argparse.Namespace) -> int:
     return asyncio.run(_cmd_hot(args))
 
 
+# 0.3.3 P1-4 — share the actual fetching logic with MCP / REST so the
+# three frontends always emit the same record schema. See
+# ``mcp/server.py`` and ``server/app.py`` for callers.
+async def collect_search_async(
+    *,
+    keyword: str,
+    channel: str = "general",
+    max_count: int = 20,
+    cookies_file: Optional["Path"] = None,
+    proxy: Optional[str] = None,
+    timeout: float = 15.0,
+) -> list[dict[str, Any]]:
+    """``doubi search`` core. Returns raw records (aweme / user / room).
+
+    The CLI emits each record as one JSONL row with a synthesised
+    ``share_url``; callers can do the same.
+    """
+    from doubi.platforms.douyin.webapi import DouyinWebAPI
+
+    api = DouyinWebAPI(
+        cookies_file=cookies_file,
+        proxy=proxy,
+        timeout=timeout,
+    )
+    error_sink: dict[str, Any] = {}
+    try:
+        if channel == "general":
+            results = await api.search_general(
+                keyword, count=10, max_count=max_count, error_sink=error_sink,
+            )
+        elif channel == "video":
+            results = await api.search_video(
+                keyword, count=10, max_count=max_count, error_sink=error_sink,
+            )
+        elif channel == "user":
+            results = await api.search_user(
+                keyword, count=10, max_count=max_count, error_sink=error_sink,
+            )
+        else:
+            results = await api.search_live(
+                keyword, count=10, max_count=max_count, error_sink=error_sink,
+            )
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"search failed: {exc}") from exc
+    return list(results or [])
+
+
+async def collect_hot_async(
+    *,
+    board: str = "all",
+    max_count: int = 50,
+    cookies_file: Optional["Path"] = None,
+    proxy: Optional[str] = None,
+    timeout: float = 15.0,
+) -> list[dict[str, Any]]:
+    """``doubi hot`` core. Returns hot-word rows annotated with ``board``."""
+    from doubi.platforms.douyin.webapi import (
+        ALL_HOT_BOARDS,
+        HOT_BOARD_NAMES,
+        DouyinWebAPI,
+    )
+
+    api = DouyinWebAPI(
+        cookies_file=cookies_file,
+        proxy=proxy,
+        timeout=timeout,
+    )
+    targets = list(ALL_HOT_BOARDS) if board == "all" else [board]
+    error_sinks = {b: {} for b in targets}
+    aggregate: list[dict[str, Any]] = []
+    for b in targets:
+        rows = await api.get_hot_list(
+            b, max_count=max_count, error_sink=error_sinks[b],
+        )
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            record = dict(row)
+            record["board"] = b
+            record.setdefault("board_name", HOT_BOARD_NAMES.get(b, b))
+            aggregate.append(record)
+    return aggregate
+
+
 async def _cmd_hot(args: argparse.Namespace) -> int:
     """``doubi hot [--board all|positive|entertainment|society|challenge] [--max N]``.
 
@@ -767,83 +801,30 @@ async def _cmd_hot(args: argparse.Namespace) -> int:
     ``video_count``, ``cover_url``. To follow a row into actual videos,
     use ``doubi search <word>`` — sentence_id alone won't enumerate them.
 
+    0.3.3 P1-4 — the actual fetching lives in :func:`collect_hot_async`
+    so MCP / REST callers get identical records. This function only
+    handles CLI plumbing: argparse → records → JSONL.
+
     Exit codes (mirror search):
         0  results written (including 0 hits)
         3  hot fetch failed (network, 403, ...)
     """
-    from doubi.platforms.douyin.webapi import (
-        ALL_HOT_BOARDS,
-        HOT_BOARD_NAMES,
-        DouyinWebAPI,
-    )
-
-    api = DouyinWebAPI(
-        cookies_file=args.cookies_file,
-        proxy=args.proxy,
-        timeout=15.0,
-    )
-
-    # Resolve target boards. ``--board all`` expands to all 4 boards;
-    # a single-board value is iterated as a 1-element list so the rest
-    # of the loop is uniform.
-    if args.board == "all":
-        targets: list[str] = list(ALL_HOT_BOARDS)
-    else:
-        targets = [args.board]
-
-    # Aggregate across boards (each board gets its own error_sink so a
-    # single failed board doesn't poison the rest of the run).
-    error_sinks: dict[str, dict[str, Any]] = {b: {} for b in targets}
-    aggregate: list[tuple[str, dict[str, Any]]] = []
-    for board in targets:
-        try:
-            rows = await api.get_hot_list(
-                board,
-                max_count=args.max,
-                error_sink=error_sinks[board],
-            )
-        except Exception as exc:  # noqa: BLE001
-            print(
-                f"Error: hot fetch failed for board={board}: {exc}",
-                file=sys.stderr,
-            )
-            return 3
-        # Annotate each row with its source board so the JSONL stream is
-        # self-describing even in single-board mode.
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            record = dict(row)
-            record["board"] = board
-            aggregate.append((board, record))
+    try:
+        aggregate = await collect_hot_async(
+            board=args.board,
+            max_count=args.max,
+            cookies_file=args.cookies_file,
+            proxy=args.proxy,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"Error: hot fetch failed: {exc}", file=sys.stderr)
+        return 3
 
     if not aggregate:
-        # No rows on any board — surface the highest-signal error if any.
-        for board, sink in error_sinks.items():
-            if sink.get("hint"):
-                reason = sink.get("reason", "unknown")
-                hint = sink.get("hint")
-                print(
-                    f"No results. last error on board={board}: {reason} "
-                    f"(hint={hint})",
-                    file=sys.stderr,
-                )
-                if hint == "need_login":
-                    print(
-                        "Hint: try `--cookies-file ~/.doubi/cookies/douyin.txt` "
-                        "after running `doubi auth douyin`.",
-                        file=sys.stderr,
-                    )
-                break
-        else:
-            print("No results.", file=sys.stderr)
+        print("No results.", file=sys.stderr)
         return 0
 
-    # Emit JSONL.
-    for board, record in aggregate:
-        # Always include the human-readable board name as well so a JSON
-        # consumer can render the row without re-mapping the key.
-        record.setdefault("board_name", HOT_BOARD_NAMES.get(board, board))
+    for record in aggregate:
         sys.stdout.write(json.dumps(record, ensure_ascii=False) + "\n")
     sys.stdout.flush()
     return 0

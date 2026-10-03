@@ -5,6 +5,8 @@
   "nav.parse": "Parse",
   "nav.download": "Download",
   "nav.history": "History",
+  "nav.search": "Search",
+  "nav.hot": "Hot",
   "nav.settings": "Settings",
   "nav.theme_tooltip": "Switch theme (cycle through built-in theme packs)",
   "nav.about_tooltip": "About",

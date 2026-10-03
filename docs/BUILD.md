@@ -825,19 +825,34 @@ CPU 在涨、临时文件在涨，就是在压缩。makensis 退出前日志最�
       再跑 `pytest -q --maxfail=5`。判绿标准不是「没红」，而是
       **passed+failed 与 CI 相等、skipped 也相等**（0.3.0 基线
       `629 passed / 146 skipped`；0.3.1 基线 `670 passed / 175 skipped`；
-      **0.3.2 基线 `981 passed / 181 skipped / 53.35s`**。耗时只是参考：
-      同一台机器复跑是 `55.65s`，**passed / skipped 必须逐项相等**，
+      0.3.2 基线 `981 passed / 181 skipped`；
+      **0.3.3 基线 `1004 passed / 184 skipped / 19.09s`**。耗时只是参考：
+      同一台机器复跑秒数会浮动，**passed / skipped 必须逐项相等**，
       秒数对不上不算回归）
 - [ ] **本地全量回归拿准确数字**（0.3.1 新增，CHANGELOG 和 Release 正文里的
       回归数必须来自这一步）：`python scripts/run_full_tests.py`（默认 local
       口径）。它带真依赖跑，只排除 `tests/test_theme_apply_gui.py`——那 28 例
       带真 PySide6 会起 Qt 事件循环反复切主题，是「本地全量跑不动」的**唯一**
-      根因，排掉之后全量约 3 分钟就能跑完。**0.3.2 基线：1278 收集 − 28 排除
-      = 1250 → `1243 passed / 7 skipped / 154.37s`**（0.3.1 是 948−28=920 →
-      `913 passed / 7 skipped`）。同样地，**拿 passed / skipped 当判据，别拿秒数**
-      ——0.3.2 复跑是 `174.74s`，多出的 20s 是机器负载，不是回归。
+      根因。**0.3.3 基线：1304 收集 − 28 排除 = 1276 → `1269 passed / 7 skipped
+      / 86.54s`**（0.3.2 是 1278−28=1250 → `1243 passed / 7 skipped / 154.37s`；
+      0.3.1 是 948−28=920 → `913 passed / 7 skipped`）。
+      **0.3.3 耗时从 ~154s 降到 ~87s 不是机器变快**：主要是把 11 个「靠真网络
+      请求失败凑绿灯」的用例改成打桩——`test_pipeline_smoke.py` 36.64s→0.45s、
+      `test_server.py` 41.76s→1.12s。同样地，**拿 passed / skipped 当判据，别拿秒数**
+      ——机器负载会带来 ±20s 浮动，不是回归。
       **不要再用 CHANGELOG 分批累加去推算回归数**——0.3.1 就是这么写下了一个
       不存在的「901 passed / 3 skipped」（真值 913 / 7，差 12 passed + 4 skipped）
+- [ ] **断网口径（0.3.3 新增，可选但推荐）**：确认测试套件不偷偷联网。
+      插件在 `.scratch/nonetpkg/nonet.py`（`.scratch/` 不入库，需要时自建）：
+
+      ```powershell
+      $env:PYTHONPATH = ".scratch\nonetpkg"
+      python -m pytest -q -p nonet --ignore=tests/test_theme_apply_gui.py
+      ```
+
+      判据：**结束时不生成 `.scratch/nonet_hits.log`**（生成即表示有真实
+      `getaddrinfo`）。0.3.3 已收敛到 0 次；此前 13 个用例在真联网，其中
+      `DouyinAPI._ytdlp` 注入失效那条会让全量跑挂死 150s+。
 - [ ] `dist/doubi-gui.exe`（onefile 便携版）文件存在（精简后未重新量化，见 §4.5）
 - [ ] onedir `dist/doubi-gui/doubi-gui.exe` 存在，整个目录约 **1086 文件 / 706.6 MB**
       （0.3.2 基线；0.3.1 是 1003 / 688.0 MB，0.3.0 是 1002 / 687.4 MB。

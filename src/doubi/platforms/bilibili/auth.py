@@ -299,9 +299,17 @@ async def validate_cookies(cookies_file: Optional[Path] = None, *, timeout: floa
     # httpx accepts a dict of name→value cookies; domain / path are inferred
     # from the URL we hit.
     cookies: dict[str, str] = {}
-    if has_cookie_file(p):
+    has_file = has_cookie_file(p)
+    if has_file:
         for c in parse_netscape_file(p):
             cookies[c["name"]] = c["value"]
+    # 没有 Cookie 文件时**不要联网**：一定未登录，HTTP 请求只会白等一轮
+    # 超时。这不只是省一次请求——它决定了很多场景下会不会意外触网：
+    # 设置页在构造 50ms 后异步刷账号状态，CI / 无头测试环境里没有 Cookie
+    # 文件，以前每个用例都要打一次 api.bilibili.com 才能拿到「未登录」。
+    if not has_file:
+        logger.debug("validate_cookies: no cookie file at %s, skipping network", p)
+        return LoginInfo(is_logged_in=False)
     try:
         async with httpx.AsyncClient(
             timeout=timeout,

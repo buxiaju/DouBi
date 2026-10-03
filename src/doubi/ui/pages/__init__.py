@@ -10,12 +10,16 @@ from __future__ import annotations
 
 from .download import build_download_widgets
 from .history import build_history_widgets
+from .hot import build_hot_widgets
 from .parse import build_parse_widgets
+from .search import build_search_widgets
 from .settings import build_settings_widgets
 
 __all__ = [
     "build_parse_widgets",
     "build_download_widgets",
     "build_history_widgets",
+    "build_hot_widgets",
+    "build_search_widgets",
     "build_settings_widgets",
 ]

@@ -53,6 +53,55 @@ def _make_page(qapp):
     return cls()
 
 
+@pytest.fixture(autouse=True)
+def _stop_page_timers():
+    """收掉页面自带的 ``QTimer``，别让它跨用例继续跑（0.3.3 修）。
+
+    根因（0.3.3 最终定位）：**不是**本文件造的 ``ParsePage`` 的剪贴板定时器，
+    而是别处构造的 ``SettingsPage`` 在 ``__init__`` 里排的
+    ``QTimer.singleShot(50, lambda: _spawn_account_refresh(self))``。
+    那个闭包持有 page 强引用，会在**后续任意一个用例**的
+    ``processEvents()`` 里执行，然后：
+
+        _spawn_account_refresh -> 无 running loop -> asyncio.run(...)
+        -> bilibili_status() / douyin_status()
+        -> validate_cookies() -> 真打 getaddrinfo
+
+    实测触网的调用栈（用 faulthandler 式插件抓到线程池提交栈）确认为::
+
+        settings.py:192 in <lambda>
+        settings.py:76  in _spawn_account_refresh
+        settings.py:616 in _refresh_account_status_async
+        auth_actions.py:60 in bilibili_status
+        bilibili/auth.py  in validate_cookies
+        asyncio/base_events.py:940 in getaddrinfo   <-- 真联网
+
+    所以这里两层一起断：
+      1. ``set_account_refresh_enabled(False)`` —— 从源头让那个 50ms
+         回调不做事（真正的修复点，见 settings.py）；
+      2. 顺手 stop 掉遗留 ``QTimer``，防止别的时间驱动逻辑再冒出来。
+    """
+    from doubi.ui.pages.settings import set_account_refresh_enabled
+
+    set_account_refresh_enabled(False)
+    try:
+        yield
+    finally:
+        set_account_refresh_enabled(True)
+        try:
+            from PySide6.QtCore import QTimer
+            from PySide6.QtWidgets import QApplication
+
+            app = QApplication.instance()
+            if app is None:
+                return
+            for timer in app.findChildren(QTimer):
+                timer.stop()
+            app.processEvents()
+        except Exception:  # pragma: no cover - 无 GUI 环境
+            pass
+
+
 def _make_create_task_sync(monkeypatch, page_module):
     import asyncio as _asyncio
 
@@ -155,6 +204,45 @@ def _stub_adapter(monkeypatch, page, sections, pages):
         PlatformRegistry, "get",
         lambda platform: fake_adapter if platform is Platform.BILIBILI else None,
     )
+
+
+@pytest.fixture(autouse=True)
+def _silence_clipboard_detect():
+    """掐掉本文件 ``ParsePage`` 剪贴板轮询可能带进来的真实网络请求（0.3.3）。
+
+    ``build_parse_widgets()`` 造的页面在 ``__init__`` 里起一个 1.5s ``QTimer``
+    轮询剪贴板（``_poll_clipboard``），拿剪贴板文本喂
+    ``PlatformRegistry.detect()``。剪贴板里恰好是真实链接时，``detect()``
+    会命中具体平台并真联网。
+
+    说明（0.3.3 复核结论）：这条路径**不是**此前全量扫描里 8 次触网的来源
+    ——真正的来源是 ``SettingsPage`` 的 50ms 延迟账号刷新，已由
+    ``_stop_page_timers`` 关掉。本 fixture 保留为纵深防御：用例都显式 stub 了
+    ``PlatformRegistry.get`` 与 ``pipeline.parse_and_expand``，解析路径不依赖
+    ``detect()`` 的结果，因此把两个具体适配器的 ``match_url`` 钉成 False
+    不影响任何断言。
+    """
+    from doubi.platforms.bilibili.adapter import BilibiliAdapter
+    from doubi.platforms.douyin.adapter import DouyinAdapter
+
+    saved: dict[type, object] = {}
+    for cls in (DouyinAdapter, BilibiliAdapter):
+        # 记录「原本是谁提供的 match_url」：可能是类级 override，也可能继承自
+        # 基类。还原时按同一个键写回，继承来的就从 __dict__ 里删掉。
+        saved[cls] = cls.__dict__.get("match_url")
+
+        def _never_matches(self, url):  # noqa: ANN001, ARG001
+            return False
+
+        cls.match_url = _never_matches
+    try:
+        yield
+    finally:
+        for cls, original in saved.items():
+            if original is None:
+                del cls.match_url
+            else:
+                cls.match_url = original
 
 
 def test_row_mapping_full_cycle(qapp, monkeypatch):

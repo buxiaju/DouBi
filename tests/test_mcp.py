@@ -51,6 +51,7 @@ def test_tools_list_includes_all_registered():
     assert names == {
         "platforms", "parse_url", "add_to_queue", "get_status", "list_jobs",
         "sniff_status", "list_supported_sites",   # M6.17+ 暴露 yt-dlp 1800+ extractor
+        "collect_search", "collect_hot",          # 0.3.3 P1-4：采集能力对上 CLI
     }
 
 
@@ -123,7 +124,7 @@ def test_call_parse_url_missing_argument_returns_error_in_content():
     assert "url" in payload["error"]
 
 
-def test_call_parse_url_unknown_returns_ytdlp_error():
+def test_call_parse_url_unknown_returns_ytdlp_error(monkeypatch):
     """不认识的 URL 现在先走 ytdlp_generic（M6.17+）——yt-dlp 也解析不了时
     返回带 ``error`` 字段的失败 payload，pipeline 不再自动 chain 到 generic 嗅探。
 
@@ -131,7 +132,27 @@ def test_call_parse_url_unknown_returns_ytdlp_error():
 
     * M6.16: registry.detect → generic (priority=-1) → sniff 失败 → 错误 item
     * M6.17+: registry.detect → ytdlp_generic (priority=-1) → yt-dlp DownloadError → 返回 ``{"error": "..."}``
+
+    0.3.3 修：本用例原先拿 ``https://example.com/x`` 真跑 yt-dlp，靠真实网络
+    请求失败来凑出 ``error``。网络被黑洞时整个全量跑挂死在这里（实测 >2min
+    无返回），而且绿灯与否取决于当时能不能连上 example.com。这里把 yt-dlp
+    换成「一进 with 就抛 DownloadError」的桩，断言的仍是它真正想验证的那条
+    链路：yt-dlp 解析失败 ⇒ 返回 error 字段。
     """
+    import yt_dlp
+
+    class _BoomYDL:
+        def __init__(self, opts):        # noqa: ARG002 - 对齐真实签名即可
+            pass
+
+        def __enter__(self):
+            raise yt_dlp.utils.DownloadError("simulated: 无法解析该 URL")
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", _BoomYDL)
+
     async def _run():
         return await mcp_server._dispatch({
             "jsonrpc": "2.0", "id": 12, "method": "tools/call",
@@ -189,6 +210,24 @@ def test_call_add_to_queue_with_missing_url_returns_error():
 
 
 def test_call_add_to_queue_with_unknown_url_reports_failed(monkeypatch):
+    # 0.3.3 修：本用例原先收了 monkeypatch 却一次没用——`example.com` 会命中
+    # ytdlp_generic（它的 match_url 永真，见 registry 兜底链），于是真的发起一次
+    # yt-dlp 网络请求；"failed" 只是真请求报错后的副产物。网络被黑洞时整个全量
+    # 跑会挂死在这里（实测 >2min 无返回），而且绿灯与否取决于当时的网络。
+    import yt_dlp
+
+    class _BoomYDL:
+        def __init__(self, opts):        # noqa: ARG002 - 对齐真实签名即可
+            pass
+
+        def __enter__(self):
+            raise yt_dlp.utils.DownloadError("simulated: 无法解析该 URL")
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", _BoomYDL)
+
     async def _run():
         return await mcp_server._dispatch({
             "jsonrpc": "2.0", "id": 21, "method": "tools/call",

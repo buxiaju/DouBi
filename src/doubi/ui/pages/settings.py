@@ -23,6 +23,30 @@ logger = logging.getLogger("doubi.ui.pages.settings")
 
 
 # ---------------------------------------------------------------------------
+# 账号自动刷新总开关
+# ---------------------------------------------------------------------------
+
+#: 是否允许「启动后自动刷账号状态」。生产恒为 True；无头测试 / CI 关掉它。
+_ACCOUNT_REFRESH_ENABLED = True
+
+
+def set_account_refresh_enabled(enabled: bool) -> None:
+    """开关账号状态自动刷新（0.3.3 新增）。
+
+    生产代码不会调用它——存在的唯一理由是让无头测试能关掉设置页构造时
+    那个 50ms 延迟首刷。原因：
+
+    * 那条路径会 ``asyncio.run(_refresh_account_status_async())``，进而
+      真打 ``api.bilibili.com/x/web-interface/nav`` 与抖音的登录态接口；
+    * 更麻烦的是它由 ``QTimer.singleShot`` 排队，会在**构造它的用例之后**
+      的任意一次 ``processEvents()`` 里才执行——于是「哪个用例被记为联网」
+      完全取决于运行顺序，排查时会一路误导到不相干的文件上。
+    """
+    global _ACCOUNT_REFRESH_ENABLED
+    _ACCOUNT_REFRESH_ENABLED = bool(enabled)
+
+
+# ---------------------------------------------------------------------------
 # Module-level helper used by login dialogs to refresh the parent page
 # ---------------------------------------------------------------------------
 
@@ -62,7 +86,15 @@ def _spawn_account_refresh(page) -> None:
       不关掉它既不会被执行也不会被 await，GC 时抛
       ``RuntimeWarning: coroutine ... was never awaited``——而那条被丢掉
       的协程正是本该完成的账号状态刷新（测试输出里就是这么冒出来的）。
+
+    0.3.3：加了「有 Cookie 文件才联网」的短路，但**还不够**——本机
+    ``~/.doubi/cookies/`` 下确实存在 Cookie 文件，照样会打
+    api.bilibili.com / www.douyin.com。所以再给一个显式的全局开关
+    ``set_account_refresh_enabled(False)``，供无头测试环境关掉这条
+    「启动后自动联网」的路径（见 :func:`set_account_refresh_enabled`）。
     """
+    if not _ACCOUNT_REFRESH_ENABLED:
+        return
     coro = page._refresh_account_status_async()
     try:
         asyncio.ensure_future(coro)

@@ -5,6 +5,8 @@
   "nav.parse": "解析",
   "nav.download": "下载",
   "nav.history": "历史",
+  "nav.search": "搜索",
+  "nav.hot": "热榜",
   "nav.settings": "设置",
   "nav.theme_tooltip": "切换主题（在内置主题包之间循环）",
   "nav.about_tooltip": "关于",

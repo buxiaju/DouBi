@@ -352,6 +352,52 @@ def test_api_fetch_returns_none_on_error(monkeypatch):
     assert result is None
 
 
+def test_api_fetch_routes_through_injected_ytdlp_module(monkeypatch):
+    # 回归点（0.3.3）：_extract_sync 曾经直接用模块级 yt_dlp，把 self._ytdlp
+    # 注入静默架空——上面那条 test_api_fetch_returns_none_on_error 于是变成
+    # 真实网络请求，网络通畅时靠 DownloadError 侥幸变绿，连接被黑洞时整轮挂死
+    # （实测卡 150s+ 未返回）。这里把模块级 yt_dlp 换成"一碰就记一笔"的探针，
+    # 断言它根本没被用过；注入的桩必须被真的调用到。
+    from doubi.platforms.douyin import api as api_mod
+
+    global_hits: list[str] = []
+
+    class _ProbeCtx:
+        def __enter__(self):
+            global_hits.append("global")
+            raise RuntimeError("模块级 yt_dlp 被用了：self._ytdlp 注入失效")
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(api_mod, "yt_dlp", type("M", (), {
+        "YoutubeDL": lambda opts: _ProbeCtx(),
+        "utils": api_mod.yt_dlp.utils,
+    }))
+
+    api = DouyinAPI()
+    calls: list[object] = []
+
+    class _FakeCtx:
+        def __enter__(self):
+            calls.append("enter")
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def extract_info(self, url, download=False):
+            calls.append((url, download))
+            return {"id": "1"}
+
+    monkeypatch.setattr(api, "_ytdlp",
+                        type("M", (), {"YoutubeDL": lambda opts: _FakeCtx()}))
+
+    assert asyncio.run(api.fetch("https://www.douyin.com/video/1")) == {"id": "1"}
+    assert calls == ["enter", ("https://www.douyin.com/video/1", False)]
+    assert global_hits == []
+
+
 def _stub_api_for_entries(entries):
     api = DouyinAPI()
     async def _fake(url, *, playlist_items=None):

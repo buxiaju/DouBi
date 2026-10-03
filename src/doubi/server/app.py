@@ -374,6 +374,59 @@ def build_app(*, token: str | None = None):
             raise HTTPException(status_code=404, detail="parse task not found")
         return {k: v for k, v in rec.items() if k != "_task"}
 
+    # ---- 0.3.3 P1-4: collection endpoints (search / hot) ----------------
+
+    @app.get("/api/v1/collect/search", dependencies=[Depends(require_token)])
+    async def collect_search(
+        keyword: str,
+        channel: str = "general",
+        max: int = 20,  # noqa: A002 — keep the public REST name
+    ) -> dict[str, Any]:
+        from doubi.cli.main import collect_search_async
+
+        kw = (keyword or "").strip()
+        if not kw:
+            raise HTTPException(
+                status_code=400, detail="keyword query parameter required",
+            )
+        if channel not in {"general", "video", "user", "live"}:
+            raise HTTPException(
+                status_code=400, detail=f"unknown channel: {channel!r}",
+            )
+        try:
+            rows = await collect_search_async(
+                keyword=kw,
+                channel=channel,
+                max_count=max,
+                cookies_file=cfg.cookies_file,
+                proxy=cfg.proxy,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(
+                status_code=502, detail=f"search failed: {exc}",
+            )
+        return {"keyword": kw, "channel": channel, "results": rows}
+
+    @app.get("/api/v1/collect/hot", dependencies=[Depends(require_token)])
+    async def collect_hot(
+        board: str = "all",
+        max: int = 50,  # noqa: A002
+    ) -> dict[str, Any]:
+        from doubi.cli.main import collect_hot_async
+
+        try:
+            rows = await collect_hot_async(
+                board=board,
+                max_count=max,
+                cookies_file=cfg.cookies_file,
+                proxy=cfg.proxy,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(
+                status_code=502, detail=f"hot fetch failed: {exc}",
+            )
+        return {"board": board, "results": rows}
+
     @app.get("/api/v1/sniff/status", dependencies=[Depends(require_token)])
     async def sniff_capability() -> dict[str, Any]:
         """不带 task_id 时回「嗅探能力自检」：装没装 Playwright、开没开。

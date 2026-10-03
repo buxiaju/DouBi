@@ -139,6 +139,19 @@ class DouyinAPI:
         # Pre-create the slot so the property works + tests can monkeypatch it
         self._ytdlp: Any = yt_dlp_module
 
+    @property
+    def ytdlp(self) -> Any:
+        """Resolve the yt-dlp module, honouring constructor injection.
+
+        与 ``engines/yt_dlp.py`` / ``platforms/bilibili/api.py`` 同一约定：
+        测试 monkeypatch ``_ytdlp`` 注入桩模块，生产代码回落到模块级导入。
+        ``_extract_sync`` **必须**走这里取 ``YoutubeDL``——直接用模块级
+        ``yt_dlp`` 会让注入失效，测试就会真的去打抖音的接口。
+        """
+        if self._ytdlp is None:
+            self._ytdlp = yt_dlp
+        return self._ytdlp
+
     def _opts(self, *, flat: bool = False) -> dict:
         opts: dict[str, Any] = {
             "quiet": True,
@@ -198,7 +211,7 @@ class DouyinAPI:
     ) -> Optional[dict]:
         opts = opts_override or self._opts(flat=flat)
         try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
+            with self.ytdlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
             return info
         except yt_dlp.utils.DownloadError as e:

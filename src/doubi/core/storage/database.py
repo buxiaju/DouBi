@@ -443,7 +443,13 @@ class Database:
     better concurrent read/write behavior.
     """
 
-    def __init__(self, db_path: str | Path = "doubi.db"):
+    def __init__(self, db_path: str | Path | None = None):
+        # 0.3.3 P1-1 — default moved out of CWD into ``~/.doubi/``;
+        # see ``core/storage/paths.py`` for the canonical home and the
+        # silent one-shot migration that ``load_config`` runs.
+        if db_path is None:
+            from .paths import default_db_path
+            db_path = default_db_path()
         self.db_path = Path(db_path)
         self._conn: Optional[aiosqlite.Connection] = None
         self._lock = asyncio.Lock()

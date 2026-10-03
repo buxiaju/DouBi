@@ -339,6 +339,65 @@ def _tool_list_jobs(arguments: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# 0.3.3 P1-4 — collection tools (search / hot) shared with the CLI.
+# ---------------------------------------------------------------------------
+async def _tool_collect_search(arguments: dict) -> dict:
+    """MCP wrapper around ``doubi search``.
+
+    Returns the same JSON records the CLI emits (``aweme`` /
+    ``user`` / ``room`` dicts). Logged-in users get stable results;
+    logged-out callers will see empty results and should rely on the
+    ``need_login`` convention surfaced elsewhere.
+    """
+    from doubi.cli.main import collect_search_async
+
+    keyword = (arguments.get("keyword") or "").strip()
+    if not keyword:
+        return {"error": "the 'keyword' argument is required"}
+    channel = arguments.get("channel") or "general"
+    if channel not in {"general", "video", "user", "live"}:
+        return {"error": f"unknown channel: {channel!r}"}
+    try:
+        max_count = int(arguments.get("max", 20))
+    except (TypeError, ValueError):
+        return {"error": "the 'max' argument must be an integer"}
+    cfg = load_config(None)
+    try:
+        rows = await collect_search_async(
+            keyword=keyword,
+            channel=channel,
+            max_count=max_count,
+            cookies_file=cfg.cookies_file,
+            proxy=cfg.proxy,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"search failed: {exc}"}
+    return {"keyword": keyword, "channel": channel, "results": rows}
+
+
+async def _tool_collect_hot(arguments: dict) -> dict:
+    """MCP wrapper around ``doubi hot``."""
+    from doubi.cli.main import collect_hot_async
+
+    board = arguments.get("board") or "all"
+    try:
+        max_count = int(arguments.get("max", 50))
+    except (TypeError, ValueError):
+        return {"error": "the 'max' argument must be an integer"}
+    cfg = load_config(None)
+    try:
+        rows = await collect_hot_async(
+            board=board,
+            max_count=max_count,
+            cookies_file=cfg.cookies_file,
+            proxy=cfg.proxy,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"hot fetch failed: {exc}"}
+    return {"board": board, "results": rows}
+
+
+# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
@@ -430,6 +489,58 @@ TOOLS: dict[str, dict[str, Any]] = {
             "additionalProperties": False,
         },
     },
+    "collect_search": {
+        "description": (
+            "0.3.3 P1-4 — search 抖音 by keyword. Returns the same JSON "
+            "records the CLI emits (aweme / user / room dicts). Channels: "
+            "general (综合), user (登录联动), live (直播联动). "
+            "Logged-in callers get stable results; logged-out callers "
+            "may get empty lists — surface a login hint in that case."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "keyword": {
+                    "type": "string",
+                    "description": "Search keyword (Chinese / English / mixed).",
+                },
+                "channel": {
+                    "type": "string",
+                    "enum": ["general", "video", "user", "live"],
+                    "description": "Search channel (default: general).",
+                },
+                "max": {
+                    "type": "integer",
+                    "description": "Max records to return (default: 20).",
+                },
+            },
+            "required": ["keyword"],
+            "additionalProperties": False,
+        },
+    },
+    "collect_hot": {
+        "description": (
+            "0.3.3 P1-4 — fetch 抖音 hot board entries. Records carry "
+            "``board`` / ``board_name`` so a downstream consumer can render "
+            "the row without re-mapping the key. Default board ``all`` "
+            "aggregates the four named boards."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "board": {
+                    "type": "string",
+                    "enum": ["all", "positive", "entertainment", "society", "challenge"],
+                    "description": "Which board to fetch (default: all).",
+                },
+                "max": {
+                    "type": "integer",
+                    "description": "Max rows per board (default: 50).",
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
 }
 
 _HANDLERS: dict[str, Callable[[dict], Any]] = {
@@ -440,6 +551,8 @@ _HANDLERS: dict[str, Callable[[dict], Any]] = {
     "list_jobs": _tool_list_jobs,
     "sniff_status": _tool_sniff_status,
     "list_supported_sites": _tool_list_supported_sites,
+    "collect_search": _tool_collect_search,
+    "collect_hot": _tool_collect_hot,
 }
 
 

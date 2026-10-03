@@ -50,7 +50,9 @@ def build_main_window():
     from .pages import (
         build_download_widgets,
         build_history_widgets,
+        build_hot_widgets,
         build_parse_widgets,
+        build_search_widgets,
         build_settings_widgets,
     )
     from .resources import APP_DISPLAY_NAME, APP_VERSION, load_app_icon
@@ -65,6 +67,8 @@ def build_main_window():
     ParsePage, _ = build_parse_widgets()
     DownloadPage, _ = build_download_widgets()
     HistoryPage, _ = build_history_widgets()
+    SearchPage, _ = build_search_widgets()
+    HotPage, _ = build_hot_widgets()
     SettingsPage, _ = build_settings_widgets()
 
     class MainWindow(MSFluentWindow):
@@ -123,6 +127,25 @@ def build_main_window():
             )
             # 历史页「重新解析」：把 URL 填入解析页输入框并跳转过去
             self.history_interface.set_reparse_callback(self._reparse_from_history)
+
+            # ---- 搜索 / 热榜 (0.3.3 P1-3) ---------------------------
+            self.search_interface = SearchPage(self)
+            self.search_interface.setObjectName("searchInterface")
+            self.addSubInterface(
+                self.search_interface,
+                FluentIcon.SEARCH,
+                tr("nav.search"),
+                position=NavigationItemPosition.TOP,
+            )
+
+            self.hot_interface = HotPage(self)
+            self.hot_interface.setObjectName("hotInterface")
+            self.addSubInterface(
+                self.hot_interface,
+                FluentIcon.HEART,
+                tr("nav.hot"),
+                position=NavigationItemPosition.TOP,
+            )
 
             # ---- 设置 -----------------------------------------------
             self.settings_interface = SettingsPage(self)
