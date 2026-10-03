@@ -51,8 +51,8 @@ def build_search_widgets():
     from PySide6.QtCore import Qt, QUrl
     from PySide6.QtGui import QDesktopServices
     from PySide6.QtWidgets import (
-        QApplication, QMenu, QWidget, QVBoxLayout, QHBoxLayout,
-        QStackedWidget,
+        QApplication, QMenu, QMessageBox, QWidget, QVBoxLayout,
+        QHBoxLayout, QStackedWidget,
     )
     from qfluentwidgets import (
         PushButton, LineEdit, ComboBox, SegmentedWidget,
@@ -343,7 +343,13 @@ def build_search_widgets():
                 self._enqueue_row(record, url)
 
         def _enqueue_row(self, record: dict, url: str) -> None:
-            """把一行搜索结果解析成 MediaItem 并入队。"""
+            """把一行搜索结果解析成 MediaItem 并入队。
+
+            0.3.6 修正：若这一行解析出来是**容器**（B 站「用户」频道的
+            命中会解析成 ``media_type=USER``，下载时会被 pipeline 展开成
+            整个 UP 主主页投稿），先确认再入队。单视频行保持一键直达，
+            不加多余弹框——否则每次下载都要点两下。
+            """
             if self._task_manager is None:
                 self._toast(
                     "未连接任务管理器",
@@ -354,6 +360,11 @@ def build_search_widgets():
 
             async def _do():
                 from ..row_actions import build_media_item, row_label
+                from ..row_confirm import (
+                    confirm_plan,
+                    container_is_batch,
+                    expected_count,
+                )
 
                 item, children = await build_media_item(url)
                 targets = children or ([item] if item is not None else [])
@@ -364,6 +375,21 @@ def build_search_widgets():
                         kind="error",
                     )
                     return
+
+                if container_is_batch(item, children):
+                    plan = confirm_plan(
+                        kind="container",
+                        label=row_label(record) or url,
+                        count=expected_count(item, children),
+                    )
+                    if not self._confirm(plan):
+                        self._toast(
+                            "已取消",
+                            f"{row_label(record) or url} 未加入队列。",
+                            kind="info",
+                        )
+                        return
+
                 opts = self._build_options()
                 for target in targets:
                     self._task_manager.add(target, opts)
@@ -373,6 +399,22 @@ def build_search_widgets():
                 )
 
             self._run_async(_do())
+
+        def _confirm(self, plan) -> bool:
+            """渲染 :class:`ConfirmPlan` 并返回用户是否确认。
+
+            抽成方法是为了让测试能替换掉模态框（offscreen / CI 下没法
+            真实点击），同时把「容器必须先问一次」这条规则测到。
+            """
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Question)
+            box.setWindowTitle(plan.title)
+            box.setText(plan.body)
+            yes = box.addButton(plan.confirmed_text, QMessageBox.AcceptRole)
+            box.addButton(plan.cancelled_text, QMessageBox.RejectRole)
+            box.setDefaultButton(box.buttons()[-1])
+            box.exec()
+            return box.clickedButton() is yes
 
         def _run_async(self, coro) -> None:
             """在本页既有的「有 loop 就 create_task，没有就 asyncio.run」

@@ -299,26 +299,35 @@ def test_search_menu_all_disabled_for_unidentifiable_row(qapp):
 
 
 def test_hot_menu_offers_only_word_search_for_hot_word_row(qapp):
-    """词条行不给「复制链接」——它没有直链，给了就是骗人。"""
+    """词条行不给「复制链接」——它没有直链，给了就是骗人。
+
+    0.3.6 修正：动作名不再叫「下载」。用户实测反馈是「点了一条却下了
+    20 个」——一次点击会展开成整批搜索结果，标签必须说清这件事。
+    """
     from doubi.ui.pages.hot import build_hot_widgets
+    from doubi.ui.row_confirm import HOT_WORD_ACTION
 
     _require_gui()
     page = _page(qapp, build_hot_widgets)
     page._task_manager = _RecordingManager()
 
     entries = page._context_menu_entries({"word": "小猫咪"})
-    assert [label for label, _ in entries] == ["搜索该词条并下载"]
+    assert [label for label, _ in entries] == [HOT_WORD_ACTION]
     assert entries[0][1] is True
+    # A bare 「下载」 is exactly what misled the user.
+    assert entries[0][0] != "下载"
+    assert "复制链接" not in {label for label, _ in entries}
 
 
 def test_hot_menu_word_entry_disabled_without_task_manager(qapp):
     from doubi.ui.pages.hot import build_hot_widgets
+    from doubi.ui.row_confirm import HOT_WORD_ACTION
 
     _require_gui()
     page = _page(qapp, build_hot_widgets)
 
     entries = _menu_map(page._context_menu_entries({"word": "小猫咪"}))
-    assert entries["搜索该词条并下载"] is False
+    assert entries[HOT_WORD_ACTION] is False
 
 
 def test_hot_menu_video_row_matches_search_page_shape(qapp):
@@ -508,7 +517,12 @@ def test_enqueue_row_reports_failure_instead_of_silence(qapp):
 
 
 def test_hot_word_enqueue_searches_then_adds_every_hit(qapp):
-    """热榜词条行的完整链路：collect_search → 每命中一条 → 入队。"""
+    """热榜词条行的完整链路：collect_search → 每命中一条 → 入队。
+
+    0.3.6 起链路中间多了**一次确认**：搜完先弹框（带真实条数），
+    用户确认后才入队。这里把 ``_confirm`` 打桩成「同意」，
+    否则会阻塞在真实的模态 ``QMessageBox`` 上（CI 无人点击）。
+    """
     from doubi.ui.pages.hot import build_hot_widgets
 
     _require_gui()
@@ -518,6 +532,9 @@ def test_hot_word_enqueue_searches_then_adds_every_hit(qapp):
     page._task_manager = manager
     # 词条搜索走的是「当前平台」；B 站热搜词能正常出结果。
     page._platform = "bilibili"
+
+    seen: dict = {}
+    page._confirm = lambda plan: (seen.setdefault("plan", plan), True)[1]
 
     import doubi.cli.main as cli_main
     import doubi.ui.row_actions as ra
@@ -551,6 +568,10 @@ def test_hot_word_enqueue_searches_then_adds_every_hit(qapp):
 
     assert calls and calls[0]["keyword"] == "小猫咪", calls
     assert calls[0]["channel"] == "video", calls
+    # 确认框必须出现，且条数是**解析成功后**的真实条数（2 条），
+    # 不是命中数（3 条）——否则弹框上的数字和实际入队数对不上。
+    assert "plan" in seen, "词条行必须先弹确认框"
+    assert "2" in seen["plan"].body, seen["plan"].body
     # 3 条命中里只有 2 条能合成 URL → 只入队 2 条。
     assert [i.item_id for i, _ in manager.added] == ["BV1", "BV2"], manager.added
 

@@ -47,8 +47,8 @@ def build_hot_widgets():
     from PySide6.QtCore import Qt, QUrl
     from PySide6.QtGui import QDesktopServices
     from PySide6.QtWidgets import (
-        QApplication, QMenu, QWidget, QVBoxLayout, QHBoxLayout,
-        QStackedWidget,
+        QApplication, QMenu, QMessageBox, QWidget, QVBoxLayout,
+        QHBoxLayout, QStackedWidget,
     )
     from qfluentwidgets import (
         PushButton, ComboBox, SegmentedWidget, TableWidget,
@@ -272,13 +272,19 @@ def build_hot_widgets():
               「搜索该词条并把结果入队」，所以这里不出现「复制链接」。
               抖音搜索当前会被平台风控拦（0.3.6 已能识别并提示），
               但 B 站热搜词能正常拿到视频 —— 行为一致比按平台分叉更好。
+
+            0.3.6 修正：词条行的动作名从「下载」改为
+            :data:`~doubi.ui.row_confirm.HOT_WORD_ACTION`。用户实测反馈
+            「点一条却下了 20 个」——语义没错（词条唯一有意义的就是全收），
+            错的是标签让人以为是「下载这一条」。
             """
             from ..row_actions import is_hot_word_row, share_url_for
+            from ..row_confirm import HOT_WORD_ACTION
 
             enabled_manager = self._task_manager is not None
             if is_hot_word_row(row):
                 return [
-                    ("搜索该词条并下载", enabled_manager),
+                    (HOT_WORD_ACTION, enabled_manager),
                 ]
             url = share_url_for(row, self._platform)
             has_url = bool(url)
@@ -298,6 +304,7 @@ def build_hot_widgets():
             record = self._rows[row]
 
             from ..row_actions import is_hot_word_row, share_url_for
+            from ..row_confirm import HOT_WORD_ACTION
 
             is_word = is_hot_word_row(record)
             url = None if is_word else share_url_for(record, self._platform)
@@ -305,7 +312,7 @@ def build_hot_widgets():
 
             menu = QMenu(self.table)
             if is_word:
-                search_word = menu.addAction("搜索该词条并下载")
+                search_word = menu.addAction(HOT_WORD_ACTION)
                 copy_link = browser = download = None
                 search_word.setEnabled(enabled_manager)
             else:
@@ -372,10 +379,14 @@ def build_hot_widgets():
             self._run_async(_do())
 
         def _search_word_and_enqueue(self, record: dict) -> None:
-            """热搜词行：先搜该词，再把搜到的视频全部入队。
+            """热搜词行：先搜该词，**确认后**再把搜到的视频全部入队。
 
             词条本身不可下载（只有 ``word`` + ``sentence_id``），
             用户右键一个热搜词的真实意图就是「把这词下面的视频收了」。
+
+            0.3.6 修正：搜索完成后先弹确认框再入队。此前是搜完直接入队，
+            用户看到的结果是「点了一条，下了 20 个」，读起来像 bug。
+            顺序上必须**先搜再问**——条数只有搜完才知道，预先估算会猜错。
             """
             if self._task_manager is None:
                 self._toast(
@@ -394,6 +405,7 @@ def build_hot_widgets():
                 from doubi.cli.main import collect_search_async
 
                 from ..row_actions import build_media_item, share_url_for
+                from ..row_confirm import confirm_plan
 
                 platform = self._platform
                 cookies_file = (
@@ -430,8 +442,11 @@ def build_hot_widgets():
                     )
                     return
 
+                # 先把命中解析成 MediaItem，再拿**真实条数**去确认。
+                # 顺序不能反：解析失败的命中不该计入待下载数量，否则
+                # 确认框上的数字和实际入队数对不上，等于又在骗人。
                 opts = self._build_options()
-                queued = 0
+                pending = []
                 for hit in hits:
                     url = share_url_for(hit, platform)
                     if not url:
@@ -439,21 +454,51 @@ def build_hot_widgets():
                     item, _children = await build_media_item(url)
                     if item is None:
                         continue
-                    self._task_manager.add(item, opts)
-                    queued += 1
-                if queued == 0:
+                    pending.append(item)
+                if not pending:
                     self._toast(
                         "没有可入队的视频",
                         f"「{keyword}」命中 {len(hits)} 条，但都没能解析出媒体项。",
                         kind="warning",
                     )
                     return
+
+                plan = confirm_plan(
+                    kind="hot_word", label=keyword, count=len(pending),
+                )
+                if not self._confirm(plan):
+                    self._toast(
+                        "已取消",
+                        f"「{keyword}」的 {len(pending)} 个视频未加入队列。",
+                        kind="info",
+                    )
+                    return
+
+                for item in pending:
+                    self._task_manager.add(item, opts)
                 self._toast(
                     "已加入下载队列",
-                    f"「{keyword}」共 {queued} 个视频。",
+                    f"「{keyword}」共 {len(pending)} 个视频。",
                 )
 
             self._run_async(_do())
+
+        def _confirm(self, plan) -> bool:
+            """把 :class:`ConfirmPlan` 渲染成模态框，返回用户是否确认。
+
+            单独抽出来是为了让测试可以替换掉它——模态框在 offscreen /
+            CI 下无法用真实点击驱动，而「批量动作必须先问一次」这条
+            规则本身必须被测到。
+            """
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Question)
+            box.setWindowTitle(plan.title)
+            box.setText(plan.body)
+            yes = box.addButton(plan.confirmed_text, QMessageBox.AcceptRole)
+            box.addButton(plan.cancelled_text, QMessageBox.RejectRole)
+            box.setDefaultButton(box.buttons()[-1])
+            box.exec()
+            return box.clickedButton() is yes
 
         def _run_async(self, coro) -> None:
             import asyncio
