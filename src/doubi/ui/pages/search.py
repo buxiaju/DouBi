@@ -169,14 +169,17 @@ def build_search_widgets():
             if not keyword:
                 InfoBar.warning(
                     title="需要关键词",
-                    message="请先输入搜索关键词。",
+                    content="请先输入搜索关键词。",
                     parent=self,
                     position=InfoBarPosition.TOP,
                     duration=3000,
                 )
                 return
+            # qfluentwidgets 的 SegmentedWidget.currentItem() 返回
+            # SegmentedItem **对象**而非 routeKey 字符串；必须用
+            # currentRouteKey()，否则会把对象当平台名传下去。
             platform_route = (
-                self._platform_tabs.currentItem()
+                self._platform_tabs.currentRouteKey()
                 or PLATFORM_OPTIONS[0][0]
             )
             try:
@@ -195,7 +198,7 @@ def build_search_widgets():
                 logger.exception("search failed: %s", exc)
                 InfoBar.error(
                     title="搜索失败",
-                    message=str(exc),
+                    content=str(exc),
                     parent=self,
                     position=InfoBarPosition.TOP,
                     duration=5000,

@@ -1,24 +1,116 @@
 # Changelog
 
-## 0.3.6 (2026-10-04) — 搜索 / 热榜「没有结果」：三个独立缺陷
+## 0.3.6 (2026-10-04) — 搜索 / 热榜「没有结果」：五个独立缺陷
 
 > 本版回应用户上线后实测反馈「**搜索和热榜没有结果**」。定位到的是
-> **三个互不相干的缺陷**，各自都能单独造成空表：
+> **五个互不相干的缺陷**，各自都能单独造成空表：
 >
-> | # | 平台 | 缺陷 | 实测 |
+> | # | 层 | 缺陷 | 实测 |
 > | --- | --- | --- | --- |
-> | 1 | B 站 | `_read_cookie_dicts(None)` 直接返回 `[]`，没有默认路径兜底 | 搜索 **0 → 20 行** |
-> | 2 | 抖音 | `get_hot_list` 读 `data.word_list`，实际在 `data.data.word_list` | 热榜 **0 → 200 行** |
-> | 3 | 抖音 | 搜索被风控门拦截（200 + `verify_check`）时静默返回 `[]` | 从「暂无结果」→ 明确诊断 |
+> | 1 | B 站数据 | `_read_cookie_dicts(None)` 直接返回 `[]`，没有默认路径兜底 | 搜索 **0 → 20 行** |
+> | 2 | 抖音数据 | `get_hot_list` 读 `data.word_list`，实际在 `data.data.word_list` | 热榜 **0 → 200 行** |
+> | 3 | 抖音数据 | 搜索被风控门拦截（200 + `verify_check`）时静默返回 `[]` | 从「暂无结果」→ 明确诊断 |
+> | 4 | GUI | `SegmentedWidget.currentItem()` 返回对象而非 routeKey 字符串 | 点刷新/搜索**必然抛异常** |
+> | 5 | GUI | `InfoBar.*(message=...)` 参数名错 → `TypeError` 被 Qt 静默吞掉 | 错误**完全不显示** |
 >
-> 前两个是纯代码 bug，已修复；第三个是**平台侧风控，客户端修不掉**，
-> 能修的是「别再把拦截伪装成『没有结果』」。
+> 1–3 是数据层；4–5 是 UI 层。**4 和 5 叠在一起是最坏组合**：
+> 功能坏了，报错也坏了，界面零提示，卡片永远停在「尚未加载」。
 >
-> 三个口径：local **1337 passed / 7 skipped**（0.3.5 是 1315/7）、
-> ci **1053 passed / 203 skipped**（0.3.5 是 1031/203）、
+> 只有 3 是**平台侧风控，客户端修不掉**，能修的是「别再把拦截伪装成
+> 『没有结果』」。
+>
+> 三个口径：local **1345 passed / 7 skipped**（0.3.5 是 1315/7）、
+> ci **1059 passed / 203 skipped**（0.3.5 是 1031/203）、
 > 断网扫描 0 次 `getaddrinfo`。
 >
 > 版本号单一真源 `src/doubi/__init__.py` 由 0.3.5 升至 0.3.6。
+
+### 四、GUI：`currentItem()` 返回对象而非 routeKey（点击必然失败）
+
+`hot.py:184` 与 `search.py:179` 都写了：
+
+```python
+platform_route = self._platform_tabs.currentItem() or PLATFORM_OPTIONS[0][0]
+```
+
+但 qfluentwidgets 的 `SegmentedWidget.currentItem()` 返回的是
+**`SegmentedItem` 对象**，不是 routeKey 字符串。实测探针：
+
+| 调用 | 返回 |
+| --- | --- |
+| `sw.currentItem()` | `<SegmentedItem(0x...) at 0x...>` ← 对象 |
+| `sw.currentRouteKey()` | `'douyin'` ← 这才是字符串 |
+| `item.routeKey` | `AttributeError`（对象上根本没这属性） |
+
+后果：对象被当作平台名传进 `collect_hot_async` / `collect_search_async`：
+
+```
+ValueError: unknown platform: <qfluentwidgets...SegmentedItem(0x...) at 0x...>
+                (expected 'douyin' or 'bilibili')
+```
+
+**每次点「刷新」/「搜索」都必然抛这个异常**，后端一次都没被正确调用过。
+
+修法：改用 `currentRouteKey()`。
+
+### 五、GUI：`InfoBar.*(message=...)` 参数名错，错误被静默吞掉
+
+同一处的异常处理器里写的是：
+
+```python
+InfoBar.error(title="热榜失败", message=str(exc), ...)
+```
+
+qfluentwidgets 的真实签名（实测 `inspect.signature`）是：
+
+```
+(title, content, orient, isClosable, duration, position, parent)
+```
+
+**第二个参数叫 `content`，没有 `message`**。于是：
+
+```
+TypeError: InfoBar.error() got an unexpected keyword argument 'message'
+```
+
+这个 `TypeError` 发生在**异常处理器内部**，被 Qt 的信号槽机制静默吞掉——
+用户界面上**看不到任何提示**，`_empty_state` 永远停在初始的
+`尚未加载` / `点「刷新」拉取榜单数据。`。
+
+这正是用户截图呈现的状态，也是上一轮误判「用户可能没点刷新」的原因。
+
+修法：`message=` → `content=`。受影响调用点：
+
+| 文件 | 行 |
+| --- | --- |
+| `ui/pages/hot.py` | 174 |
+| `ui/pages/search.py` | 172、198 |
+
+顺带修正 `ui/pages/history.py:257` 的 `InfoBar.information(...)` ——
+**qfluentwidgets 没有这个方法**，正确名是 `InfoBar.info`。
+
+### 六、守护测试（防止静默缺陷复发）
+
+新增 `tests/test_ui_qfluent_api_guards.py` **8 例**。这些缺陷的共同特点是
+**静默**，所以用两类手段钉住：
+
+- **AST 静态扫描全量 UI 源码**：禁止任何 `currentItem()` 调用、
+  禁止 `InfoBar.*` 出现 `message=` 关键字、禁止未知的 `InfoBar` 方法名。
+  这三个测试不需要 `QApplication`，因此 **ci 口径下也真实执行**
+  （不会被 `importorskip` 折叠成 skip）。
+- **实机驱动**：offscreen 构出真实 `HotPage` / `SearchPage`，monkeypatch
+  `collect_*_async` 断言平台名必须是 route 字符串，并且点击后确实被调用。
+
+另加一条行为钉桩：断言 `currentRouteKey()` 返回 `str` 而
+`currentItem()` 返回 `SegmentedItem`——把这个「陷阱」本身记录下来。
+
+### 七、实机验证（offscreen 驱动真实点击）
+
+| 页面 | 修复前 | 修复后 |
+| --- | --- | --- |
+| 热榜（抖音·全部榜单） | 0 行，卡片停在「尚未加载」 | **200 行**，切到表格 |
+| 搜索（B 站·视频，关键词 Python） | 0 行 | **20 行**，含标题/作者/BV 号/链接 |
+| 搜索（抖音·综合） | 0 行 | 0 行（`verify_check` 风控，符合预期） |
 
 ### 一、B 站：cookie 默认路径兜底（0 → 20 行）
 

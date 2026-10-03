@@ -254,7 +254,8 @@ def build_history_widgets():
                 cb(url)
                 return
             # 回调未注入（测试 / 独立运行）——直接提示
-            InfoBar.information(
+            # 注意：qfluentwidgets 没有 InfoBar.information，正确名是 info。
+            InfoBar.info(
                 title="重新解析",
                 content=f"已复制链接到剪贴板：{url[:60]}",
                 parent=self,

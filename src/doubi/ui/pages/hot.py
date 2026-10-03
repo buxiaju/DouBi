@@ -171,7 +171,7 @@ def build_hot_widgets():
                 logger.exception("hot list failed: %s", exc)
                 InfoBar.error(
                     title="热榜失败",
-                    message=str(exc),
+                    content=str(exc),
                     parent=self,
                     position=InfoBarPosition.TOP,
                     duration=5000,
@@ -180,8 +180,12 @@ def build_hot_widgets():
         async def _run_hot(self) -> None:
             from doubi.cli.main import collect_hot_async
 
+            # qfluentwidgets 的 SegmentedWidget.currentItem() 返回的是
+            # SegmentedItem **对象**，不是 routeKey 字符串；必须用
+            # currentRouteKey()。用错会把对象当成平台名传给
+            # collect_hot_async，抛 "unknown platform: <SegmentedItem...>"。
             platform_route = (
-                self._platform_tabs.currentItem()
+                self._platform_tabs.currentRouteKey()
                 or PLATFORM_OPTIONS[0][0]
             )
             board = self._board.currentData() or DEFAULT_BOARD[platform_route]
