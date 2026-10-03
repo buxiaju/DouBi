@@ -348,9 +348,57 @@ Playwright 浏览器目录的版本漂移（同一份 `build_exe.py`，机器上
 > （1086 载荷 + `uninstall.exe` + 旧 db）。**已知限制如实保留**：默认 DB 路径仍落
 > 安装目录，见 ROADMAP P1-1，本版未修。
 
----
+新增 `tests/test_search_hot_pages.py`（7 例）、`tests/test_collect_tools.py`（7 例）、
+`tests/test_storage_paths.py`（9 例）；另加 3 条**探针式回归用例**锁住本轮修掉的接缝
+（`test_douyin_adapter.py::test_api_fetch_routes_through_injected_ytdlp_module`、
+`test_bilibili_auth.py::test_validate_cookies_without_file_never_touches_httpx`、
+`test_ui_settings_refresh.py::test_account_refresh_can_be_disabled_globally`）。
 
-## P0-1 / P3-2 修复（2026-10-02）— 图集判定统一口径 + 签名白名单漂移守卫
+### 九、发布产物与验收（手工打包，CI 未参与）
+
+| 项 | 值 |
+|---|---|
+| 产物 | `dist/DouBi-Setup-0.3.3.exe` |
+| 体积 | **237,007,016 字节 / 226.03 MB**（0.3.2 是 236,925,706 / 225.95 MB，**+79 KB**） |
+| SHA256 | `ef4723f649ad05bdc5e1747c02471ac9b799576ba32f88265f9e1a5314ccf4dd` |
+| NSIS CRC | `CRC (0x4DD207EE): 4 / 4 bytes` / `Total size: 237007016 / 741240867 bytes (31.9%)` |
+| onedir 产物 | **1086 文件**（`_internal` 1085 + `doubi-gui.exe`；0.3.2 同为 1086 / 706.6 MB，本版无新增打包依赖） |
+| 侧签 | `DouBi-Setup-0.3.3.exe.sha256`、`SHA256SUMS.txt`（各 87 字节、UTF-8 无 BOM、LF） |
+| 哈希自校验 | `Get-FileHash` 与侧签比对 **True** |
+
+**体积只涨 79 KB 的原因**：本版新增的只有两个 GUI 页面 + 一个 storage 模块，
+没有任何新运行时依赖；`--collect-all playwright/aiohttp/qfluentwidgets` 等参数与
+0.3.2 逐项一致。体积没有像 0.3.1→0.3.2 那样跳 +6.5 MB（那次是本机 Playwright
+浏览器目录版本漂移）。
+
+**静默验收（BUILD.md §6.5 配方）**：
+
+| 检查 | 结果 |
+|---|---|
+| 注册表 | `豆比下载 0.3.3` / `DisplayVersion 0.3.3` / `EstimatedSize 26487208` / `Publisher DouBi` |
+| 标题栏 | `豆比下载 0.3.3  ·  多平台视频下载器 - DouBi`（i18n 与版本单一真源同时对） |
+| 进程 | `Responding=True`，内存 165.5 MB |
+| 卸载残留（程序先手动结束后 `/S`） | `uninstall.exe` / `doubi-gui.exe` / `_internal\` **全删**；HKCU 两个键、桌面快捷方式、开始菜单目录全清；残留进程 0 个；`~/.doubi/` 完好保留 |
+| WebEngine 残留 | `*webengine*` **0 个文件**、`*headless_shell*` **0 个文件** |
+| aiohttp 链 | `_ssl.pyd` / `_socket.pyd` / `_http_parser` / `_http_writer` 逐项齐备 |
+
+> **「卸载后零残留」这句话对本版要分情况说**：P1-1 确实修掉了
+> 「程序运行时把 `doubi.db` 写进安装目录」这条路径，但对**升级上来的老用户**
+> 安装目录里那份**旧** `doubi.db` / `download_manifest.jsonl` 并不会被删除——
+> 它们不是安装时写入的文件，NSIS 卸载段管不到。本次验收机就是这种情况
+> （安装目录里有 2026-10-02 留下的 409,600 B `doubi.db` 与 372,550 B manifest）。
+> 想彻底清掉只能手工删这两个文件。
+
+> **本版发现一个静默安装缺陷（知情发布，修法留 0.3.4）**：
+> `/S` **只放行 NSIS 自己的按钮，不放行脚本里 `MessageBox` 的返回值**。
+> `EnsureAppClosed` 宏在检测到 `doubi-gui.exe` 正在运行时弹 `MB_OKCANCEL`
+> 询问「是否立即关闭」——**静默模式下没人点这个框**，安装程序就挂在那儿
+> 直到外层超时（实测退出码 **2**、耗时 300s+，进程 `Responding=True` 但
+> `%TEMP%` 只涨到 275 KB）。影响面有限：报错提示语本身已经写明
+> 「必须先关闭它」，手工安装的用户会正常点「确定」；**只有静默升级脚本
+> 在程序还开着时会踩到**。判据与临时绕过办法写进 BUILD.md §6.6。
+
+---
 
 > 本轮不是新里程碑，而是对 [docs/ROADMAP.md](ROADMAP.md) 里两条既有项的收口。
 > 改动前先核实了 ROADMAP 的每一条 P0/P1，把其中已被历史版本修掉的剔除——

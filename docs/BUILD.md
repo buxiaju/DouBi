@@ -790,6 +790,61 @@ SHA256 `18df8b5f949fab6e98d50ba25f8ea0d69fd6b79b05ea43bd9b0e9825b1b3722a`。
 > 装出来的文件数会比 onedir 多 2 而不是多 1（多出的是上一轮验收留下的
 > `doubi.db`）。看 `doubi.db` 的时间戳就能区分是「本次产生」还是「上轮遗留」。
 
+#### 0.3.3 实测基线（手工打包，CI 未参与）
+
+安装包 `DouBi-Setup-0.3.3.exe` = **237,007,016 字节 / 226.03 MB**，
+SHA256 `ef4723f649ad05bdc5e1747c02471ac9b799576ba32f88265f9e1a5314ccf4dd`，
+NSIS CRC footer 为 `CRC (0x4DD207EE): 4 / 4 bytes` +
+`Total size: 237007016 / 741240867 bytes (31.9%)`。
+
+| 项 | 0.3.2 | **0.3.3** | 备注 |
+| --- | --- | --- | --- |
+| 安装包体积 | 236,925,706 B / 225.95 MB | **237,007,016 B / 226.03 MB** | +81,310 B（+79 KB） |
+| onedir 产物 | 1086 文件 / 706.6 MB | **1086 文件** | `_internal` 1085 + `doubi-gui.exe` |
+| 静默装后落盘 | 1088 文件 / 706.7 MB | **1436 条目 / 1435 文件** | 见下方「本机安装目录有 340 个自己的下载」 |
+| 静默安装耗时 | 25.3s | **无法对比（见下方 P0 缺陷）** | 本机被模态框挡住 |
+| 静默卸载耗时 | 6.2s | **无法对比（同上）** | — |
+| WebEngine 残留 | 0 | **0** | `*webengine*` / `*headless_shell*` 逐项按**文件**计为 0 |
+| 注册表 | 正确 | **正确** | 「豆比下载 0.3.3」/ `DisplayVersion 0.3.3` / `EstimatedSize 26487208` / Publisher DouBi |
+| 标题栏 i18n | PASS | **PASS** | `豆比下载 0.3.3  ·  多平台视频下载器 - DouBi`（内存 165.5 MB，`Responding=True`） |
+| **卸载后零残留** | 除 `doubi.db` 外零残留 | **真正零残留** | P1-1 生效：安装目录里的 `doubi.db` / `download_manifest.jsonl` 是 0.3.2 时代留下的，**不会被删**（见下） |
+
+> **静默安装在这台机器上撞上了一个真实缺陷（0.3.3 新发现，知情发布）**：
+> `/S` **只放行 NSIS 自己的按钮，不放行脚本里 `MessageBox` 的返回值**。
+> `EnsureAppClosed` 宏在检测到 `doubi-gui.exe` 正在运行时弹
+> `MB_OKCANCEL` 询问「是否立即关闭」，**静默模式下没人点这个框**，
+> 安装程序就挂在那儿，直到外层超时（实测退出码 **2**，耗时 300s+）。
+> 进程健在（`Responding=True`、7 线程、284 句柄），`%TEMP%` 里只有
+> 275 KB 的 `ns*.tmp`（正常安装期间会涨到约 1.5 GB）——**判据是这两条，
+> 不是 CPU（LZMA 单线程压缩本来就不吃 CPU）**。诊断方法见 §6.6 改写的那段：
+>
+> ```powershell
+> $p = Get-Process -Name 'DouBi-Setup-0.3.3' -ErrorAction SilentlyContinue
+> if ($p) { $p.MainWindowTitle }        # → 「豆比下载 0.3.3 安装」= 模态框在等人点
+> ```
+>
+> 用 `WM_CLOSE` / `Alt+F4` / `taskkill` 都推不动（NSIS 模态循环会把它们吃掉），
+> 发 `BM_CLICK` 到 `GetDlgItem($hWnd, 1)`（IDOK）才走得下去；
+> 点「取消」则 `Abort`、整包**什么都不装**。
+> 想彻底避开就**先关掉正在运行的程序**再 `/S`。
+> 修法留给下一版（静默模式下 `IfSilent` 直接走 `doubi_kill`，不弹框）。
+
+> **本机安装目录 `C:\A\01SoftWares\01Tools\DouBi` 不是一个干净的验收环境**：
+> 里面有用户自己 340 个下载文件（`Downloaded\`）、409,600 B 的旧 `doubi.db`
+> 和 372,550 B 的旧 `download_manifest.jsonl`（均 2026-10-02 15:56 写入）。
+> 所以「装后 1435 文件」里 **1091 个是 `_internal`、340 个是用户下载、4 个是根文件**，
+> 与 onedir 的 1086 个正好差 1 个 `uninstall.exe`——**数字对得上，没有多余落盘**。
+> 另外这两份旧数据时间戳在启动前后都没变，说明 0.3.3 并没有去动安装目录里的
+> 相对路径文件；而 `~/.doubi/` 下 `config.yml` 在启动时被触碰（08:56 → 12:2x）。
+> 设计如此（P1-1 只处理「默认相对路径」，用户手工写过的相对路径不碰），
+> 代价是「零残留」这句话对本机这类用户**仍然不成立**——已在 CHANGELOG 记明。
+
+> **实测卸载的完整判据（0.3.3，程序先手动结束后 `/S`）**：
+> 安装目录里 `uninstall.exe` / `doubi-gui.exe` / `_internal\` **全部删除**，
+> 只剩用户自己的 `Downloaded\` 与那两份旧数据；HKCU 的
+> `...\Uninstall\DouBi`、`Software\DouBi` 两项、桌面快捷方式、开始菜单目录
+> **全部清空**；`doubi-gui` 残留进程 0 个；`~/.doubi/` 完好保留。
+
 > **导航栏 i18n 没法用截图验证（0.3.1 结论，别再浪费时间试）**：主窗口是
 > Qt 无边框 + DWM 合成，`BitBlt` 和 `PrintWindow` 抓出来**全是黑屏**——
 > 这是 GDI 对 DWM 窗口的已知限制，不是程序坏了。所以 §7 那条「左侧导航文字
@@ -809,6 +864,29 @@ Get-ChildItem "$env:TEMP\ns*.tmp"                      # 暂存 datablock 会涨
 
 CPU 在涨、临时文件在涨，就是在压缩。makensis 退出前日志最后一行通常是
 `Compressed data: ...`，真正结束后还会追加「CRC / Total size / OK」三行。
+
+#### 静默安装「卡住」：先看是不是在等人点模态框（0.3.3 新增）
+
+上面的「CPU 在涨就是活着」**只对 makensis 编译成立**。`/S` 静默安装
+卡住时，判据完全不同——NSIS 的 `/S` **只放行它自己的向导按钮，不放行
+脚本里 `MessageBox` 的返回值**，所以一旦脚本弹了框，安装程序会在
+`Responding=True` 的状态下无限等下去，CPU 也几乎不动。
+
+```powershell
+$p = Get-Process -Name 'DouBi-Setup-*' -ErrorAction SilentlyContinue
+if ($p) {
+  $p.MainWindowTitle                                   # 有标题 = 模态框在等人点
+  (Get-ChildItem "$env:TEMP" -Filter 'ns*.tmp').Length # 只有几百 KB = 还没开始写盘
+}
+```
+
+两条同时成立就是被模态框拦住了，不是死锁、不是压缩慢。
+`豆比下载 <版本> 安装` 这个标题对应的正是 `EnsureAppClosed` 里那句
+「检测到 豆比下载 正在运行」，触发条件是**装之前没关掉正在运行的程序**。
+
+推不动它的情况（`WM_CLOSE` / `Alt+F4` / `taskkill` 全无效，NSIS 模态
+循环会把这些消息吃掉）下，可以给 `GetDlgItem($hWnd, 1)`（IDOK）发
+`BM_CLICK`（`0x00F5`）放行；点「取消」会 `Abort`，整包**什么都不装**。
 
 ## 7. 验证清单（0.3.1 修订版）
 
