@@ -130,6 +130,14 @@ Function ${un}EnsureAppClosed
     Return                      ; 没在跑，直接过
   ${EndIf}
 
+  ; 静默模式（/S）下绝不能弹 MessageBox：NSIS 的 /S 不放行脚本对话框的
+  ; 返回值，这个 MB_OKCANCEL 会一直挂在那里等人点，外层只能超时。
+  ; 0.3.3 / 0.3.4 的隔离静默验收都是这么挂掉的（退出码 2、300s+ 无进展，
+  ; 判据是安装器 Responding=True、MainWindowTitle 非空、
+  ; %TEMP%\ns*.tmp 只有几百 KB 而正常压缩期会涨到 ~1.5GB、CPU 几乎不动）。
+  ; 静默安装按「无人值守 = 默认同意」处理：直接走 doubi_kill。
+  IfSilent doubi_kill
+
   MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION \
     "检测到 ${PRODUCT_NAME} 正在运行。$\r$\n$\r$\n必须先关闭它，否则程序文件被占用、无法写入。$\r$\n点击「确定」立即关闭。" \
     IDOK doubi_kill

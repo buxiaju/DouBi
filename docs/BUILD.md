@@ -809,25 +809,33 @@ NSIS CRC footer 为 `CRC (0x4DD207EE): 4 / 4 bytes` +
 | 标题栏 i18n | PASS | **PASS** | `豆比下载 0.3.3  ·  多平台视频下载器 - DouBi`（内存 165.5 MB，`Responding=True`） |
 | **卸载后零残留** | 除 `doubi.db` 外零残留 | **真正零残留** | P1-1 生效：安装目录里的 `doubi.db` / `download_manifest.jsonl` 是 0.3.2 时代留下的，**不会被删**（见下） |
 
-> **静默安装在这台机器上撞上了一个真实缺陷（0.3.3 新发现，知情发布）**：
-> `/S` **只放行 NSIS 自己的按钮，不放行脚本里 `MessageBox` 的返回值**。
-> `EnsureAppClosed` 宏在检测到 `doubi-gui.exe` 正在运行时弹
-> `MB_OKCANCEL` 询问「是否立即关闭」，**静默模式下没人点这个框**，
-> 安装程序就挂在那儿，直到外层超时（实测退出码 **2**，耗时 300s+）。
-> 进程健在（`Responding=True`、7 线程、284 句柄），`%TEMP%` 里只有
-> 275 KB 的 `ns*.tmp`（正常安装期间会涨到约 1.5 GB）——**判据是这两条，
-> 不是 CPU（LZMA 单线程压缩本来就不吃 CPU）**。诊断方法见 §6.6 改写的那段：
+> **静默安装卡在模态框的缺陷 —— ✅ 已修（0.3.5）**：`/S` **只放行 NSIS
+> 自己的按钮，不放行脚本里 `MessageBox` 的返回值**。`EnsureAppClosed` 宏
+> 在检测到 `doubi-gui.exe` 正在运行时弹 `MB_OKCANCEL` 询问「是否立即关闭」，
+> **静默模式下没人点这个框**，安装程序就挂在那儿，直到外层超时（实测退出码
+> **2**，耗时 300s+）。
+>
+> 0.3.5 按下面这段原本就写好的修法落地：`installer/doubi.nsi` 的
+> `EnsureAppClosed` 在 `MessageBox` **之前**插 `IfSilent doubi_kill`——
+> 静默安装按「无人值守 = 默认同意」处理，直接 `taskkill` 掉再继续，
+> 不再弹框。手动安装路径完全不变（仍会问、点「取消」仍 `Abort`）。
+>
+> 历史诊断记录（0.3.3 发现时的手工取证，保留备查）：进程健在
+> （`Responding=True`、7 线程、284 句柄），`%TEMP%` 里只有 275 KB 的
+> `ns*.tmp`（正常安装期间会涨到约 1.5 GB）——**判据是这两条，不是 CPU**
+> （LZMA 单线程压缩本来就不吃 CPU）。用 `WM_CLOSE` / `Alt+F4` / `taskkill`
+> 都推不动（NSIS 模态循环会把它们吃掉），发 `BM_CLICK` 到
+> `GetDlgItem($hWnd, 1)`（IDOK）才走得下去；点「取消」则 `Abort`、
+> 整包**什么都不装**。
 >
 > ```powershell
-> $p = Get-Process -Name 'DouBi-Setup-0.3.3' -ErrorAction SilentlyContinue
-> if ($p) { $p.MainWindowTitle }        # → 「豆比下载 0.3.3 安装」= 模态框在等人点
+> $p = Get-Process -Name 'DouBi-Setup-0.3.5' -ErrorAction SilentlyContinue
+> if ($p) { $p.MainWindowTitle }        # → 非空 = 模态框在等人点
 > ```
 >
-> 用 `WM_CLOSE` / `Alt+F4` / `taskkill` 都推不动（NSIS 模态循环会把它们吃掉），
-> 发 `BM_CLICK` 到 `GetDlgItem($hWnd, 1)`（IDOK）才走得下去；
-> 点「取消」则 `Abort`、整包**什么都不装**。
-> 想彻底避开就**先关掉正在运行的程序**再 `/S`。
-> 修法留给下一版（静默模式下 `IfSilent` 直接走 `doubi_kill`，不弹框）。
+> 即便如此，**验收前仍建议先 `Stop-Process -Name doubi-gui`**：不是怕挂，
+> 而是让「安装器是否真的替换了文件」这件事可判（程序开着时 `SetOverwrite`
+> 可能撞上被占用的句柄）。
 
 > **本机安装目录 `C:\A\01SoftWares\01Tools\DouBi` 不是一个干净的验收环境**：
 > 里面有用户自己 340 个下载文件（`Downloaded\`）、409,600 B 的旧 `doubi.db`
