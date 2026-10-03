@@ -1,5 +1,147 @@
 # Changelog
 
+## 0.3.5 (2026-10-04) — 性能与 UI：字体族真修复 + 四处渲染热点收口
+
+> 本版回应用户「继续优化 UI 和软件的性能」。核心发现是：**0.3.1 → 0.3.4
+> 连写三个版本的 `font-family` 从未生效**——Qt 的 QSS 实现不解析带引号的
+> 逗号分隔族列表，全应用（含 qfluentwidgets 控件）一直落在 Segoe UI 上，
+> 中文再走一次系统字体回退。这才是用户连续两轮抱怨「字看着并不那么清晰」
+> 的真根因，与 0.3.4 调的字号/字重无关（字号字重是有效的）。
+>
+> 修完字体后按实测热点收口另外四处：TaskRow elide 缓存（**4.4×**）、
+> 解析页搜索过滤缓存（**2.0×**）、「下载选中」去重 O(N²)→set（**111×**）、
+> 剪贴板轮询按可见性起停、历史页懒加载 + 脏标记。
+>
+> 三个口径：local **1315 passed / 7 skipped**（0.3.4 是 1298/7）、
+> ci 口径 passed/failed/skipped 三项与 CI 持平、断网扫描 0 次 `getaddrinfo`。
+>
+> 版本号单一真源 `src/doubi/__init__.py` 由 0.3.4 升至 0.3.5。
+
+### 一、字体族：从「写了三个版本从未生效」到真正落地
+
+**根因**（实测证据，非推断）：
+
+| 探针 | 结果 |
+| --- | --- |
+| `QApplication.font().family()` | `Microsoft YaHei UI`（系统默认，本来就是对的） |
+| `StrongBodyLabel.font().family()` | **`Segoe UI`** |
+| `QLabel` + `setStyleSheet(heading_qss(1))` 之后 | **仍是 `Segoe UI`** |
+| `QFontDatabase.families()` | 154 个，`Microsoft YaHei UI` / `Segoe UI` 均存在 |
+| `QFont("Microsoft YaHei UI").exactMatch()` | `True` |
+
+即：**字体本身装得上，是 QSS 那一行把它覆盖坏了**。Qt 的样式表实现把
+`font-family: 'A', 'B', 'C'` 整串当作**一个字面族名**去查，查不到就静默
+回落——不报错、不警告，所以连写三个版本没人发现。
+
+**修法**（两条腿，缺一不可）：
+
+1. `QApplication.setFont()` —— 管**非 fluent** 控件（裸 `QLabel` /
+   `QLineEdit` / `QTableWidget` 等，构造时继承 app font）。
+   新增 `theme.apply_app_font()`，族名取 `FONT_FAMILY_PRIMARY`，
+   字重一并设 500。
+2. `qfluentwidgets.setFontFamilies()` —— 管**fluent 控件**。
+   fluent 的 `getFont()` 是 `QFont()` **从零构造**再
+   `setFamilies(qconfig.fontFamilies)`，**根本不看 app font**；而
+   qfluentwidgets 的出厂默认是 `['Segoe UI', 'Microsoft YaHei', ...]`，
+   **Segoe UI 排第一**。不覆盖这个 qconfig，标题栏、按钮、开关的族名
+   就还是 Segoe UI。
+
+同时**清掉全部 15 处 QSS `font-family` 输出**（`theme.py` 6 处、
+`widgets.py` 4 处、`about_dialog.py` 1 处、`login_dialog.py` 4 处）——
+留着就会盖掉 fluent 控件自己 `setFamilies()` 的结果。`FONT_FAMILY` /
+`FONT_FAMILY_MONO` 保留为纯字符串常量（不再进 QSS），新增
+`FONT_FAMILIES` 列表供 `QFont.setFamilies()` 使用。
+
+**验收**（offscreen，真实 `MainWindow`）：88 个 `QLabel` **全部**落在
+`Microsoft YaHei UI`，修复前是 81/88（7 个漏网：标题栏 `titleLabel`
+×2 + `SwitchButton` 的 On/Off ×5）。fluent 侧 `ArrowButton` /
+`PushButton` / `LineEdit` / `SearchLineEdit` / `SwitchButton` 等
+12 类控件全部纠正。
+
+**为什么不动 fluent 的字重**：`BodyLabel=400` / `StrongBodyLabel=600`
+是 qfluentwidgets 的设计规范，也是项目里**有意**的层级设计——全项目
+200 多处 `setFont(...)` 调用为对齐一个全局值而全部改写不划算。只把
+app font 的默认字重从 400 提到 500，覆盖那些没显式设字重的自绘控件。
+
+### 二、TaskRow：elide 结果按（文本, 宽度）缓存 —— 实测 4.4×
+
+`TaskRow.resizeEvent` 原本**无条件**调 `_refresh_texts()`，于是每行每次
+尺寸变化都要跑两次 `QFontMetrics.elidedText`。历史记录的恢复流程会给
+上百行连续 `setGeometry`，每一次都触发一遍全量重算。
+
+现在 `_elide()` 把 `(text, width // 8)` 存进 label 的 `_elideKey` 属性，
+命中直接返回。宽度取整到 8px 再比较，是因为 Qt 在布局过程中会把控件在
+相邻像素间来回抖一下（滚动条进出、父容器余量分配），按精确值判定的话
+这种 1px 抖动会让缓存完全失效。
+
+实测（200 行 × 2 个 label，两条路径都先捂热再交错计时）：
+
+| | 中位耗时 | 每行每次 |
+| --- | --- | --- |
+| 修复前（无条件重算） | 5.253 ms | 0.0263 ms |
+| 修复后（缓存命中） | 1.199 ms | 0.0060 ms |
+
+**4.4×**。`setText` 本身也会跳过同值写入，所以缓存命中不会引起多余的
+relayout。
+
+### 三、解析页：搜索过滤缓存 + 去重改 set
+
+**搜索过滤（2.0×）**：`_on_search_changed` 挂在 `textChanged` 上，
+**每一个按键**都跑一遍全表，原先每行要现场取两次 item、调两次
+`.text()`、再 `.lower()` 两次。1500 行时每键就是 3000 次字符串分配。
+现在小写化结果缓存在 `QTableWidgetItem` 的自定义 role
+（`_HAYSTACK_ROLE`）上，只在首次遇到该行时算一次。实测 1500 行 × 5 次
+按键：**22.4 ms → 11.2 ms**。
+
+折叠 / 删行会打乱行号映射，两处都补了 `_invalidate_haystack_cache()`。
+
+**「下载选中」去重（111×）**：`_selected_items()` 原先对每个候选调
+`_is_duplicate(item, sel)`，那是 O(M) 线性扫描，整体 O(N²)——选中 800
+项时约 32 万次比较。改用 `seen_ids` 集合后 **15.8 ms → 0.143 ms**。
+`_is_duplicate` 的 list 分支保留（测试与零散调用点行为不变），新增
+set 分支走 O(1)。去重语义（按 `item_id`）未变，已加断言守护。
+
+### 四、剪贴板轮询：按可见性起停
+
+解析页只是主窗口六个页签之一。用户在设置页 / 下载页待着时，那个 1.5s
+的 `QTimer` 纯属白跑，而且每次都要跨进程问一遍剪贴板（Windows 上是
+`WM_GETTEXT` 往返）。新增 `showEvent` / `hideEvent` 起停定时器，
+只在解析页真正可见时轮询。
+
+单次 `clipboard.text()` 实测 0.00009s，所以这不是 CPU 热点——改的是
+「切换页签后仍在后台定期唤醒」这件事。
+
+### 五、历史页：懒加载 + 脏标记
+
+历史页在构造阶段就把整张表填满（500 行 × 6 列 = 3000 个
+`QTableWidgetItem`），而它是六个页签之一，绝大多数会话根本不会切过去。
+实测构造耗 0.052s、`_refresh` 0.004s，其中查询本身不是瓶颈，白干的是
+建 item。
+
+改为：首刷推迟到第一次 `showEvent`；之后靠 `_dirty` 标记决定是否重查。
+主窗口 `_on_task_state_changed`（已接 `task_added` / `task_finished` /
+`task_failed` / `task_removed`）顺带调 `history_interface.mark_dirty()`——
+**没有这一步就会反过来出错**：缓存生效后用户下载完切到历史页看到的
+还是旧列表。
+
+### 六、测试
+
+新增 `tests/test_font_and_ui_caches.py`（17 例）：
+
+- 字体族 6 例：QSS 不再输出 `font-family` 声明（源码树级断言）、
+  app font 装对、fluent qconfig 被覆盖、fluent Label 端到端族名、
+  幂等性、无 `QApplication` 时安静返回 `False`
+- TaskRow elide 3 例：不变不重算、文本变了要重算、尺寸抖动不 thrash
+- 搜索 4 例：过滤语义（标题或作者、大小写不敏感）、缓存被真的读到
+  （塞哨兵值验证）、删行后失效、去重语义
+- 历史页 3 例：构造不查库、首次可见才加载、脏标记被消费
+
+另修一处**测试隔离**问题：`asyncio.run()` 退出时会清掉线程的 current
+event loop，于是本文件单独跑没事、放进全量套件（跟在
+`test_pipeline_smoke.py` / `test_server.py` 之后）就报
+`RuntimeError: There is no current event loop in thread 'MainThread'`。
+补了 autouse fixture 显式装一个，不依赖执行顺序。
+
 ## 0.3.4 (2026-10-03) — UI 完善：B 站采集 + 主题重调 + 字体清晰化
 
 > 本版回应用户「UI 完善下一轮」：搜索/热榜补 B 站通道、豆比紫主题换色、

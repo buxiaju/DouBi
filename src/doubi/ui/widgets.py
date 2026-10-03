@@ -42,7 +42,7 @@ def build_page_header(parent=None):
     from qfluentwidgets import StrongBodyLabel
 
     from .theme import (
-        FONT_FAMILY, SPACE_SM, SPACE_LG, TYPE_H1, TYPE_H2, TYPE_CAPTION,
+        SPACE_SM, SPACE_LG, TYPE_H1, TYPE_H2, TYPE_CAPTION,
         heading_qss, body_qss, muted_qss, current_theme, token, subscribe_theme,
     )
 
@@ -119,7 +119,6 @@ def build_page_header(parent=None):
                 self.setStyleSheet(header_qss(1))
                 # accent 模式下，标题用更亮的字
                 self._title.setStyleSheet(
-                    f"font-family: {FONT_FAMILY}; "
                     f"font-size: {TYPE_H1}px; "
                     f"font-weight: 600; "
                     f"color: {token('text_primary')}; "
@@ -145,7 +144,7 @@ def build_stat_chip(parent=None):
     from PySide6.QtWidgets import QWidget, QHBoxLayout, QLabel
 
     from .theme import (
-        SPACE_SM, SPACE_MD, FONT_FAMILY, TYPE_H2, TYPE_CAPTION,
+        SPACE_SM, SPACE_MD, TYPE_H2, TYPE_CAPTION,
         token, current_theme, subscribe_theme, RADIUS_PILL,
     )
 
@@ -194,12 +193,10 @@ def build_stat_chip(parent=None):
                 bg = token(f"status_{kind}_bg", token("bg_hover"))
                 border = fg
             self._value.setStyleSheet(
-                f"font-family: {FONT_FAMILY}; "
                 f"font-size: {TYPE_H2}px; font-weight: 600; "
                 f"color: {fg}; background: transparent; border: none;"
             )
             self._label.setStyleSheet(
-                f"font-family: {FONT_FAMILY}; "
                 f"font-size: {TYPE_CAPTION}px; "
                 f"color: {fg}; background: transparent; border: none;"
             )
@@ -232,7 +229,7 @@ def build_empty_state(parent=None):
     )
 
     from .theme import (
-        SPACE_LG, SPACE_MD, FONT_FAMILY, TYPE_BODY, TYPE_CAPTION,
+        SPACE_LG, SPACE_MD, FONT_FAMILY_PRIMARY, TYPE_BODY, TYPE_CAPTION,
         token, card_qss, current_theme, subscribe_theme,
     )
 
@@ -262,7 +259,7 @@ def build_empty_state(parent=None):
             # 强制换行、最后一个字孤立到第二行居中。Expanding 让 label fill
             # 父容器（如 700px），一行就能装下整段副标题。
             self._title.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-            self._title_font = QFont(FONT_FAMILY)
+            self._title_font = QFont(FONT_FAMILY_PRIMARY)
             self._title_font.setPixelSize(TYPE_BODY + 1)
             self._title_font.setWeight(QFont.Medium)
             self._title.setFont(self._title_font)
@@ -270,7 +267,7 @@ def build_empty_state(parent=None):
             self._subtitle.setAlignment(Qt.AlignCenter)
             self._subtitle.setWordWrap(True)
             self._subtitle.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-            self._subtitle_font = QFont(FONT_FAMILY)
+            self._subtitle_font = QFont(FONT_FAMILY_PRIMARY)
             self._subtitle_font.setPixelSize(TYPE_CAPTION)
             self._subtitle.setFont(self._subtitle_font)
 
@@ -334,7 +331,7 @@ def build_platform_badge(parent=None):
     from PySide6.QtWidgets import QLabel
 
     from .theme import (
-        FONT_FAMILY, RADIUS_PILL, SPACE_SM, SPACE_MD, TYPE_TINY,
+        RADIUS_PILL, SPACE_SM, SPACE_MD, TYPE_TINY,
         token, current_theme, subscribe_theme, _hex_to_rgba,
     )
 
@@ -379,7 +376,6 @@ def build_platform_badge(parent=None):
                 bg = _hex_to_rgba(color, 0.10)
             self.setStyleSheet(
                 f"QLabel#platformBadge {{"
-                f"font-family: {FONT_FAMILY}; "
                 f"font-size: {TYPE_TINY}px; font-weight: 600; "
                 f"color: {text_color}; "
                 f"background-color: {bg}; "

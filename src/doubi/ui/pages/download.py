@@ -352,8 +352,19 @@ def build_download_widgets():
             return friendly_phase(message)
 
         def _elide(self, label: QLabel, text: str) -> None:
-            metrics = QFontMetrics(label.font())
+            """按 label 当前宽度截断 ``text`` 并写入。
+
+            宽度取整后再比较：Qt 在布局过程中会把控件在相邻像素间来回
+            抖一下（滚动条进出、父容器余量分配），如果按精确值判定，
+            这种 1px 抖动会让每一行都判定为「宽度变了」而重算，
+            缓存就白做了。
+            """
             width = max(label.width() - 2, 40)
+            key = (text, width // 8)
+            if label.property("_elideKey") == key:
+                return
+            label.setProperty("_elideKey", key)
+            metrics = QFontMetrics(label.font())
             label.setText(metrics.elidedText(text, Qt.ElideRight, width))
 
         def _refresh_texts(self) -> None:
@@ -362,6 +373,15 @@ def build_download_widgets():
             self._elide(self.message_label, self._status_message())
 
         def resizeEvent(self, event) -> None:      # noqa: N802 (Qt naming)
+            """宽度没实质变化时不要重算 elide。
+
+            0.3.4 之前这里无条件调 ``_refresh_texts()``，于是每行每次
+            尺寸变化都要跑两次 ``QFontMetrics.elidedText``。历史记录的
+            恢复流程会给上百行连续 setGeometry，每一次都触发一遍——
+            这是「任务多时滚动/恢复发卡」的主要来源。现在 :meth:`_elide`
+            自带按（文本, 宽度）判重的缓存，重复调用直接返回，而
+            ``setText`` 本身也会跳过同值写入，不会引起多余的 relayout。
+            """
             super().resizeEvent(event)
             self._refresh_texts()
 

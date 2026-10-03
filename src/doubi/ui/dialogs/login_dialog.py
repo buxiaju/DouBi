@@ -72,7 +72,7 @@ def _build_brand_hero(platform: str, accent: str) -> "QWidget":
 
     from ..resources import APP_NAME, load_app_icon
     from ..theme import (
-        FONT_FAMILY, SPACE_LG, SPACE_MD, RADIUS_CARD, TYPE_H1, TYPE_CAPTION,
+        FONT_FAMILIES, SPACE_LG, SPACE_MD, RADIUS_CARD, TYPE_H1, TYPE_CAPTION,
         _hex_to_rgba, current_theme, token,
     )
 
@@ -101,7 +101,7 @@ def _build_brand_hero(platform: str, accent: str) -> "QWidget":
     badge.setFixedSize(40, 40)
     badge.setAlignment(Qt.AlignCenter)
     badge_font = QFont()
-    badge_font.setFamilies([s.strip("'") for s in FONT_FAMILY.split(",")])
+    badge_font.setFamilies(FONT_FAMILIES)
     badge_font.setPointSize(16)
     badge_font.setBold(True)
     badge.setFont(badge_font)
@@ -124,7 +124,6 @@ def _build_brand_hero(platform: str, accent: str) -> "QWidget":
     title = QLabel(f"{platform} 登录")
     title.setStyleSheet(
         f"QLabel {{"
-        f" font-family: {FONT_FAMILY};"
         f" font-size: {TYPE_H1 - 4}px;"
         f" font-weight: 600;"
         f" color: {text_color};"
@@ -137,7 +136,6 @@ def _build_brand_hero(platform: str, accent: str) -> "QWidget":
     sub = QLabel(f"{APP_NAME} · 一站式多平台视频下载")
     sub.setStyleSheet(
         f"QLabel {{"
-        f" font-family: {FONT_FAMILY};"
         f" font-size: {TYPE_CAPTION}px;"
         f" color: {sub_color};"
         f" background: transparent;"

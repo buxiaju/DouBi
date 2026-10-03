@@ -36,6 +36,10 @@ __all__ = [
     "DEFAULT_THEME",
     "FONT_FAMILY",
     "FONT_FAMILY_MONO",
+    "FONT_FAMILY_PRIMARY",
+    "FONT_FAMILIES",
+    "FONT_WEIGHT_DEFAULT",
+    "apply_app_font",
     "TYPE_H1",
     "TYPE_H2",
     "TYPE_H3",
@@ -118,15 +122,50 @@ DEFAULT_THEME = "default_light"
 # 不用"Microsoft YaHei"等带空格的本地化名：PySide6 在不同平台下
 # 字体匹配算法略有差异，无空格名能保证每处渲染一致。
 # Windows 上 hinting 关键——YaHei UI 的渲染器比 PingFang 稳得多。
+# 注意：**这个字符串不能再被塞进 QSS 的 ``font-family``**。
+# Qt 的样式表实现不解析「带引号的、逗号分隔的字体族列表」——它只把整串
+# 当成一个字面族名去查，查不到就静默回落。0.3.4 之前 ``heading_qss`` 等
+# 一直这么写，于是全应用（含 qfluentwidgets 的 StrongBodyLabel）实际落到
+# Segoe UI 上，中文再走一次字体回退——这正是「字看着糊」的真根因，
+# 与 0.3.4 调大字号字重无关（字号字重是有效的，只有族名没生效）。
+#
+# 正确做法见 :func:`apply_app_font`：把它交给 ``QApplication.setFont()``
+# （Qt 会在候选列表里逐个尝试），QSS 侧只保留字号 / 字重 / 颜色。
 FONT_FAMILY = (
-    "'Microsoft YaHei UI', 'PingFang SC', 'HarmonyOS Sans SC', "
-    "'Source Han Sans SC', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', "
+    "Microsoft YaHei UI, PingFang SC, HarmonyOS Sans SC, "
+    "Source Han Sans SC, Noto Sans CJK SC, WenQuanYi Micro Hei, "
     "Segoe UI, sans-serif"
 )
 FONT_FAMILY_MONO = (
-    "'JetBrains Mono', 'Cascadia Code', 'Fira Code', "
-    "Consolas, 'Courier New', monospace"
+    "JetBrains Mono, Cascadia Code, Fira Code, "
+    "Consolas, Courier New, monospace"
 )
+
+#: 首选族名（不含回退链）。``QFont`` 只认单一族名，回退由 Qt 自己按
+#: ``QFont.substitutes`` 处理，所以这里取链首。
+FONT_FAMILY_PRIMARY = "Microsoft YaHei UI"
+
+#: 交给 ``QFont.setFamilies()`` / qfluentwidgets 的候选族列表。
+#:
+#: 与 :data:`FONT_FAMILY` 的区别：那个是**给 QSS 看的**（已废弃，见其注释），
+#: 这个是**给 Qt API 看的**，Qt 会按顺序逐个尝试，第一个装得上的族胜出。
+#: fluent 控件在构造时调 ``getFont()``，内部就是
+#: ``font.setFamilies(qconfig.get(qconfig.fontFamilies))``——而
+#: qfluentwidgets 的出厂默认是 ``['Segoe UI', 'Microsoft YaHei', ...]``，
+#: **Segoe UI 排第一**。Segoe UI 本身不含汉字，中文就只能靠 Qt 的字体回退
+#: 现抓一个——回退选出来的族不受 hinting 参数控制，笔画在 125% 缩放下发糊。
+#: 把 YaHei UI 提到首位，中文才由同一族一贯地渲染。
+FONT_FAMILIES = [
+    "Microsoft YaHei UI",
+    "Microsoft YaHei",
+    "PingFang SC",
+    "HarmonyOS Sans SC",
+    "Noto Sans CJK SC",
+    "Segoe UI",
+]
+
+#: 应用级默认字重。400 在 1080p / 125% 下中文发灰，500 是「正常」的视觉重量。
+FONT_WEIGHT_DEFAULT = 500
 
 # 排版尺度（所有主题共用）。
 # 0.3.4 整体调大 1~4 px：上一版在 1080p/缩放 125% 下显得「糊」。
@@ -558,9 +597,13 @@ def muted_qss(size: int = TYPE_CAPTION) -> str:
 
     字重 500：上一版默认 400 让次级说明看起来「糊」，与正文区分只靠颜色。
     现在它和正文同字重，靠字号 + 颜色拉开层级。
+
+    0.3.5：**不再输出 font-family**。Qt QSS 不解析带引号的字体族列表，
+    写了也落不到 Segoe UI 以外的族上；族名统一由 :func:`apply_app_font`
+    装到 ``QApplication`` 上，只有当控件自己的 QSS 显式声明族名时才会
+    覆盖它——而那种覆盖正是我们想避免的。
     """
     return (
-        f"font-family: {FONT_FAMILY}; "
         f"font-size: {size}px; "
         f"font-weight: 500; "
         f"color: {token('text_muted')};"
@@ -574,13 +617,14 @@ def heading_qss(level: int = 1) -> str:
     在所有主题里都「跳出来」——而不是用 text_primary 的死黑色块。
     字重：H1/H2 → 700（页面骨架最显眼）；H3 → 600（卡片分组）；
     muted_qss → 500（次级说明，默认偏弱）。
+
+    0.3.5：不再输出 font-family（理由见 :func:`muted_qss`）。
     """
     sizes = {1: TYPE_H1, 2: TYPE_H2, 3: TYPE_H3}
     size = sizes.get(level, TYPE_BODY)
     weight = "700" if level <= 2 else "600"
     color = token("text_primary")
     return (
-        f"font-family: {FONT_FAMILY}; "
         f"font-size: {size}px; "
         f"font-weight: {weight}; "
         f"color: {color};"
@@ -592,9 +636,10 @@ def body_qss(size: int = TYPE_BODY) -> str:
 
     字重 500 而非默认 400：中文字符在低字重 + 默认渲染下会显得发灰，
     尤其是在 125% 缩放场景。500 是「正常」的视觉重量。
+
+    0.3.5：不再输出 font-family（理由见 :func:`muted_qss`）。
     """
     return (
-        f"font-family: {FONT_FAMILY}; "
         f"font-size: {size}px; "
         f"font-weight: 500; "
         f"color: {token('text_primary')};"
@@ -646,7 +691,6 @@ def header_qss(level: int = 1) -> str:
             border-radius: {RADIUS_CARD}px;
         }}
         QLabel#brandHeroTitle {{
-            font-family: {FONT_FAMILY};
             font-size: {title_size}px;
             font-weight: 600;
             color: {token('text_primary')};
@@ -654,7 +698,6 @@ def header_qss(level: int = 1) -> str:
             border: none;
         }}
         QLabel#brandHeroSubtitle {{
-            font-family: {FONT_FAMILY};
             font-size: {TYPE_CAPTION}px;
             color: {token('text_muted')};
             background: transparent;
@@ -695,9 +738,9 @@ def app_qss(pack: Optional[ThemePack] = None) -> str:
     )
     return f"""
 /* ---- 全局字体 ----
-   把默认字体写进 QSS，让所有没显式指定字体的控件都按这套字渲染。 */
+   只写字号：族名交给 QApplication.setFont()（见 apply_app_font）。
+   这里若写 font-family 会盖掉 fluent 控件自己 setFamilies 的结果。 */
 * {{
-    font-family: {FONT_FAMILY};
     font-size: {TYPE_BODY}px;
 }}
 
@@ -719,7 +762,6 @@ QDialog {{
 QLabel {{
     color: {text};
     background-color: transparent;
-    font-family: {FONT_FAMILY};
 }}
 
 /* ---- 多行输入（解析页 URL 框、登录框二维码/日志） ---- */
@@ -758,7 +800,6 @@ QToolTip {{
     border: 1px solid {border};
     border-radius: {radius}px;
     padding: 6px 8px;
-    font-family: {FONT_FAMILY};
     font-size: {TYPE_CAPTION}px;
 }}
 
@@ -1172,6 +1213,63 @@ def _patch_style_sheet_register() -> None:
     _register_patched = True
 
 
+def apply_app_font() -> bool:
+    """把 :data:`FONT_FAMILY_PRIMARY` 装成 ``QApplication`` 的应用级默认字体。
+
+    这是字体真正生效的**唯一**入口。0.3.4 之前项目一直试图用 QSS 的
+    ``font-family`` 指定字体族，但 Qt 的样式表实现不解析带引号的字体族
+    列表——它把整串当一个字面族名，查不到就静默回落。实测
+    ``StrongBodyLabel.font().family()`` 得到的是 ``Segoe UI``，中文再走
+    一次系统字体回退，于是「字看着糊」（详见 :data:`FONT_FAMILY` 的注释）。
+
+    两件事一起做，缺一不可：
+
+    1. ``QApplication.setFont()`` —— 管**非 fluent** 控件（裸 ``QLabel`` /
+       ``QLineEdit`` / ``QTableWidget`` 等）。它们在构造时继承 app font。
+    2. ``qfluentwidgets.setFontFamilies()`` —— 管**fluent 控件**。
+       fluent 的 ``getFont()`` 是 ``QFont()`` **从零构造**再
+       ``setFamilies(qconfig.fontFamilies)``，根本不看 app font；而
+       qfluentwidgets 的出厂默认把 ``Segoe UI`` 排在首位。不覆盖这个
+       qconfig，标题栏、按钮、开关的族名就还是 Segoe UI。
+
+    字重一并设为 :data:`FONT_WEIGHT_DEFAULT`（500），避免「字号改对了但
+    中文仍发灰」。fluent 控件自己按设计规范传 weight（BodyLabel=400、
+    StrongBodyLabel=600），这是有意的层级设计，**不覆盖**——200 多处
+    ``setFont(...)`` 调用为对齐一个全局值而全部改写不划算。
+
+    返回是否真的装上了（无 ``QApplication`` 时返回 ``False``，便于无头
+    环境下安静跳过）。
+    """
+    try:
+        from PySide6.QtGui import QFont
+        from PySide6.QtWidgets import QApplication
+    except ImportError:  # pragma: no cover - 无 GUI 环境
+        return False
+
+    app = QApplication.instance()
+    if app is None:
+        return False
+
+    font = QFont(app.font())
+    font.setFamily(FONT_FAMILY_PRIMARY)
+    # 字号沿用平台默认（Windows 下 pointSize=9 对应 12px 基准）；具体控件
+    # 靠 QSS 的 font-size 覆写，这里只管族名与字重。
+    font.setWeight(QFont.Weight.Medium)  # 500
+    app.setFont(font)
+
+    # fluent 侧：改 qconfig 只影响**之后**新建的控件，所以 set_theme() 里
+    # 这一句必须排在所有页面构造之前——app.py 的启动顺序正好满足。
+    try:
+        from qfluentwidgets import setFontFamilies
+    except ImportError:  # pragma: no cover - 无 GUI 环境
+        return True
+    try:
+        setFontFamilies(list(FONT_FAMILIES))
+    except Exception:  # pragma: no cover - qconfig 未就绪时不该拖垮启动
+        logger.debug("覆盖 qfluentwidgets 字体族失败", exc_info=True)
+    return True
+
+
 def set_theme(name: Optional[str]) -> ThemePack:
     """切换主题并广播。
 
@@ -1197,6 +1295,9 @@ def set_theme(name: Optional[str]) -> ThemePack:
 
     setTheme(Theme.DARK if pack.dark else Theme.LIGHT)
     setThemeColor(pack.accent)
+    # 字体族必须在任何控件构造之前装到 QApplication 上：fluent 控件在
+    # 构造时读一次 app font，晚了就只有之后新建的控件能拿到。
+    apply_app_font()
     # 两个补丁都得在刷控件之前打好：卡片重算底色时取色方法必须已被替换，
     # 而 register 钩子要赶在后续控件创建之前就位。
     _patch_fluent_card_background()

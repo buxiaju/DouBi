@@ -42,9 +42,27 @@ def build_history_widgets():
             self.setObjectName("historyPage")
             self._cfg = load_config(None)
             self._rows: list = []       # MediaItemRow, for open-dir lookup
+            # 0.3.5：首刷推迟到第一次真正可见。历史页是六个页签之一，
+            # 但构造阶段就把整张表填满（500 行 × 6 列 = 3000 个
+            # QTableWidgetItem）纯属白干——绝大多数会话根本不会切到这一页。
+            self._loaded = False
+            self._dirty = False         # 有下载落库后置位，下次可见时重查
             self._build_ui()
-            self._refresh()
             subscribe_theme(self, self._on_theme_changed)
+
+        def showEvent(self, event) -> None:        # noqa: N802 (Qt naming)
+            """第一次可见时补做首刷；之后只在 dirty 时才重查。"""
+            super().showEvent(event)
+            if not self._loaded or self._dirty:
+                self._refresh()
+
+        def mark_dirty(self) -> None:
+            """下载落库后由主窗口调用，让下一次可见时重新查询。
+
+            没有这个标记就会反过来出错：缓存生效后，用户下载完切到
+            历史页看到的还是旧结果。
+            """
+            self._dirty = True
 
         def _on_theme_changed(self) -> None:
             """换主题后刷新自绘颜色的控件。"""
@@ -116,6 +134,8 @@ def build_history_widgets():
 
         def _refresh(self) -> None:
             if not self._cfg.database:
+                self._loaded = True
+                self._dirty = False
                 self._stat_total.set_value("—")
                 self._stat_showing.set_value(0)
                 self._empty_state.set_text(
@@ -147,6 +167,8 @@ def build_history_widgets():
                 await db.close()
 
             self._rows = rows
+            self._loaded = True
+            self._dirty = False
             self._stat_total.set_value(str(total))
             self._stat_showing.set_value(len(rows))
             if rows:

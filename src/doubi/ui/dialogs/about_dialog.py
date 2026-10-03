@@ -20,7 +20,7 @@ def build_about_dialog():
         load_app_icon,
     )
     from ..theme import (
-        FONT_FAMILY, SPACE_LG, SPACE_SM, TYPE_BODY, TYPE_CAPTION,
+        SPACE_LG, SPACE_SM, TYPE_BODY, TYPE_CAPTION,
         card_qss, header_qss, muted_qss, token,
     )
 
@@ -46,8 +46,7 @@ def build_about_dialog():
             info_card = QLabel(self)
             info_card.setStyleSheet(card_qss() + "padding: 16px; margin: 0 16px;")
             info_text = (
-                f"<div style='font-family:{FONT_FAMILY};"
-                f"font-size:{TYPE_BODY}px;color:{token('text_primary')};'>"
+                f"<div style='font-size:{TYPE_BODY}px;color:{token('text_primary')};'>"
                 f"<p style='margin:4px 0'><b>应用名</b>　{APP_NAME} · {APP_TAGLINE}</p>"
                 f"<p style='margin:4px 0'><b>版本</b>　{APP_VERSION}</p>"
                 f"<p style='margin:4px 0'><b>平台</b>　Windows / macOS / Linux</p>"

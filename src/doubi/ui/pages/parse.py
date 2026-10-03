@@ -27,6 +27,13 @@ from typing import Optional
 logger = logging.getLogger("doubi.ui.pages.parse")
 
 
+#: QTableWidgetItem 上的自定义 role，存该行「标题 + 作者」的小写串。
+#: 搜索过滤是逐按键全表扫的，缓存住小写化结果能省掉每键上万次字符串
+#: 分配（见 ``ParsePage._search_haystack``）。取 UserRole 之后的号段，
+#: 避开 Qt 自己用的 DisplayRole / CheckStateRole 等。
+_HAYSTACK_ROLE = 0x0100 + 32
+
+
 # ---------------------------------------------------------------------------
 # Prompt options dialog (M6.11 下载前询问)
 # ---------------------------------------------------------------------------
@@ -321,11 +328,25 @@ def build_parse_widgets():
             # 再粘贴——直接弹 InfoBar 提示「检测到链接，已填入」。1.5s
             # 轮询足够即时，又不至于在打字时抢焦点。对比上次内容，只在
             # 新链接出现时弹，避免每次 focus 都弹一遍。
+            #
+            # 0.3.5：定时器**按可见性起停**。解析页只是主窗口六个页签之
+            # 一，用户在设置页 / 下载页待着时，这个 1.5s 轮询纯属白跑，
+            # 而且每次都要跨进程问一遍剪贴板（Windows 上是 WM_GETTEXT
+            # 往返，笔记本上还牵着一次唤醒）。现在只在真正可见时跑。
             self._last_clipboard_text: str = ""
             self._clipboard_timer = QTimer(self)
             self._clipboard_timer.setInterval(1500)
             self._clipboard_timer.timeout.connect(self._poll_clipboard)
             self._clipboard_timer.start()
+
+        def showEvent(self, event) -> None:        # noqa: N802 (Qt naming)
+            super().showEvent(event)
+            if not self._clipboard_timer.isActive():
+                self._clipboard_timer.start()
+
+        def hideEvent(self, event) -> None:        # noqa: N802 (Qt naming)
+            super().hideEvent(event)
+            self._clipboard_timer.stop()
 
         def _on_theme_changed(self) -> None:
             """换主题后刷新自绘颜色的控件。"""
@@ -662,24 +683,48 @@ def build_parse_widgets():
             asyncio.create_task(_do())
 
         def _on_search_changed(self, text: str):
-            """Hide rows whose title / author doesn't contain *text*."""
+            """Hide rows whose title / author doesn't contain *text*.
+
+            0.3.5：小写化结果缓存在 QTableWidgetItem 的自定义 role 上。
+            这个槽挂在 ``textChanged`` 上，**每一个按键**都会跑一遍全表；
+            原先每行要现场取两次 item、调两次 ``.text()``、再 ``.lower()``
+            两次——对上千行的收藏夹列表就是每键上万次字符串分配。
+            现在只在首次遇到该行时算一次，之后直接读缓存。
+            """
             needle = text.strip().lower()
             self.result_table.blockSignals(True)
             try:
-                for row in range(self.result_table.rowCount()):
-                    if not needle:
+                if not needle:
+                    for row in range(self.result_table.rowCount()):
                         self.result_table.setRowHidden(row, False)
-                        continue
-                    title = (self.result_table.item(row, 2).text()
-                             if self.result_table.item(row, 2) else "").lower()
-                    author = (self.result_table.item(row, 3).text()
-                              if self.result_table.item(row, 3) else "").lower()
-                    self.result_table.setRowHidden(
-                        row, needle not in title and needle not in author,
-                    )
+                else:
+                    for row in range(self.result_table.rowCount()):
+                        haystack = self._search_haystack(row)
+                        self.result_table.setRowHidden(row, needle not in haystack)
             finally:
                 self.result_table.blockSignals(False)
             self._update_summary()
+
+        def _search_haystack(self, row: int) -> str:
+            """该行的「标题 + 换行 + 作者」小写串（懒算 + 缓存）。"""
+            item = self.result_table.item(row, 2)
+            hay = item.data(_HAYSTACK_ROLE) if item is not None else None
+            if hay is not None:
+                return hay
+            title = item.text() if item is not None else ""
+            author_item = self.result_table.item(row, 3)
+            author = author_item.text() if author_item is not None else ""
+            hay = f"{title}\n{author}".lower()
+            if item is not None:
+                item.setData(_HAYSTACK_ROLE, hay)
+            return hay
+
+        def _invalidate_haystack_cache(self) -> None:
+            """清空全表的小写缓存（标题被就地改写后必须调一次）。"""
+            for row in range(self.result_table.rowCount()):
+                item = self.result_table.item(row, 2)
+                if item is not None:
+                    item.setData(_HAYSTACK_ROLE, None)
 
         def _on_table_context_menu(self, pos):
             row = self.result_table.rowAt(pos.y())
@@ -1234,6 +1279,8 @@ def build_parse_widgets():
                     self._write_section_child_row(insert_at + k, ep, indent=True)
             finally:
                 self.result_table.blockSignals(False)
+            # 折叠会删掉一批行，行号整体位移，缓存按行号键控必须清掉。
+            self._invalidate_haystack_cache()
             self._refresh_row_mapping()
             self._update_summary()
 
@@ -1289,6 +1336,8 @@ def build_parse_widgets():
                     section_item.extra.pop("_expanded", None)
             finally:
                 self.result_table.blockSignals(False)
+            # 删行导致行号位移，搜索缓存跟着清。
+            self._invalidate_haystack_cache()
             self._refresh_row_mapping()
             self._update_summary()
 
@@ -1312,8 +1361,21 @@ def build_parse_widgets():
 
             Rows that have been expanded from a section are flattened into
             the list using the in-memory expanded-rows cache.
+
+            去重走 ``seen_ids`` 集合而非每次线性扫一遍 ``sel``——选中的
+            项一多，原来的 O(N²) 就是「点『下载选中』要等好几秒」的来源。
             """
             sel: list[MediaItem] = []
+            seen_ids: set = set()
+
+            def _push(candidate) -> None:
+                item_id = getattr(candidate, "item_id", None)
+                if item_id is not None and item_id in seen_ids:
+                    return
+                if item_id is not None:
+                    seen_ids.add(item_id)
+                sel.append(candidate)
+
             for i in range(self.result_table.rowCount()):
                 if self.result_table.isRowHidden(i):
                     continue
@@ -1330,12 +1392,9 @@ def build_parse_widgets():
                     # separate files. Child rows (episodes, pages)
                     # are emitted on their own pass below.
                     for ep in episodes_here:
-                        if not _is_duplicate(ep, sel):
-                            sel.append(ep)
+                        _push(ep)
                 elif i == self._top_to_row.get(top_idx):
-                    top = self._parsed_items[top_idx]
-                    if not _is_duplicate(top, sel):
-                        sel.append(top)
+                    _push(self._parsed_items[top_idx])
                 else:
                     # A child row that is itself checked. Resolve the
                     # most specific item it stands for: a page row means
@@ -1345,8 +1404,8 @@ def build_parse_widgets():
                         or self._resolve_episode_for_row(i)
                         or self._resolve_top_item_for_row(i)
                     )
-                    if owner is not None and not _is_duplicate(owner, sel):
-                        sel.append(owner)
+                    if owner is not None:
+                        _push(owner)
             return sel
 
         def _on_table_changed(self, item):
@@ -1731,10 +1790,17 @@ def build_parse_widgets():
         episodes are also ticked individually. ``TaskManager.add`` itself
         dedupes by ``item_id`` but skipping early keeps the user-visible
         counter honest.
+
+        O(len(existing)) 线性扫描。``_selected_items`` 里逐次调用就是
+        O(N²)——选中 1000 项时约 50 万次比较。调用方可以改传
+        :class:`set` 走 O(1) 分支（0.3.5 起 ``_selected_items`` 就是这么
+        做的）；这里的 list 分支留给测试与其他零散调用点，行为不变。
         """
         target = getattr(item, "item_id", None)
         if target is None:
             return False
+        if isinstance(existing, set):
+            return target in existing
         for other in existing:
             if getattr(other, "item_id", None) == target:
                 return True

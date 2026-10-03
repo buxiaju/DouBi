@@ -443,7 +443,12 @@ def build_main_window():
             ``task_removed`` 四个信号，全部走这里，避免 N 个槽重复
             计算。``*_args`` 是为了吞下信号带的 task_id 等参数——
             我们要的是「刷新当前快照」，不关心具体是哪个任务变了。
+
+            0.3.5：顺带把历史页标脏。历史页现在首刷懒加载 + 结果缓存，
+            下载落库后不清标记，用户下完切过去看到的还是旧列表。
             """
+            if hasattr(self, "history_interface"):
+                self.history_interface.mark_dirty()
             if not hasattr(self, "tray") or self.tray is None:
                 return
             self.tray.update_running_state(
