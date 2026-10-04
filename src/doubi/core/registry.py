@@ -114,6 +114,35 @@ class PlatformRegistry:
         return None
 
     @classmethod
+    def detect_chain(cls, url: str) -> list[PlatformAdapter]:
+        """Return every adapter whose URL patterns match ``url``.
+
+        Used by :meth:`Pipeline.parse` to walk the chain: the highest
+        priority adapter is tried first; if its ``parse()`` returns
+        ``None`` (or raises — the only exception that *is* allowed to
+        bubble is a programming error; data-level failures like
+        ``yt_dlp.DownloadError("Unsupported URL")`` are caught inside the
+        adapter and returned as ``None``), the next adapter runs.
+
+        Order: descending ``priority``, with stable tiebreak on
+        registration order so the result is deterministic across runs.
+
+        Returning a list (not a generator) keeps call sites simple and
+        makes it cheap to log the chain being tried.
+        """
+        with cls._lock:
+            adapters: list = list(cls._by_platform.values())
+        adapters = sorted(adapters, key=lambda a: -a.priority)
+        chain: list = []
+        for adapter in adapters:
+            try:
+                if adapter.match_url(url):
+                    chain.append(adapter)
+            except Exception:  # pragma: no cover - defensive
+                logger.exception("match_url raised on %s", adapter)
+        return chain
+
+    @classmethod
     def clear(cls) -> None:
         """Test helper — wipe all registered adapters."""
         with cls._lock:

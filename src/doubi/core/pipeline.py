@@ -190,16 +190,65 @@ class DownloadPipeline:
     # ---- public API ---------------------------------------------------
 
     async def parse(self, url: str) -> MediaItem | None:
-        """Parse a URL into a MediaItem using the matching platform adapter."""
-        adapter = PlatformRegistry.detect(url)
-        if adapter is None:
+        """Parse a URL into a MediaItem using the matching platform adapter.
+
+        Walks the **detect_chain**: highest-priority adapter first; on
+        ``None`` (or a swallowed data error) the next one tries.
+
+        This is the chain the GUI / CLI / REST / MCP surfaces rely on,
+        so the behaviour must be identical across them:
+
+          1. ``PlatformRegistry.detect_chain(url)`` returns the ordered
+             list of matching adapters (descending priority).
+          2. For each adapter in order, ``await adapter.parse(url)`` is
+             called. The adapter is **responsible** for catching its own
+             data-level failures (network, format, login, unsupported
+             URL) and returning ``None``. Programming errors still
+             bubble.
+          3. The first ``MediaItem`` returned wins; if every adapter
+             returns ``None``, ``parse`` returns ``None``.
+
+        Why the chain: a URL yt-dlp doesn't know (e.g. a small HLS-only
+        site with no extractor) used to drop straight to "解析结果为空"
+        even though :class:`GenericAdapter` would have happily found
+        the m3u8 with Playwright. Now :meth:`GenericAdapter.parse` is
+        the second-to-last resort (priority=-2), so most unknown URLs
+        that yt-dlp rejects will end up sniffed instead of failing
+        silently.
+        """
+        chain = PlatformRegistry.detect_chain(url)
+        if not chain:
             logger.error("No platform adapter matched URL: %s", url)
             return None
-        try:
-            return await adapter.parse(url)
-        except Exception:
-            logger.exception("Adapter %s raised while parsing %s", adapter.name, url)
-            return None
+        last_exc: Optional[BaseException] = None
+        for adapter in chain:
+            try:
+                item = await adapter.parse(url)
+            except Exception as exc:  # noqa: BLE001 - one adapter's bug must not kill the chain
+                # Programming error from a non-base adapter. Log and
+                # try the next one — same philosophy as ``detect``'s
+                # ``match_url`` try/except.
+                last_exc = exc
+                logger.warning(
+                    "Adapter %s raised while parsing %s: %s: %s",
+                    adapter.name, url, type(exc).__name__, exc,
+                )
+                continue
+            if item is not None:
+                if adapter is not chain[0]:
+                    logger.info(
+                        "First adapter %s returned None for %s; "
+                        "fell back to %s",
+                        chain[0].name, url, adapter.name,
+                    )
+                return item
+        # All adapters returned None. Surface the last exception (if any)
+        # at info level so the Sniffer's chain entry is visible in logs
+        # even when no item was found.
+        if last_exc is not None:
+            logger.info("All %d adapters returned None for %s; last=%r",
+                        len(chain), url, last_exc)
+        return None
 
     async def process_url(
         self,

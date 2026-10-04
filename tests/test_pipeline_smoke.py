@@ -76,6 +76,7 @@ def _stub_adapter_parse(monkeypatch, **overrides):
         return _mk_item(url, **overrides)
 
     monkeypatch.setattr(PlatformRegistry, "detect", _detect_with_stub(_fake_parse))
+    monkeypatch.setattr(PlatformRegistry, "detect_chain", _detect_chain_with_stub(_fake_parse))
 
 
 def _detect_with_stub(fake_parse):
@@ -90,6 +91,27 @@ def _detect_with_stub(fake_parse):
         return stub
 
     return _detect
+
+
+def _detect_chain_with_stub(fake_parse):
+    """``detect_chain`` 版本的 _detect_with_stub。
+
+    0.3.7 起 ``pipeline.parse`` 走 ``PlatformRegistry.detect_chain`` 而不是
+    ``detect``，所以只 patch ``detect`` 已经拦不住它了——真实适配器链会
+    照常跑，于是这些本该离线的路由用例会真的去连 douyin/bilibili。
+    每个链成员都换成 stub，且 parse 都是同一个 fake_parse。
+    """
+    real_chain = PlatformRegistry.detect_chain
+
+    def _chain(url, *args, **kwargs):
+        out = []
+        for adapter in real_chain(url, *args, **kwargs):
+            stub = copy.copy(adapter)
+            stub.parse = fake_parse
+            out.append(stub)
+        return out
+
+    return _chain
 
 
 def _mk_item(url: str, **overrides) -> MediaItem:
@@ -305,23 +327,27 @@ def test_pipeline_parse_bilibili_bangumi(monkeypatch):
 
 
 def test_pipeline_process_url_unknown_returns_none_ytdlp_failed(monkeypatch):
-    """M6.17+ 兜底链变更：不认识的 URL 先走 ytdlp_generic（priority=-1），
+    """M6.17+ 兜底链变更：不认识的 URL 先走 ytdlp_generic（priority=-1）。
 
-    yt-dlp 解析失败时返回 ``None``——pipeline 不再自动 chain 到 generic
-    嗅探（那条路径需要用户主动触发，例如 CLI ``--force-sniff``）。
+    0.3.7 变更：之前是「yt-dlp 失败就当 None 返回，不再 chain」，导致
+    用户复制一个 yt-dlp 不认识但 Playwright Sniffer 能处理的链接时
+    收到"解析为空"，没人告诉他 Sniffer 那一层其实能搞定。修法：
 
-    行为变化：
+      * ``PlatformRegistry.detect_chain`` 返回有序列表；
+      * ``pipeline.parse`` 沿链尝试，遇到 None 走到下一个；
+      * 整条链都返回 None 才算真失败。
 
-    * M6.16: registry.detect → generic → sniff 失败 → 错误 MediaItem
-    * M6.17+: registry.detect → ytdlp_generic → yt-dlp DownloadError → ``None``
+    本用例断言这个新行为：ytdlp_generic 失败 → generic adapter 拿到
+    机会 → Sniffer 同样失败（被 monkey-patch 抛异常）→ 链走完 → None。
 
-    0.3.3 修：本用例原先直接拿 ``https://example.com/something`` 去跑，靠
-    真实网络请求报错来凑出 ``None``。网络被黑洞时整个全量跑挂死在这里，
-    而且绿灯与否取决于当时能不能连上 example.com。这里把 yt-dlp 本身换成
-    「一进 with 就抛 DownloadError」的桩，把断言落回它真正想验证的那条
-    链路（yt-dlp 失败 → adapter 返回 None → pipeline 透传）。
+    0.3.3 修：原用例直接拿真实 ``https://example.com/something`` 去跑，
+    靠真网络请求报错凑出 None，全量跑会在这里挂死。这里把 yt-dlp
+    本身换成「一进 with 就抛 DownloadError」的桩；再把
+    GenericAdapter 的 sniff 也换成抛异常的桩，让整条链走完都拿不到
+    item，断言落回它真正想验证的链路（链走完 → None）。
     """
     import yt_dlp
+    from doubi.core.sniffer import Sniffer
 
     class _BoomYDL:
         def __init__(self, opts):        # noqa: ARG002 - 对齐真实签名即可
@@ -333,15 +359,18 @@ def test_pipeline_process_url_unknown_returns_none_ytdlp_failed(monkeypatch):
         def __exit__(self, *a):
             return False
 
+    async def _boom_sniff(self, url):
+        raise RuntimeError("simulated: sniff failed too")
+
     monkeypatch.setattr(yt_dlp, "YoutubeDL", _BoomYDL)
+    monkeypatch.setattr(Sniffer, "sniff", _boom_sniff)
 
     pipeline = DownloadPipeline(engine=_FakeEngine())
     item = asyncio.run(pipeline.process_url(
         "https://example.com/something",
         DownloadOptions(output_root=Path("./_test_out")),
     ))
-    # ytdlp_generic 解析 ``https://example.com/something`` 时 yt-dlp 抛
-    # DownloadError（404 / 站点不存在）→ adapter 返回 None → pipeline 透传。
+    # 0.3.7: yt-dlp 失败 → Sniffer 拿到机会 → Sniffer 也失败 → 链走完 → None
     assert item is None
 
 
