@@ -94,7 +94,6 @@ def _make_create_task_sync(monkeypatch, page_module):
 
 def _run_and_drain(page, qapp):
     """Call the parse action and synchronously drain the result."""
-    import asyncio
     page._on_parse_clicked()
     # _on_parse_clicked is sync and creates a task via create_task;
     # our patched version runs it inline. processEvents in case
@@ -339,7 +338,6 @@ def test_download_selected_skips_section_rows(qapp, monkeypatch):
     section rows pre-checked must NOT add the section itself to the
     download queue. Only its episode children should be enqueued.
     """
-    import asyncio
     from doubi.core.models import Platform, MediaItem, Author, MediaType
     from doubi.ui.pages import parse as page_module
 

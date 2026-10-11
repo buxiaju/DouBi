@@ -8,7 +8,6 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
-import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
@@ -23,11 +22,10 @@ from doubi.core.models import (  # noqa: E402
     Platform,
 )
 from doubi.core.registry import PlatformRegistry  # noqa: E402
-from doubi.platforms.bilibili import auth, url  # noqa: E402
+from doubi.platforms.bilibili import auth  # noqa: E402
 from doubi.platforms.bilibili.adapter import BilibiliAdapter  # noqa: E402
 from doubi.platforms.bilibili.api import BilibiliAPI  # noqa: E402
 from doubi.platforms.bilibili.strategies import (  # noqa: E402
-    ContainerStrategy,
     FavlistStrategy,
     MixStrategy,
     SpaceStrategy,
@@ -424,7 +422,6 @@ def _stub_bili_api(entries):
 def _stub_space_api(api, archives, total=None):
     """Patch the strategies module's httpx path to return a canned
     arc/search response. Returns a list of mock client stubs."""
-    import httpx as _httpx
 
     if total is None:
         total = len(archives)
@@ -1123,7 +1120,6 @@ def test_bilibili_short_link_resolution_falls_back(monkeypatch):
     import httpx as _httpx
 
     a = BilibiliAdapter()
-    real_get = _httpx.AsyncClient.get
 
     async def _fake_get(self, url, *a, **kw):
         raise _httpx.ConnectError("offline")

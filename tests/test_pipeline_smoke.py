@@ -30,7 +30,6 @@ from doubi.core.models import (  # noqa: E402
     MediaItem,
     MediaType,
     Platform,
-    Stream,
     DownloadOptions,
 )
 from doubi.core.registry import PlatformRegistry  # noqa: E402

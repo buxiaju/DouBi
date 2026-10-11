@@ -147,7 +147,7 @@ def _make_season():
                 platform=Platform.BILIBILI, item_id=f"sec{s}",
                 title=f"sec{s}", author=Author(name="UP"),
                 media_type=MediaType.COLLECTION,
-                source_url=f"https://www.bilibili.com/video/BVfake",
+                source_url="https://www.bilibili.com/video/BVfake",
                 children=eps,
                 extra={
                     "_from_ugc_season_section": True,

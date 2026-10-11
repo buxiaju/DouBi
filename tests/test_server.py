@@ -556,3 +556,90 @@ def test_parse_flags_sniffing_only_for_generic_fallback(client, no_real_browser,
     assert known["sniffing"] is False, "具体平台不该被报成兜底嗅探"
     assert known["expected_sec"] == 0
 
+
+# ---------------------------------------------------------------------------
+# /api/v1/collect/* — 0.3.9 回归守卫
+#
+# Symptom: 两个端点都引用 ``cfg.cookies_file`` / ``cfg.proxy``，但
+# ``cfg`` 只在 ``_build_options`` / ``_apply_sniff_config`` 内部定义——
+# 每次 REST 调用都会 NameError，502 直接给出。0.3.9 修：在端点里
+# 直接 ``load_config(None)``。以下两条用例锁住「端点不抛 5xx」契约。
+# ---------------------------------------------------------------------------
+
+
+def _stub_collect_search(monkeypatch, rows=None):
+    """Stub ``collect_search_async`` so the test stays offline."""
+    import doubi.cli.main as cli_main
+
+    async def _fake(**_kwargs):
+        return rows or []
+
+    monkeypatch.setattr(cli_main, "collect_search_async", _fake)
+
+
+def _stub_collect_hot(monkeypatch, rows=None):
+    import doubi.cli.main as cli_main
+
+    async def _fake(**_kwargs):
+        return rows or []
+
+    monkeypatch.setattr(cli_main, "collect_hot_async", _fake)
+
+
+def test_collect_search_endpoint_does_not_crash_without_cfg_binding(
+    client, monkeypatch
+):
+    """0.3.9 — previously crashed with NameError because ``cfg`` was a
+    free variable that no closure bound."""
+    _stub_collect_search(monkeypatch, rows=[{"aweme_id": "1", "title": "stub"}])
+    r = client.get("/api/v1/collect/search", params={"keyword": "猫"})
+    # Must NOT be a 5xx server error. 200 (rows) is the happy path.
+    assert r.status_code < 500, f"unexpected status: {r.status_code} {r.text}"
+    assert r.status_code == 200
+    body = r.json()
+    assert body["results"] == [{"aweme_id": "1", "title": "stub"}]
+
+
+def test_collect_hot_endpoint_does_not_crash_without_cfg_binding(
+    client, monkeypatch
+):
+    _stub_collect_hot(monkeypatch, rows=[{"word": "热词", "hot_value": 42}])
+    r = client.get("/api/v1/collect/hot")
+    assert r.status_code < 500, f"unexpected status: {r.status_code} {r.text}"
+    assert r.status_code == 200
+    body = r.json()
+    assert body["results"] == [{"word": "热词", "hot_value": 42}]
+
+
+def test_collect_search_validates_inputs_before_calling_pipeline(
+    client, monkeypatch
+):
+    """Input validation must reject bad channels/platforms before the
+    collect_*_async call, otherwise the 502 wraps the real error and
+    hides the user's typo. (4xx expected, 5xx not.)"""
+    called = {"count": 0}
+
+    async def _fake(**_kwargs):
+        called["count"] += 1
+        return []
+
+    import doubi.cli.main as cli_main
+    monkeypatch.setattr(cli_main, "collect_search_async", _fake)
+
+    # unknown platform
+    r = client.get("/api/v1/collect/search",
+                   params={"keyword": "x", "platform": "youtube"})
+    assert r.status_code == 400
+
+    # unknown channel for douyin
+    r = client.get("/api/v1/collect/search",
+                   params={"keyword": "x", "channel": "wrong"})
+    assert r.status_code == 400
+
+    # blank keyword
+    r = client.get("/api/v1/collect/search", params={"keyword": "   "})
+    assert r.status_code == 400
+
+    # The pipeline must NOT have been invoked at all on invalid input.
+    assert called["count"] == 0, "validation must run before the CLI call"
+

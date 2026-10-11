@@ -28,7 +28,6 @@ from doubi.core.models import (  # noqa: E402
 )
 from doubi.core.storage.database import (  # noqa: E402
     Database,
-    MediaItemRow,
     PendingTaskRow,
     TaskRow,
     _path_typed_fields,
@@ -48,7 +47,7 @@ from doubi.core.storage.manifest import (  # noqa: E402
     ManifestRecord,
     ManifestWriter,
 )
-from doubi.core.storage.migrate import migrate_douyin_to_doubi, migrate_bili23_to_doubi  # noqa: E402
+from doubi.core.storage.migrate import migrate_bili23_to_doubi  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +309,7 @@ def test_already_downloaded_on_disk(tmp_path):
 
 
 def test_manifest_record_round_trip(tmp_path):
-    item = MediaItem(platform=Platform.DOUYIN, item_id="1", title="t",
+    MediaItem(platform=Platform.DOUYIN, item_id="1", title="t",
                      author=Author(name="张三"), media_type=MediaType.VIDEO,
                      publish_time=dt.datetime(2026, 1, 15),
                      cover_url="https://x/cover.jpg",

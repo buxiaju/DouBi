@@ -345,14 +345,14 @@ def test_empty_state_has_air_between_title_and_subtitle(qapp):
         # 必须 Expanding，让 label 拿到父容器给的全部宽度。
         from PySide6.QtWidgets import QSizePolicy
         assert e._title.sizePolicy().horizontalPolicy() == QSizePolicy.Expanding, (
-            f"EmptyState title horizontalPolicy must be Expanding; "
-            f"otherwise the label collapses to sizeHint.width() and "
-            f"long subtitles wrap onto a second line with a single orphan."
+            "EmptyState title horizontalPolicy must be Expanding; "
+            "otherwise the label collapses to sizeHint.width() and "
+            "long subtitles wrap onto a second line with a single orphan."
         )
         assert e._subtitle.sizePolicy().horizontalPolicy() == QSizePolicy.Expanding, (
-            f"EmptyState subtitle horizontalPolicy must be Expanding; "
-            f"otherwise the label collapses to sizeHint.width() and "
-            f"long subtitles wrap onto a second line with a single orphan."
+            "EmptyState subtitle horizontalPolicy must be Expanding; "
+            "otherwise the label collapses to sizeHint.width() and "
+            "long subtitles wrap onto a second line with a single orphan."
         )
     finally:
         e.deleteLater()

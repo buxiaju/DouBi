@@ -13,7 +13,6 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -166,7 +165,6 @@ def test_import_bilibili_cookies_success(tmp_path):
 
 import threading
 
-import pytest
 
 #: Skip these tests entirely if PySide6 / Qt isn't available (e.g. CI
 #: that didn't install the ``gui`` extra).
@@ -534,7 +532,6 @@ def test_douyin_qr_login_dialog_write_cookies_signature(monkeypatch, qapp, tmp_p
 
     # Import the dialog module. We don't show the widget — just call
     # ``_on_done`` on a mocked instance.
-    from doubi.ui.dialogs import login_dialog
 
     fake_cookie_path = tmp_path / "douyin.txt"
     fake_cookie_path.parent.mkdir(parents=True, exist_ok=True)
@@ -556,9 +553,12 @@ def test_douyin_qr_login_dialog_write_cookies_signature(monkeypatch, qapp, tmp_p
     # class — only attributes _on_done actually touches.
     class _Standin:
         progress = type("P", (), {"hide": staticmethod(lambda: None)})()
-        _set_status = lambda self, text, *, error=False: calls.append(("status", text, error))
-        _refresh_parent_status = lambda self: calls.append(("refresh",))
-        accept = lambda self: calls.append(("accept",))
+        def _set_status(self, text, *, error=False):
+            return calls.append(("status", text, error))
+        def _refresh_parent_status(self):
+            return calls.append(("refresh",))
+        def accept(self):
+            return calls.append(("accept",))
 
     # Pull the inner _on_done class — it is referenced by
     # ``DouyinBrowserLoginDialog`` as a nested class. Since the dialog
@@ -697,7 +697,7 @@ def test_douyin_qr_login_image_picks_178x178_base64_qr(monkeypatch, qapp, tmp_pa
         def is_visible(self):
             return True
         def screenshot(self, *, type):
-            return f"\x89PNG_{self._sel}".encode("utf-8")
+            return f"\x89PNG_{self._sel}".encode()
         # Iterating .count() + .nth(i) needs a list of stand-ins.
         def __getattr__(self, name):
             raise AttributeError(name)

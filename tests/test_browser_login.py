@@ -236,7 +236,6 @@ def test_cookie_set_login_min_present(monkeypatch):
 def test_cookie_set_login_timeout(monkeypatch):
     """If cookies never appear, BrowserLoginError is raised."""
     pw_ctx = _mock_playwright([])   # no cookies ever
-    import time
     # shrink the polling loop so the test is fast
     import doubi.core.auth.browser_login as bl
     monkeypatch.setattr(bl, "sync_playwright", MagicMock(return_value=pw_ctx), raising=False)
@@ -807,7 +806,7 @@ class _FakeLocator:
         # to False so the fallback ``page.screenshot`` path is exercised.
         self._visible = False
 
-    def first(self) -> "_FakeLocator":
+    def first(self) -> _FakeLocator:
         return self
 
     def is_visible(self) -> bool:
@@ -816,7 +815,7 @@ class _FakeLocator:
 
     def screenshot(self, *, type: str) -> bytes:
         self._page.calls.append(("locator.screenshot", self._selector))
-        return f"PNG_LOCATOR:{self._selector}".encode("utf-8")
+        return f"PNG_LOCATOR:{self._selector}".encode()
 
 
 def test_qr_callback_fires_once_with_page(monkeypatch):
@@ -863,7 +862,6 @@ def test_qr_callback_selector_miss_falls_back_to_viewport(monkeypatch):
     """M6.26: when no QR selector matches, ``_qr_snapshot`` should still
     produce a ``QPixmap`` — we fall back to a viewport screenshot.
     """
-    from doubi.ui import auth_actions
 
     fake_page = _FakePage()
 
@@ -874,10 +872,7 @@ def test_qr_callback_selector_miss_falls_back_to_viewport(monkeypatch):
 
     # Run the inner helper directly (no thread, no Playwright)
     # Re-derive the inner closure via a re-import
-    import threading
 
-    from doubi.platforms.douyin import auth as dy_auth
-    from doubi.ui import auth_actions as _aa
 
     # Reproduce the ``_qr_snapshot`` body verbatim by calling the
     # public wrapper with a fake page. We do this by introspecting

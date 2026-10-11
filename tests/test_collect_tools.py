@@ -140,7 +140,7 @@ def test_rest_endpoints_registered():
     # The REST layer mirrors the MCP pair. Verify the routes are
     # wired into the FastAPI app without spinning up uvicorn.
     pytest = __import__("pytest")
-    fastapi = pytest.importorskip("fastapi")
+    pytest.importorskip("fastapi")
     from doubi.server.app import build_app
 
     app = build_app()
@@ -300,7 +300,7 @@ def test_mcp_collect_hot_accepts_bilibili_platform(monkeypatch):
 def test_rest_collect_search_rejects_unknown_platform():
     """REST 与 MCP 同样必须拒掉不支持的 platform 值。"""
     pytest = __import__("pytest")
-    fastapi = pytest.importorskip("fastapi")
+    pytest.importorskip("fastapi")
     from doubi.server.app import build_app
 
     app = build_app()

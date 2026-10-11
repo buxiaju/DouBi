@@ -12,9 +12,8 @@ from __future__ import annotations
 import asyncio
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"

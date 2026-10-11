@@ -1,6 +1,6 @@
-"""Guard tests for the qfluentwidgets API misuse class (0.3.6).
+"""Guard tests for the qfluentwidgets API misuse class (0.3.6 + 0.3.7).
 
-Two defects found by driving the real GUI offscreen:
+0.3.6 defects found by driving the real GUI offscreen:
 
 1. ``SegmentedWidget.currentItem()`` returns a ``SegmentedItem`` **object**,
    not the routeKey string. Passing it to ``collect_search_async`` /
@@ -13,8 +13,16 @@ Two defects found by driving the real GUI offscreen:
    ``TypeError`` *inside the exception handler*, which Qt swallows — the
    user sees nothing, and the page stays on its initial empty state.
 
-Both defects are **silent**: the feature is broken and the error reporter is
-broken too. These tests pin the correct API usage so the class cannot return.
+0.3.7 additions:
+
+3. Pages must not call ``InfoBar.xxx(...)`` directly anymore — they should
+   use ``doubi.ui.feedback.toast_*`` helpers so position/duration stay
+   consistent. AST scan catches direct calls in the pages/ package.
+
+4. Pages must not call ``QShortcut(...)`` directly — only
+   ``doubi.ui.shortcuts.ShortcutManager.register`` is allowed, because the
+   manager owns the safe callback wrapper, key dedup, and cheat-sheet data.
+   AST scan bans bare ``QShortcut(...)`` constructor calls.
 """
 
 from __future__ import annotations
@@ -36,6 +44,22 @@ _UI = _SRC / "doubi" / "ui"
 
 def _py_files() -> list[Path]:
     return sorted(_UI.rglob("*.py"))
+
+
+def _page_files() -> list[Path]:
+    """The 6 page modules + main_window: only these can legitimately call
+    InfoBar.* (and even they should prefer toast_*). Test widgets and
+    dialogs can use InfoBar directly because they're not the regression
+    surface we're guarding against.
+    """
+    pages_dir = _UI / "pages"
+    out = [pages_dir / "parse.py",
+           pages_dir / "search.py",
+           pages_dir / "hot.py",
+           pages_dir / "history.py",
+           pages_dir / "settings.py",
+           _UI / "main_window.py"]
+    return [p for p in out if p.is_file()]
 
 
 def test_no_currentitem_used_as_platform_route():
@@ -111,6 +135,80 @@ def test_infobar_method_names_exist():
     assert not offenders, (
         f"Unknown InfoBar method(s); valid: {sorted(valid)}. Offenders: "
         f"{offenders}"
+    )
+
+
+# --- 0.3.7 新增：禁止页面直接调 InfoBar/InfoBarPosition ---------------------
+
+def test_pages_must_use_toast_helpers_not_infobar():
+    """Page modules + main_window should call ``toast_*`` helpers, not
+    ``InfoBar.xxx(...)`` directly. We accept ``feedback.py`` itself calling
+    InfoBar internally — that's the helper's job.
+    """
+    offenders: list[str] = []
+    for path in _page_files():
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            if not isinstance(fn, ast.Attribute):
+                continue
+            recv = fn.value
+            if isinstance(recv, ast.Name) and recv.id == "InfoBar":
+                offenders.append(f"{path.name}:{node.lineno} -> {fn.attr}")
+    assert not offenders, (
+        "页面 / main_window 不应该直接调 InfoBar.xxx(...); "
+        "改用 doubi.ui.feedback.toast_* helpers "
+        "(统一位置 + duration + 错误捕获)。Offenders:\n"
+        + "\n".join(offenders)
+    )
+
+
+def test_pages_must_not_import_infobarposition():
+    """``InfoBarPosition`` is a qfluentwidgets enum; pages shouldn't import
+    it directly because the toast_* helpers own the position decision.
+    """
+    offenders: list[str] = []
+    for path in _page_files():
+        text = path.read_text(encoding="utf-8")
+        if "InfoBarPosition" in text:
+            # 报告一下行号方便定位
+            for i, line in enumerate(text.splitlines(), 1):
+                if "InfoBarPosition" in line:
+                    offenders.append(f"{path.name}:{i}: {line.strip()}")
+                    break
+    assert not offenders, (
+        "InfoBarPosition 不应在页面里 import；改用 toast_* helpers。"
+        " Offenders:\n" + "\n".join(offenders)
+    )
+
+
+# --- 0.3.7 新增：禁止裸 QShortcut，必须走 ShortcutManager ------------------
+
+def test_no_bare_qshortcut_in_pages():
+    """Pages and main_window must go through :class:`ShortcutManager` to
+    register shortcuts. Bare ``QShortcut(...)`` constructions make the
+    callback wrapper + key dedup + cheat-sheet routing impossible.
+    """
+    offenders: list[str] = []
+    # shortcuts.py 自己当然可以建——它是 manager 的实现
+    allowed = {_UI / "shortcuts.py"}
+    for path in set(_page_files()) | set(_py_files()):
+        if path in allowed:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            # QShortcut(...) 形态：func 是 ast.Name 且 id == "QShortcut"
+            if isinstance(fn, ast.Name) and fn.id == "QShortcut":
+                offenders.append(f"{path.name}:{node.lineno}")
+    assert not offenders, (
+        "裸 QShortcut(...) 应改走 ShortcutManager.register("
+        "name, key, callback, description, category)。Offenders:\n"
+        + "\n".join(offenders)
     )
 
 

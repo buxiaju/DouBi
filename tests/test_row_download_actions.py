@@ -482,22 +482,31 @@ def test_enqueue_row_adds_parsed_item_to_task_manager(qapp):
     assert opts is not None
 
 
-def test_enqueue_row_reports_failure_instead_of_silence(qapp):
+def test_enqueue_row_reports_failure_instead_of_silence(qapp, monkeypatch):
     """解析不出来时必须给出可见提示。
 
     0.3.6 的教训：静默失败是最贵的 bug——界面什么都不显示，
     用户以为软件坏了。
+
+    0.3.7：页面调 ``feedback.toast_error``，后者最终调
+    ``InfoBar.error(...)``。monkeypatch qfluentwidgets 的 InfoBar
+    —— 比 monkeypatch 页面模块稳（页面里 import 都是 lazy 的，
+    而 InfoBar 的引用在 qfluentwidgets import 时就锁定了）。
     """
     from doubi.ui.pages.search import build_search_widgets
+    from qfluentwidgets import InfoBar
 
     _require_gui()
     page = _page(qapp, build_search_widgets)
     manager = _RecordingManager()
     page._task_manager = manager
 
-    toasts: list[tuple[str, str, str]] = []
-    page._toast = lambda title, content, kind="success": toasts.append(
-        (title, content, kind)
+    seen: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        InfoBar, "error",
+        staticmethod(lambda **kwargs: seen.append(
+            (kwargs.get("title"), kwargs.get("content"))
+        )),
     )
 
     import doubi.ui.row_actions as ra
@@ -513,7 +522,7 @@ def test_enqueue_row_reports_failure_instead_of_silence(qapp):
         ra.build_media_item = orig
 
     assert manager.added == []
-    assert toasts and toasts[-1][2] == "error", toasts
+    assert seen and seen[-1][0] == "无法下载", seen
 
 
 def test_hot_word_enqueue_searches_then_adds_every_hit(qapp):
@@ -576,13 +585,18 @@ def test_hot_word_enqueue_searches_then_adds_every_hit(qapp):
     assert [i.item_id for i, _ in manager.added] == ["BV1", "BV2"], manager.added
 
 
-def test_hot_word_enqueue_empty_result_explains_douyin_gate(qapp):
+def test_hot_word_enqueue_empty_result_explains_douyin_gate(qapp, monkeypatch):
     """抖音搜索被风控拦是**平台侧**限制，客户端只能解释、不能装没事。
 
     0.3.6 已证实四个搜索通道全部返回 ``verify_check``；如果这里
     静默返回，用户就会重复点、以为软件坏了。
+
+    0.3.7：monkey patch qfluentwidgets 的 InfoBar.warning —— feedback
+    helper 的下游。InfoBar 的引用在 qfluentwidgets import 时就锁定了，
+    是稳定的 monkeypatch 目标。
     """
     from doubi.ui.pages.hot import build_hot_widgets
+    from qfluentwidgets import InfoBar
 
     _require_gui()
 
@@ -591,9 +605,12 @@ def test_hot_word_enqueue_empty_result_explains_douyin_gate(qapp):
     page._task_manager = manager
     page._platform = "douyin"
 
-    toasts: list[tuple[str, str, str]] = []
-    page._toast = lambda title, content, kind="success": toasts.append(
-        (title, content, kind)
+    seen: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        InfoBar, "warning",
+        staticmethod(lambda **kwargs: seen.append(
+            (kwargs.get("title"), kwargs.get("content"))
+        )),
     )
 
     import doubi.cli.main as cli_main
@@ -609,22 +626,26 @@ def test_hot_word_enqueue_empty_result_explains_douyin_gate(qapp):
         cli_main.collect_search_async = orig
 
     assert manager.added == []
-    assert toasts, "空结果必须给出提示，不能静默"
-    title, content, kind = toasts[-1]
-    assert kind == "warning"
+    assert seen, "空结果必须给出提示，不能静默"
+    title, content = seen[-1]
+    assert title == "没有搜到视频"
     assert "风控" in content, content
 
 
-def test_hot_word_enqueue_refuses_empty_keyword(qapp):
+def test_hot_word_enqueue_refuses_empty_keyword(qapp, monkeypatch):
     from doubi.ui.pages.hot import build_hot_widgets
+    from qfluentwidgets import InfoBar
 
     _require_gui()
     page = _page(qapp, build_hot_widgets)
     page._task_manager = _RecordingManager()
 
-    toasts: list[tuple[str, str, str]] = []
-    page._toast = lambda title, content, kind="success": toasts.append(
-        (title, content, kind)
+    seen: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        InfoBar, "warning",
+        staticmethod(lambda **kwargs: seen.append(
+            (kwargs.get("title"), kwargs.get("content"))
+        )),
     )
     page._search_word_and_enqueue({"sentence_id": "9"})
-    assert toasts and toasts[-1][2] == "warning", toasts
+    assert seen and seen[-1][0] == "词条为空", seen

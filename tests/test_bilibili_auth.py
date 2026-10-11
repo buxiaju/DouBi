@@ -18,7 +18,6 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-import time as _time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -665,7 +664,7 @@ class _NS:
         self.__dict__.update(kw)
 
 
-def argparse_stub(**kw) -> "_NS":
+def argparse_stub(**kw) -> _NS:
     return _NS(**kw)
 
 
@@ -728,15 +727,15 @@ def test_cookies_to_netscape_preserves_order_and_extras():
     assert len(lines) == 6, f"unexpected line count: {lines!r}"
 
     # Required cookies in declared order
-    required_seq = [l for l in lines[1:] if l.split("\t")[5] in REQUIRED_BILIBILI_COOKIES]
-    actual_seq = [l.split("\t")[5] for l in required_seq]
+    required_seq = [line for line in lines[1:] if line.split("\t")[5] in REQUIRED_BILIBILI_COOKIES]
+    actual_seq = [line.split("\t")[5] for line in required_seq]
     assert actual_seq == list(REQUIRED_BILIBILI_COOKIES), (
         f"order mismatch: {actual_seq} vs {REQUIRED_BILIBILI_COOKIES}"
     )
 
     # Comma-bearing SESSDATA value must be in the same line, not split
-    cookie_rows = [l for l in lines[1:] if l.count("\t") == 6]
-    sess_line = next(l for l in cookie_rows if l.split("\t")[5] == "SESSDATA")
+    cookie_rows = [line for line in lines[1:] if line.count("\t") == 6]
+    sess_line = next(line for line in cookie_rows if line.split("\t")[5] == "SESSDATA")
     assert sess_line.endswith("\tsess,with,commas")
     # Domain is hardcoded
     assert sess_line.split("\t")[0] == BILIBILI_COOKIE_DOMAIN

@@ -498,7 +498,7 @@ async def test_retry_notice_does_not_rewind_progress(qapp, tmp_path):
 
     mgr.task_progress.connect(_capture)
 
-    task_id = mgr.add(_make_item("BV30"), _make_options(tmp_path))
+    mgr.add(_make_item("BV30"), _make_options(tmp_path))
     await _drain()
 
     # The retry notice is the second event. Neither the signal argument
@@ -524,7 +524,7 @@ async def test_retry_notice_still_updates_the_message(qapp, tmp_path):
     mgr = TaskManager(pipeline)
     mgr.task_progress.connect(lambda tid, frac, msg: messages.append(msg))
 
-    task_id = mgr.add(_make_item("BV31"), _make_options(tmp_path))
+    mgr.add(_make_item("BV31"), _make_options(tmp_path))
     await _drain()
 
     assert any("retrying (2/2)" in m for m in messages), messages

@@ -11,7 +11,6 @@ headless test environment without them. They cover:
 from __future__ import annotations
 
 import asyncio
-import datetime as dt
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -105,24 +104,19 @@ def test_download_task_dataclass_holds_options():
 
 
 class _SpySignals:
-    """Stand-in for the Qt signal bag that DownloadWorker expects."""
+    """Stand-in for the Qt signal bag that DownloadWorker expects.
+
+    Reserved as a reference for future tests — current tests use
+    :class:`MagicMock` instead. If you wire a worker to this, add
+    ``self._make_emit`` etc. as needed; kept around so the spec of
+    what ``worker.signals`` looks like is visible at a glance.
+    """
 
     def __init__(self):
         self.started_calls: list = []
         self.progress_calls: list = []
         self.finished_calls: list = []
         self.failed_calls: list = []
-
-    # Fake .emit() that's a method
-    def _make_emit(name):
-        def _emit(*args):
-            getattr(self, f"{name}_calls").append(args)
-        return _emit
-
-    started = property(lambda s: s, lambda s, v: None)
-    progress = property(lambda s: s, lambda s, v: None)
-    finished = property(lambda s: s, lambda s, v: None)
-    failed = property(lambda s: s, lambda s, v: None)
 
 
 def test_download_worker_emits_signals_on_success(monkeypatch, tmp_path):
