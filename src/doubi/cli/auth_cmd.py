@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import sys
 import threading
 from pathlib import Path
@@ -27,12 +26,11 @@ from typing import Optional
 from ..core.logger import setup_logger
 from ..platforms.bilibili import auth as bili_auth
 from ..platforms.bilibili.qr_login import (
-    QRStatus,
     QRSession,
+    QRStatus,
     wait_for_login,
 )
 from ..platforms.douyin import auth as dy_auth
-
 
 # ---------------------------------------------------------------------------
 # doubi auth status

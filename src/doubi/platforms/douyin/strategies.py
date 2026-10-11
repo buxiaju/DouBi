@@ -26,10 +26,7 @@ from collections.abc import MutableMapping
 from typing import Any, Optional
 
 from ...core.models import (
-    Author,
     MediaItem,
-    MediaType,
-    Platform,
 )
 from .api import DouyinAPI
 from .url import DouyinURLType, classify_douyin_url

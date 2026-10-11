@@ -18,9 +18,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 logger = logging.getLogger("doubi.platforms.douyin.auth")
 
@@ -178,7 +179,7 @@ def browser_login(
     timeout: float = 180.0,
     start_url: str = "https://www.douyin.com/",
     min_present: Optional[int] = None,
-    qr_callback: Optional[Callable[["object"], None]] = None,
+    qr_callback: Optional[Callable[[object], None]] = None,
 ) -> list[dict]:
     """Run a Playwright browser to log in to 抖音 and return the cookies.
 
@@ -216,7 +217,7 @@ def browser_login(
     # "verify 弹窗挡住 → 用户手动通过 verify → 按钮重新出现 → 自动
     # click → QR modal 弹出" 的真实 headed 流程。单次 click 失败
     # 后真 QR 永远不会自己出来,viewport fallback 截到 verify UI。
-    pre_login_hook: Optional[Callable[["object"], None]] = None
+    pre_login_hook: Optional[Callable[[object], None]] = None
     if not headless:
         def _click_scan_login(page) -> None:
             """Click the "扫码登录" entry to surface the QR modal.

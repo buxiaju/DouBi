@@ -23,6 +23,8 @@ from .websign import (
     UIFID_PARAM,
     is_sign_protected,
     normalize_query,
+)
+from .websign import (
     sign as websign_sign,
 )
 from .xbogus import XBogus

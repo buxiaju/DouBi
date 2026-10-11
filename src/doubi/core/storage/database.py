@@ -54,8 +54,12 @@ import threading
 import time as _time
 from dataclasses import (
     dataclass,
-    fields as dataclass_fields,
     is_dataclass,
+)
+from dataclasses import (
+    fields as dataclass_fields,
+)
+from dataclasses import (
     replace as dataclass_replace,
 )
 from datetime import datetime
@@ -176,7 +180,7 @@ class MediaItemRow:
     extra: Optional[dict] = None
 
     @classmethod
-    def from_row(cls, row: aiosqlite.Row) -> "MediaItemRow":
+    def from_row(cls, row: aiosqlite.Row) -> MediaItemRow:
         d = dict(row)
         # JSON columns back to dicts
         for k in ("payload", "extra"):
@@ -229,7 +233,7 @@ class PendingTaskRow:
     updated_at: Optional[int] = None
 
     @classmethod
-    def from_row(cls, row: aiosqlite.Row) -> "PendingTaskRow":
+    def from_row(cls, row: aiosqlite.Row) -> PendingTaskRow:
         d = dict(row)
         for k in ("options_snapshot", "item_snapshot"):
             v = d.get(k)
@@ -456,7 +460,7 @@ class Database:
 
     # ---- context manager --------------------------------------------
 
-    async def __aenter__(self) -> "Database":
+    async def __aenter__(self) -> Database:
         await self.initialize()
         return self
 

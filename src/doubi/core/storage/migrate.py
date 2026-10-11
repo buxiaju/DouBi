@@ -155,7 +155,7 @@ async def migrate_bili23_to_doubi(legacy_db: Path, dest: Database) -> int:
             logger.warning("Bili23 DB has no recognizable task table: %s", legacy_db)
             return 0
         info = conn.execute(f"PRAGMA table_info({table})").fetchall()
-        cols = {row[1] for row in info}
+        {row[1] for row in info}
         rows = conn.execute(f"SELECT * FROM {table}").fetchall()
     finally:
         conn.close()

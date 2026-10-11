@@ -22,7 +22,8 @@ from __future__ import annotations
 import ipaddress
 import os
 import secrets
-from typing import Mapping, Optional
+from collections.abc import Mapping
+from typing import Optional
 
 #: 提供 token 的环境变量。选环境变量而不是配置文件字段，是因为 token 属于
 #: 凭据：``AppConfig`` 会被 GUI 设置页 ``to_dict()`` 整体写回

@@ -722,9 +722,10 @@ async def collect_search_async(
     channel: str = "general",
     platform: str = "douyin",
     max_count: int = 20,
-    cookies_file: Optional["Path"] = None,
+    cookies_file: Optional[Path] = None,
     proxy: Optional[str] = None,
     timeout: float = 15.0,
+    error_sink: Optional[dict[str, Any]] = None,
 ) -> list[dict[str, Any]]:
     """``doubi search`` core. Returns raw records (aweme / user / room
     for 抖音; video / user for B 站).
@@ -735,6 +736,13 @@ async def collect_search_async(
     :param platform: ``douyin`` (default) or ``bilibili``. The 4 抖音
         channels stay unchanged; B 站 currently supports ``video`` and
         ``user`` (mapping to ``search_type=video`` / ``bili_user``).
+    :param error_sink: optional caller-owned mutable mapping. When given,
+        it receives ``{reason, status_code, hint}`` keys from the douyin
+        webapi so the GUI can show a precise empty-state message (e.g.
+        ``hint=="verify"`` → 风控门, ``hint=="need_login"`` → 引导登录).
+        When ``None`` (CLI default), the function keeps a private sink
+        and only logs internally — preserves the 0.3.6 contract for
+        the CLI / MCP / REST callers that don't care about the hint.
     """
     if platform == "douyin":
         from doubi.platforms.douyin.webapi import DouyinWebAPI
@@ -744,23 +752,23 @@ async def collect_search_async(
             proxy=proxy,
             timeout=timeout,
         )
-        error_sink: dict[str, Any] = {}
+        sink: dict[str, Any] = error_sink if error_sink is not None else {}
         try:
             if channel == "general":
                 results = await api.search_general(
-                    keyword, count=10, max_count=max_count, error_sink=error_sink,
+                    keyword, count=10, max_count=max_count, error_sink=sink,
                 )
             elif channel == "video":
                 results = await api.search_video(
-                    keyword, count=10, max_count=max_count, error_sink=error_sink,
+                    keyword, count=10, max_count=max_count, error_sink=sink,
                 )
             elif channel == "user":
                 results = await api.search_user(
-                    keyword, count=10, max_count=max_count, error_sink=error_sink,
+                    keyword, count=10, max_count=max_count, error_sink=sink,
                 )
             elif channel == "live":
                 results = await api.search_live(
-                    keyword, count=10, max_count=max_count, error_sink=error_sink,
+                    keyword, count=10, max_count=max_count, error_sink=sink,
                 )
             else:
                 raise ValueError(
@@ -774,11 +782,11 @@ async def collect_search_async(
             # gates a search; without this the caller cannot tell 「被风控
             # 拦了」 from 「这个关键词没有结果」 and just shows an empty
             # table. error_sink carries the discriminator.
-            gate = error_sink.get("hint")
+            gate = sink.get("hint")
             if gate == "verify":
                 logger.warning(
                     "douyin search gated by %s — user verification required",
-                    error_sink.get("reason"),
+                    sink.get("reason"),
                 )
         return list(results or [])
 
@@ -815,7 +823,7 @@ async def collect_hot_async(
     board: str = "all",
     platform: str = "douyin",
     max_count: int = 50,
-    cookies_file: Optional["Path"] = None,
+    cookies_file: Optional[Path] = None,
     proxy: Optional[str] = None,
     timeout: float = 15.0,
 ) -> list[dict[str, Any]]:

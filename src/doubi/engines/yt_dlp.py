@@ -33,8 +33,6 @@ import shutil
 from pathlib import Path
 from typing import Any, Optional
 
-import yt_dlp
-
 from ..core.models import DownloadOptions, MediaItem, MediaType
 from ..core.storage.file_layout import resolve_item_dir
 from ._subproc import find_bundled_ffmpeg

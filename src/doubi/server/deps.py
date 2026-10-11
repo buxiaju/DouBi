@@ -22,7 +22,8 @@ FastAPI 于是放弃把它当请求对象，退化成一个名叫 ``request`` �
 
 from __future__ import annotations
 
-from typing import Awaitable, Callable, Optional
+from collections.abc import Awaitable, Callable
+from typing import Optional
 
 from fastapi import HTTPException, Request
 

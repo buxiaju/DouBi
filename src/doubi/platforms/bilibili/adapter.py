@@ -57,7 +57,8 @@ def _parse_timestamp_local(value):
     adapter → api → adapter call chain."""
     if value is None:
         return None
-    from datetime import datetime, timezone as _tz
+    from datetime import datetime
+    from datetime import timezone as _tz
     if isinstance(value, (int, float)):
         try:
             return datetime.fromtimestamp(int(value), tz=_tz.utc).replace(tzinfo=None)

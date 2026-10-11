@@ -36,10 +36,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING, Optional
 
 import httpx
 
@@ -131,7 +132,7 @@ class QRCode:
         qr.print_ascii(out=buf, invert=False)
         return buf.getvalue().rstrip("\n")
 
-    def render_pil(self, *, box_size: int = 10, border: int = 4) -> "PIL.Image.Image":
+    def render_pil(self, *, box_size: int = 10, border: int = 4) -> PIL.Image.Image:
         """Render the QR as a real ``PIL.Image``.
 
         The GUI's :class:`LoginDialog` converts this into a ``QPixmap``
@@ -148,8 +149,8 @@ class QRCode:
         case is if a future qrcode version returns something exotic; we
         keep the size-check as a final safety net.
         """
-        from PIL import Image
         import qrcode
+        from PIL import Image
         from qrcode.image.pil import PilImage
 
         qr = qrcode.QRCode(box_size=box_size, border=border)
@@ -222,7 +223,7 @@ class QRSession:
         self.user_agent = user_agent
         self._client: Optional[httpx.AsyncClient] = client
 
-    async def __aenter__(self) -> "QRSession":
+    async def __aenter__(self) -> QRSession:
         if self._client is None:
             self._client = httpx.AsyncClient(
                 timeout=self.timeout,
@@ -418,8 +419,8 @@ async def bilibili_login_via_qr(
     *,
     poll_interval: float = 2.0,
     max_wait: float = 180.0,
-    on_qr_ready: Optional[Callable[["QRCode"], None]] = None,
-    on_status: Optional[Callable[["PollResult"], None]] = None,
+    on_qr_ready: Optional[Callable[[QRCode], None]] = None,
+    on_status: Optional[Callable[[PollResult], None]] = None,
 ) -> Path:
     """Run the full QR login flow and persist the resulting cookies.
 

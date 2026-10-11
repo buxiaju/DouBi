@@ -23,10 +23,13 @@ except ImportError:  # pragma: no cover
 
 from .storage.paths import (
     default_db_path as _default_db_path,
+)
+from .storage.paths import (
     default_manifest_path as _default_manifest_path,
+)
+from .storage.paths import (
     migrate_legacy_relpath as _migrate_legacy_relpath,
 )
-
 
 #: 无显式路径时读取的默认配置文件。GUI 设置页写入的就是这个文件，
 #: ``load_config(None)`` 会回退到它——否则写入的配置永远不会被读回。

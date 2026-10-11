@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Iterable, Optional
+from collections.abc import Iterable
+from typing import Optional
 
 from .models import Platform
 
@@ -50,13 +51,13 @@ class PlatformRegistry:
     """Thread-safe registry of platform adapters."""
 
     _lock = threading.RLock()
-    _by_platform: dict[Platform, "PlatformAdapter"] = {}
-    _by_name: dict[str, "PlatformAdapter"] = {}
+    _by_platform: dict[Platform, PlatformAdapter] = {}
+    _by_name: dict[str, PlatformAdapter] = {}
 
     # ------------------------------------------------------------------ API
 
     @classmethod
-    def register(cls, adapter: "PlatformAdapter") -> "PlatformAdapter":
+    def register(cls, adapter: PlatformAdapter) -> PlatformAdapter:
         with cls._lock:
             existing = cls._by_platform.get(adapter.platform)
             if existing is not None and existing is not adapter:
@@ -73,7 +74,7 @@ class PlatformRegistry:
             return adapter
 
     @classmethod
-    def get(cls, platform: Platform) -> "PlatformAdapter":
+    def get(cls, platform: Platform) -> PlatformAdapter:
         with cls._lock:
             adapter = cls._by_platform.get(platform)
         if adapter is None:
@@ -81,7 +82,7 @@ class PlatformRegistry:
         return adapter
 
     @classmethod
-    def get_by_name(cls, name: str) -> "PlatformAdapter":
+    def get_by_name(cls, name: str) -> PlatformAdapter:
         with cls._lock:
             adapter = cls._by_name.get(name)
         if adapter is None:
@@ -89,12 +90,12 @@ class PlatformRegistry:
         return adapter
 
     @classmethod
-    def all(cls) -> list["PlatformAdapter"]:
+    def all(cls) -> list[PlatformAdapter]:
         with cls._lock:
             return list(cls._by_platform.values())
 
     @classmethod
-    def detect(cls, url: str) -> Optional["PlatformAdapter"]:
+    def detect(cls, url: str) -> Optional[PlatformAdapter]:
         """Return the first adapter whose URL patterns match ``url``.
 
         Adapters are tried in descending :attr:`priority` order — generic

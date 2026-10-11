@@ -19,7 +19,7 @@
 import base64
 import hashlib
 import time
-from typing import List, Optional, Tuple, Union
+from typing import Optional, Union
 
 
 class XBogus:
@@ -49,18 +49,18 @@ class XBogus:
     def user_agent(self) -> str:
         return self._user_agent
 
-    def _md5_str_to_array(self, md5_str: str) -> List[int]:
+    def _md5_str_to_array(self, md5_str: str) -> list[int]:
         if isinstance(md5_str, str) and len(md5_str) > 32:
             return [ord(char) for char in md5_str]
 
-        array: List[int] = []
+        array: list[int] = []
         idx = 0
         while idx < len(md5_str):
             array.append((self._array[ord(md5_str[idx])] << 4) | self._array[ord(md5_str[idx + 1])])
             idx += 2
         return array
 
-    def _md5(self, input_data: Union[str, List[int]]) -> str:
+    def _md5(self, input_data: Union[str, list[int]]) -> str:
         if isinstance(input_data, str):
             data = self._md5_str_to_array(input_data)
         else:
@@ -69,7 +69,7 @@ class XBogus:
         md5_hash.update(bytes(data))
         return md5_hash.hexdigest()
 
-    def _md5_encrypt(self, url_path: str) -> List[int]:
+    def _md5_encrypt(self, url_path: str) -> list[int]:
         hashed = self._md5(self._md5_str_to_array(self._md5(url_path)))
         return self._md5_str_to_array(hashed)
 
@@ -131,7 +131,7 @@ class XBogus:
             + self._character[x3 & 63]
         )
 
-    def build(self, url: str) -> Tuple[str, str, str]:
+    def build(self, url: str) -> tuple[str, str, str]:
         ua_md5_array = self._md5_str_to_array(
             self._md5(
                 base64.b64encode(
@@ -211,6 +211,6 @@ class XBogus:
         return signed_url, xb, self._user_agent
 
 
-def generate_x_bogus(url: str, user_agent: Optional[str] = None) -> Tuple[str, str, str]:
+def generate_x_bogus(url: str, user_agent: Optional[str] = None) -> tuple[str, str, str]:
     signer = XBogus(user_agent=user_agent)
     return signer.build(url)

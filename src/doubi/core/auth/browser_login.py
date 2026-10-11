@@ -37,8 +37,9 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Callable, Optional, Sequence
+from typing import Optional
 
 logger = logging.getLogger("doubi.core.auth.browser_login")
 
@@ -51,6 +52,8 @@ logger = logging.getLogger("doubi.core.auth.browser_login")
 try:
     from playwright.sync_api import (  # type: ignore
         TimeoutError as PlaywrightTimeoutError,
+    )
+    from playwright.sync_api import (
         sync_playwright,
     )
     HAS_PLAYWRIGHT = True
@@ -111,7 +114,7 @@ class _BaseBrowserLogin:
         timeout: float = 180.0,
         wait_selector: Optional[str] = None,
         user_agent: Optional[str] = None,
-        qr_callback: Optional[Callable[["object"], None]] = None,
+        qr_callback: Optional[Callable[[object], None]] = None,
     ):
         self.headless = headless
         self.timeout = timeout
@@ -123,7 +126,7 @@ class _BaseBrowserLogin:
         # default headed flow (no callback) is unchanged.
         self.qr_callback = qr_callback
 
-    def _run_browser(self, on_page_ready=None) -> "LoginResult":
+    def _run_browser(self, on_page_ready=None) -> LoginResult:
         """Open Chromium, navigate to a page set up by the subclass,
         and either wait for URL change or for cookies to appear.
 
@@ -237,7 +240,7 @@ class URLChangeLogin(_BaseBrowserLogin):
         headless: bool = False,
         timeout: float = 180.0,
         user_agent: Optional[str] = None,
-        qr_callback: Optional[Callable[["object"], None]] = None,
+        qr_callback: Optional[Callable[[object], None]] = None,
     ):
         super().__init__(
             headless=headless, timeout=timeout, user_agent=user_agent,
@@ -296,8 +299,8 @@ class CookieSetLogin(_BaseBrowserLogin):
         timeout: float = 180.0,
         min_present: Optional[int] = None,
         user_agent: Optional[str] = None,
-        qr_callback: Optional[Callable[["object"], None]] = None,
-        pre_login_hook: Optional[Callable[["object"], None]] = None,
+        qr_callback: Optional[Callable[[object], None]] = None,
+        pre_login_hook: Optional[Callable[[object], None]] = None,
     ):
         super().__init__(
             headless=headless, timeout=timeout, user_agent=user_agent,

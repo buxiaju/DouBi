@@ -36,8 +36,9 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Iterable, Optional
-from urllib.parse import urlencode, quote
+from collections.abc import Iterable
+from typing import Any, Optional
+from urllib.parse import quote, urlencode
 
 import httpx
 
@@ -88,6 +89,7 @@ def _read_cookie_dicts(cookies_file: Optional[str]) -> list[dict[str, Any]]:
     「暂无结果」 even though the cookie file was right there.
     """
     from pathlib import Path
+
     from .auth import default_cookie_path, has_cookie_file, parse_netscape_file
 
     path: Optional[Path] = None
@@ -183,7 +185,7 @@ class BilibiliWebAPI:
             await self._client.aclose()
             self._client = None
 
-    async def __aenter__(self) -> "BilibiliWebAPI":
+    async def __aenter__(self) -> BilibiliWebAPI:
         await self._ensure_client()
         return self
 

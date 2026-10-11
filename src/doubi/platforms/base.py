@@ -17,9 +17,8 @@ on import. See ``doubi/platforms/douyin/__init__.py`` for an example.
 
 from __future__ import annotations
 
-import re
 from abc import ABC, abstractmethod
-from typing import Pattern
+from re import Pattern
 
 from ..core.models import DownloadOptions, MediaItem, Platform
 

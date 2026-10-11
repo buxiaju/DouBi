@@ -30,7 +30,6 @@ present and after ``item.title`` otherwise.
 from __future__ import annotations
 
 import re
-from typing import Optional
 
 from .models import DownloadOptions, MediaItem
 

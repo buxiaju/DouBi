@@ -15,9 +15,10 @@ import asyncio
 import logging
 import time
 import uuid
-from dataclasses import dataclass, field
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Optional
 
 logger = logging.getLogger("doubi.server.jobs")
 

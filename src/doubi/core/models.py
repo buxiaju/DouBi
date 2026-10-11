@@ -6,11 +6,12 @@ pipeline, engines, and any UI surface (CLI / GUI / REST / MCP).
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
     from .pipeline import ProgressEvent
@@ -45,7 +46,7 @@ class Platform(str, Enum):
     UNKNOWN = "unknown"
 
     @classmethod
-    def from_str(cls, value: str) -> "Platform":
+    def from_str(cls, value: str) -> Platform:
         if not value:
             return cls.UNKNOWN
         v = value.strip().lower()
@@ -84,7 +85,7 @@ class MediaType(str, Enum):
 #: each new container-flavored media type silently required editing all
 #: three. Keep every consumer pointed at :meth:`MediaItem.needs_expansion`
 #: so the rule lives in exactly one place.
-CONTAINER_MEDIA_TYPES: tuple["MediaType", ...] = (MediaType.USER, MediaType.MIX)
+CONTAINER_MEDIA_TYPES: tuple[MediaType, ...] = (MediaType.USER, MediaType.MIX)
 
 
 # ---------------------------------------------------------------------------
@@ -140,7 +141,7 @@ class MediaItem:
     media_type: MediaType = MediaType.VIDEO
     source_url: str = ""                          # the original URL the user gave us
     streams: list[Stream] = field(default_factory=list)
-    children: list["MediaItem"] = field(default_factory=list)  # populated for containers
+    children: list[MediaItem] = field(default_factory=list)  # populated for containers
     extra: dict[str, Any] = field(default_factory=dict)
 
     #: Pre-rendered filename template (without extension). If set, the

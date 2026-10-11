@@ -47,8 +47,8 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from ..models import DownloadOptions, MediaItem
 from .. import naming
+from ..models import DownloadOptions, MediaItem
 
 # Maximum length for any single relative path component. NTFS caps at
 # 255 unicode chars; we stay well under so the sum of the default

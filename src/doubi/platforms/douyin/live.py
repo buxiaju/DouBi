@@ -128,7 +128,7 @@ class LiveRecorder:
         self.cookies_file = cookies_file
         self.proxy = proxy
 
-    async def __aenter__(self) -> "LiveRecorder":
+    async def __aenter__(self) -> LiveRecorder:
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:

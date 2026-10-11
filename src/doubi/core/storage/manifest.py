@@ -22,9 +22,10 @@ import json
 import logging
 import os
 import time as _time
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Optional
 
 from ..models import MediaItem
 
@@ -96,7 +97,7 @@ class ManifestWriter:
         if not self.path.exists():
             return []
         out: list[dict] = []
-        with open(self.path, "r", encoding="utf-8") as f:
+        with open(self.path, encoding="utf-8") as f:
             for line in f:
                 s = line.strip()
                 if not s:

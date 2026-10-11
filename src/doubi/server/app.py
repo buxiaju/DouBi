@@ -385,6 +385,8 @@ def build_app(*, token: str | None = None):
     ) -> dict[str, Any]:
         from doubi.cli.main import collect_search_async
 
+        from ..core.config import load_config
+
         kw = (keyword or "").strip()
         if not kw:
             raise HTTPException(
@@ -407,6 +409,13 @@ def build_app(*, token: str | None = None):
                     f"expected one of {sorted(allowed)}"
                 ),
             )
+        # 0.3.9 — load cfg here, not close over the build-time one.
+        # The previous code referenced ``cfg`` as a free variable but the
+        # closest binding (``_build_options``) only returned a
+        # ``DownloadOptions`` — runtime NameError on every call. Loading
+        # here is the same lazy-read pattern ``_build_options`` itself
+        # uses (``load_config(None)`` is cached internally).
+        cfg = load_config(None)
         try:
             rows = await collect_search_async(
                 keyword=kw,
@@ -433,10 +442,14 @@ def build_app(*, token: str | None = None):
     ) -> dict[str, Any]:
         from doubi.cli.main import collect_hot_async
 
+        from ..core.config import load_config
+
         if platform not in {"douyin", "bilibili"}:
             raise HTTPException(
                 status_code=400, detail=f"unknown platform: {platform!r}",
             )
+        # 0.3.9 — see collect_search above.
+        cfg = load_config(None)
         try:
             rows = await collect_hot_async(
                 board=board,
