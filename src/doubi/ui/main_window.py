@@ -17,6 +17,10 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from PySide6.QtCore import QPointF, Qt
+from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtWidgets import QWidget
+
 logger = logging.getLogger("doubi.ui.main_window")
 
 #: 自绘标题栏里应用图标的边长。标题栏固定 48px 高，28px 图标上下各留 10px，
@@ -37,8 +41,6 @@ def build_main_window():
     from PySide6.QtWidgets import QApplication
     from qfluentwidgets import (
         FluentIcon,
-        InfoBar,
-        InfoBarPosition,
         MessageBox,
         MSFluentWindow,
         NavigationItemPosition,
@@ -46,6 +48,7 @@ def build_main_window():
     )
 
     from ..core.engine_loader import build_default_pipeline
+    from .feedback import toast_info, toast_success
     from .i18n import tr
     from .pages import (
         build_download_widgets,
@@ -56,6 +59,7 @@ def build_main_window():
         build_settings_widgets,
     )
     from .resources import APP_DISPLAY_NAME, APP_VERSION, load_app_icon
+    from .shortcuts import ShortcutManager
     from .task_manager import TaskManager
     from .theme import (
         current_theme_name,
@@ -82,6 +86,23 @@ def build_main_window():
             self.setMinimumSize(820, 580)
             # 居中到主屏幕（多屏时取屏幕 0 可用矩形的中心）。
             self._center_on_screen()
+
+            # 右下角加一个可视化的 resize 把手（0.3.9 修）。
+            #
+            # qfluentwidgets 用 qframelesswindow 自绘标题栏；它的原生
+            # ``WS_THICKFRAME`` resize 边框只有 6–7 px（实测
+            # ``GetWindowRect`` - ``GetClientRect`` delta = 6,6）——用户根本
+            # 看不到也抓不到，体感就是「窗口不能调大小」。
+            #
+            # ``QSizeGrip`` 自带 16×16 三角点阵，但点阵颜色 (223,223,223)
+            # 在浅色主题下几乎隐形。我们自绘一个明显一点的 18×18 三角拖拽
+            # 把手——三道从右下角向左上方向的对角短线，颜色取自主题
+            # ``progress_normal`` token（与「正在运行」色一致），暗主题里
+            # 反过来用 ``progress_normal_dark``。
+            self._size_grip = _ResizeGrip(self)
+            self._size_grip.setToolTip("拖拽调整窗口大小")
+            self._size_grip.lower()                  # 保持不抢其他控件焦点
+            self._place_size_grip()                  # 初始化定位
 
             # 应用图标：主窗口的窗口图标、任务栏图标都跟 app.setWindowIcon 走
             self._refresh_app_icon()
@@ -204,6 +225,23 @@ def build_main_window():
                 self.parse_interface.objectName()
             )
 
+            # 关掉导航栏的指示条滑动动画（0.3.7 修）。
+            #
+            # 这里要分清 qfluentwidgets 里**两个不同的**蓝色指示条：
+            #
+            # 1. ``NavigationBar.indicator`` —— 一个独立的 4×24 圆角子控件，
+            #    只在 ``setCurrentItem`` 的滑动动画期间可见，动画结束由
+            #    ``_onIndicatorAniFinished`` ``hide()`` 掉。
+            # 2. ``NavigationBarPushButton._drawBackground`` 里**按选中态画的**
+            #    那条 ``drawRoundedRect(0, 16, 4, 24)``——它跟动画无关，只要
+            #    该项 ``isSelected`` 就一定会画。
+            #
+            # 第 1 条在实测里会「卡住不消失」：从解析页依次切到设置页再切回
+            # 解析页后，它停在「设置」旁边（灌 200 次事件循环也不退），
+            # 视觉上等于两个页面同时被选中。关掉滑动动画就能消除它。
+            # 第 2 条是 qfluentwidgets 的既定设计，保留。
+            self.navigationInterface.setIndicatorAnimationEnabled(False)
+
             # 上次退出时还没下完的任务：问一句要不要接着下。
             # 排在最后，因为它要用到 parse_interface 的配置和已经建好的
             # 下载页——单次射击的定时器把它推到事件循环的下一轮，让窗口
@@ -225,6 +263,14 @@ def build_main_window():
             self.task_manager.task_finished.connect(self._on_task_state_changed)
             self.task_manager.task_failed.connect(self._on_task_state_changed)
             self.task_manager.task_removed.connect(self._on_task_state_changed)
+
+            # 全局快捷键（0.3.7 新增）—— 必须在 6 个子页面与 task_manager
+            # 都就位后再注册，callbacks 才能拿到正确的 self.xxx_interface。
+            self.shortcuts = ShortcutManager(self)
+            self._register_shortcuts()
+            # 把 ShortcutManager 注入设置页，让「快捷键速查」卡片显示出来。
+            # 必须在 register 之后，否则 set_shortcuts 收到的 cheat_sheet 是空表。
+            self.settings_interface.set_shortcuts(self.shortcuts)
 
         # ---- 跨进程断点续传 -------------------------------------------
 
@@ -285,13 +331,7 @@ def build_main_window():
             self.navigationInterface.setCurrentItem(
                 self.download_interface.objectName()
             )
-            InfoBar.success(
-                title="已恢复",
-                content=f"{len(restored)} 个任务已暂停待续",
-                parent=self,
-                position=InfoBarPosition.TOP,
-                duration=4000,
-            )
+            toast_success(self, "已恢复", f"{len(restored)} 个任务已暂停待续")
 
         def closeEvent(self, event) -> None:
             """关窗行为取决于 ``_truly_quit`` 标志。
@@ -384,6 +424,26 @@ def build_main_window():
             self.close()
 
         # ---- 托盘集成 --------------------------------------------
+
+        # ---- 窗口尺寸（右下角 resize 把手） ---------------------------------
+
+        def _place_size_grip(self) -> None:
+            """把 ``_size_grip`` 钉在右下角。
+
+            不放进任何 layout（避免被标题栏 / 导航接口排挤），
+            手动按 ``self.width() - 16`` / ``self.height() - 16`` 算坐标。
+            """
+            if getattr(self, "_size_grip", None) is None:
+                return
+            self._size_grip.move(
+                max(0, self.width() - self._size_grip.width()),
+                max(0, self.height() - self._size_grip.height()),
+            )
+
+        def resizeEvent(self, event) -> None:
+            """窗口尺寸变化时同步 grip 的位置（保持钉在右下角）。"""
+            super().resizeEvent(event)
+            self._place_size_grip()
 
         def _install_tray(self) -> None:
             """构造 :class:`TrayController` 并把它的信号接进应用。
@@ -545,13 +605,7 @@ def build_main_window():
             except ValueError:
                 idx = -1
             pack = set_theme(names[(idx + 1) % len(names)])
-            InfoBar.success(
-                title="已切换主题",
-                content=f"{pack.label}",
-                parent=self,
-                position=InfoBarPosition.TOP,
-                duration=1500,
-            )
+            toast_success(self, "已切换主题", pack.label)
 
         def _reparse_from_history(self, url: str) -> None:
             """历史页「重新解析」回调：填入 URL 并跳到解析页。"""
@@ -571,4 +625,248 @@ def build_main_window():
             dlg = cls(self.window())
             dlg.exec()
 
+        # ---- 全局快捷键（0.3.7 新增） -------------------------------
+
+        def _register_shortcuts(self) -> None:
+            """把所有全局快捷键集中注册到 ``self.shortcuts``.
+
+            设计要点：
+            * 跳转类（Ctrl+1..5、Ctrl+,）走 ``_switch_to``：在切换前确认
+              当前 stackedWidget 已经建好，缺一个就静默不切——避免快捷键
+              在未初始化时抛 AttributeError。
+            * ``F5`` 按当前页分发（解析/历史/搜索/热榜各自定义了 ``_refresh``
+              或类似入口；下载页没有「刷新」语义，没注册）。
+            * ``Ctrl+Enter`` 在解析页才生效——它通过 ``_on_parse_clicked``
+              走，但 callback 里先查 ``self.stackedWidget.currentWidget()``
+              是不是 ``parse_interface``，不是就 swallow。
+            * ``Ctrl+Q`` 走 ``self.quit()`` 而不是 ``QApplication.quit()``：
+              托盘程序的「退出」语义需要走 ``_truly_quit`` 路径，关窗前
+              要落库，普通 QApplication.quit 不会触发我们写的 ``closeEvent``。
+            """
+            sc = self.shortcuts
+
+            # ---- 页面跳转 ----
+            sc.register(
+                name="跳到解析页", key="Ctrl+1",
+                callback=lambda: self._switch_to(self.parse_interface),
+                description="跳转到「解析」页", category="导航",
+            )
+            sc.register(
+                name="跳到下载页", key="Ctrl+2",
+                callback=lambda: self._switch_to(self.download_interface),
+                description="跳转到「下载」页（任务管理器）", category="导航",
+            )
+            sc.register(
+                name="跳到历史页", key="Ctrl+3",
+                callback=lambda: self._switch_to(self.history_interface),
+                description="跳转到「历史」页", category="导航",
+            )
+            sc.register(
+                name="跳到搜索页", key="Ctrl+4",
+                callback=lambda: self._switch_to(self.search_interface),
+                description="跳转到「搜索」页", category="导航",
+            )
+            sc.register(
+                name="跳到热榜页", key="Ctrl+5",
+                callback=lambda: self._switch_to(self.hot_interface),
+                description="跳转到「热榜」页", category="导航",
+            )
+            sc.register(
+                name="打开设置", key="Ctrl+,",
+                callback=lambda: self._switch_to(self.settings_interface),
+                description="跳转到「设置」页", category="导航",
+            )
+
+            # ---- 刷新 ----
+            sc.register(
+                name="刷新当前页面", key="F5",
+                callback=self._refresh_current_page,
+                description="按当前页面分发：搜索页重新搜、历史页重新查",
+                category="刷新",
+            )
+
+            # ---- 解析页专属：Ctrl+Enter 解析当前输入 ----
+            # 只在解析页是当前页时回调，其它页 swallow 不报错。
+            sc.register(
+                name="解析当前链接", key="Ctrl+Return",
+                callback=self._trigger_parse_if_active,
+                description="解析输入框里的所有链接（仅在「解析」页生效）",
+                category="解析",
+            )
+
+            # ---- 系统 ----
+            sc.register(
+                name="切换主题", key="Ctrl+T",
+                callback=self._cycle_theme,
+                description="在内置主题包之间循环", category="外观",
+            )
+            sc.register(
+                name="退出豆比", key="Ctrl+Q",
+                callback=self.quit,
+                description="走「真退出」路径（关窗前落库）", category="系统",
+            )
+            sc.register(
+                name="关于豆比", key="F1",
+                callback=self._show_about,
+                description="弹出「关于」对话框", category="系统",
+            )
+
+        def _switch_to(self, widget) -> None:
+            """切到指定子页（如果它已建好）。
+
+            qfluentwidgets 的 ``MSFluentWindow`` 提供了 ``switchTo(widget)``
+            ——这是官方切换接口，内部把 ``setCurrentItem`` + ``setCurrentWidget``
+            的顺序正确串起来。手工组合两个调用在某些边界路径下会让
+            ``setCurrentItem`` 把 widget 拽回原 page（实测过两次错过一拍）。
+
+            先确认 widget 确实在 ``stackedWidget`` 里：``switchTo`` 内部直接
+            调 ``setCurrentIndex(indexOf(widget))``，传一个不在栈里的 widget
+            会抛 ``Exception: The index '-1' is illegal``（0.3.7 实测）。
+            快捷键在极端时序下可能撞上「页面还没 addWidget」的瞬间，这个
+            守卫把那种情况变成静默不切，而不是让异常冒到 Qt 事件循环里。
+            """
+            if widget is None:
+                return
+            try:
+                if self.stackedWidget.indexOf(widget) < 0:
+                    logger.debug(
+                        "跳过 switchTo：%s 尚未加入 stackedWidget",
+                        type(widget).__name__,
+                    )
+                    return
+                self.switchTo(widget)
+            except Exception:   # noqa: BLE001
+                logger.debug("switchTo 失败（widget=%s）", type(widget).__name__)
+
+        def _refresh_current_page(self) -> None:
+            """按当前页面的语义跑「刷新」动作。
+
+            解析页：直接弹 toast 提醒「解析页用「解析」按钮触发」。
+            下载页：没有「刷新」语义，跳过。
+            历史页：调 ``_refresh``（已有）。
+            搜索页：调 ``search_btn.click()`` 复用用户行为，避免重复实现。
+            热榜页：调 ``refresh_btn.click()``。
+            设置页：跳过去（设置页没有「刷新」动作，但打开即用）。
+            """
+            current = self.stackedWidget.currentWidget()
+            if current is self.parse_interface:
+                toast_info(self, "解析页", "点「解析」按钮触发；Ctrl+Enter 同样有效。")
+                return
+            if current is self.download_interface:
+                toast_info(self, "下载页", "下载页自动刷新，无需手动操作。")
+                return
+            if current is self.history_interface:
+                if hasattr(self.history_interface, "_refresh"):
+                    self.history_interface._refresh()
+                return
+            if current is self.search_interface:
+                if hasattr(self.search_interface, "search_btn"):
+                    self.search_interface.search_btn.click()
+                return
+            if current is self.hot_interface:
+                if hasattr(self.hot_interface, "refresh_btn"):
+                    self.hot_interface.refresh_btn.click()
+                return
+            if current is self.settings_interface:
+                toast_info(self, "设置页", "设置即时生效。")
+                return
+
+        def _trigger_parse_if_active(self) -> None:
+            """Ctrl+Enter 触发的解析——只在解析页生效，其它页 swallow。"""
+            current = self.stackedWidget.currentWidget()
+            if current is not self.parse_interface:
+                return
+            # 直接调 _on_parse_clicked 而不是 button.click()：后者还要先
+            # 找焦点，解析页是默认页基本一定可见。
+            self.parse_interface._on_parse_clicked()
+
     return MainWindow
+
+
+# ---------------------------------------------------------------------------
+# 自绘 resize 把手
+# ---------------------------------------------------------------------------
+
+
+class _ResizeGrip(QWidget):
+    """右下角可视化的 resize 把手（0.3.9）。
+
+    ``QSizeGrip`` 的点阵 (223,223,223) 在浅色主题下几乎隐形，
+    用户根本看不出「这里能拖」。我们自绘一个 18×18 的小三角：
+    三道从右下角向左上方向的对角短线，颜色取自主题
+    ``progress_normal`` token。鼠标按下 / 移动直接调
+    ``self.window().resize()``，与 ``QSizeGrip`` 同款语义。
+    """
+
+    SIZE = 18
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        from .theme import current_theme, token
+
+        self.setFixedSize(self.SIZE, self.SIZE)
+        self.setCursor(Qt.SizeFDiagCursor)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+        # 主题主色（亮 / 暗各一对）：跟随主题切换
+        # ``progress_normal`` 在默认 / 亮主题下是 ``#0a6cbf`` 这种深蓝，
+        # 在暗主题下 ``progress_normal_dark`` 是 ``None``——会触发我们
+        # 的 fallback 到中性灰，避免「暗主题里一个亮蓝三角」。
+        self._light_color = token("progress_normal")
+        self._dark_color = (
+            current_theme().tokens.get("progress_normal_dark") or "#a8a8a8"
+        )
+        # 鼠标交互：记录按下起点 + 起始窗口几何
+        self._press_pos: QPointF | None = None
+        self._press_geo: tuple[int, int, int, int] | None = None
+
+    def _color(self) -> str:
+        from qfluentwidgets import isDarkTheme
+
+        return self._dark_color if isDarkTheme() else self._light_color
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            self._press_pos = event.position()
+            win = self.window()
+            self._press_geo = (win.x(), win.y(), win.width(), win.height())
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._press_pos is None or self._press_geo is None:
+            super().mouseMoveEvent(event)
+            return
+        win = self.window()
+        delta = event.position() - self._press_pos
+        x, y, w0, h0 = self._press_geo
+        # 增量为正，向右下拉；不让窗口小于它的 minimumSize
+        new_w = max(win.minimumSize().width(), w0 + int(delta.x()))
+        new_h = max(win.minimumSize().height(), h0 + int(delta.y()))
+        win.resize(new_w, new_h)
+        event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            self._press_pos = None
+            self._press_geo = None
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, False)
+        color = QColor(self._color())
+        pen = QPen(color)
+        pen.setWidth(2)
+        pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        # 三道对角短线（右下角起点，向左上延伸）
+        for off in (4, 9, 14):
+            x0 = self.SIZE - 1
+            y0 = self.SIZE - 1 - off
+            x1 = self.SIZE - 1 - off
+            y1 = self.SIZE - 1
+            painter.drawLine(int(x0), int(y0), int(x1), int(y1))
