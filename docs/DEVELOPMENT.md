@@ -1,7 +1,7 @@
 # DouBi 开发文档（面向 AI / 开发者）
 
 > 目标：任何有能力的 AI 或开发者读完本文档，就能安全地修改、扩展、维护 DouBi，而不需要重新逆向整个项目。
-> 版本对应：M0–M6.15（2026-08-25 快照）。配套文档：`docs/ARCHITECTURE.md`（分层图）、`docs/QUICKSTART.md`（用户操作）、`docs/CHANGELOG.md`（变更史）、`docs/ICONS.md`（图标管线）、`docs/BUILD.md`（打包）、`INTEGRATION_PLAN.md`（整合原始方案）。
+> 版本对应：**0.3.9（2026-10-05）**。配套文档：[ARCHITECTURE.md](ARCHITECTURE.md)（分层图）、[QUICKSTART.md](QUICKSTART.md)（用户操作）、[CHANGELOG.md](CHANGELOG.md)（变更史）、[ICONS.md](ICONS.md)（图标管线）、[UI_DESIGN.md](UI_DESIGN.md)（设计语言）、[BUILD.md](BUILD.md)（打包）、[ROADMAP.md](ROADMAP.md)（待办与不做项）。
 
 ---
 
@@ -94,7 +94,6 @@ DouBi 是一个**多形态统一的多平台视频/媒体下载器**：同一个
 ```
 DouBi/
 ├── pyproject.toml                 # 打包 + 依赖 + console scripts + pytest/ruff 配置
-├── INTEGRATION_PLAN.md            # 原始整合方案（M0–M6 里程碑）
 ├── doubi.spec                     # PyInstaller 打包配置
 ├── README.md / docs/{ARCHITECTURE,QUICKSTART,CHANGELOG}.md
 ├── src/doubi/
@@ -112,12 +111,12 @@ DouBi/
 │   ├── engines/                   # 下载引擎（见 §7）
 │   │   ├── base.py                #   Engine ABC + EngineProgress
 │   │   ├── yt_dlp.py              #   YtDlpEngine（默认引擎）
-│   │   └── aria2.py               #   Aria2Engine（M6.15，多线程分片下载）
+│   │   └── aria2.py               #   Aria2Engine（多线程分片下载，0.3.0 起）
 │   ├── platforms/                 # 平台适配器（见 §6）
 │   │   ├── base.py                #   PlatformAdapter ABC
 │   │   ├── douyin/                #   adapter / api / auth / strategies / url / live
 │   │   └── bilibili/              #   adapter / api / auth / strategies / url / qr_login / wbi
-│   │                              #   （M6.15 起 url.py 识别 live.bilibili.com 直播）
+│   │                              #   url.py 识别 live.bilibili.com 直播
 │   ├── cli/                       # main.py（download/auth/live/migrate/platforms）+ auth_cmd.py
 │   ├── server/                    # app.py（FastAPI）+ jobs.py（JobManager）+ schemas.py
 │   ├── mcp/                       # server.py（stdio JSON-RPC 2.0）
@@ -128,7 +127,7 @@ DouBi/
 │       ├── workers.py             #   DownloadWorker（GUI 任务包装）
 │       ├── auth_actions.py        #   登录流程的纯 Python 包装
 │       ├── theme.py               #   主题包 / token 表 / set_theme（见 §13.4）
-│       ├── i18n.py                #   JSON 词表 + tr() 翻译（M6.14，见 §17）
+│       ├── i18n.py                #   JSON 词表 + tr() 翻译（0.3.4 起，见 §16.5）
 │       ├── locales/               #   zh_CN.json / en.json 词表
 │       ├── pages/                 #   parse / download / history / settings
 │       └── dialogs/               #   login_dialog.py
@@ -332,7 +331,7 @@ LIST  → mix      HISTORY → favlist    POPULAR → space
 5. `Platform` 枚举加 `YOUTUBE = "youtube"`（已经预置了）。
 6. 测试：复制 `tests/test_douyin_adapter.py` 的骨架，mock 掉网络。
 
-### 6.5 yt-dlp 通用兜底适配器（`platforms/ytdlp_generic/`，M6.17+）
+### 6.5 yt-dlp 通用兜底适配器（`platforms/ytdlp_generic/`）
 
 **这是 §6.4 的一个特例**：当具体平台不写、但 yt-dlp 已经内置 extractor 时，
 不需要为每个站写 adapter——直接把 URL 丢给 yt-dlp 让它挑 extractor。
@@ -412,7 +411,7 @@ class Engine(ABC):
 - 进度钩子：每 ≥0.5% 才 emit 一次，避免刷爆 UI。
 - `supports()` 只检查 `bool(item.source_url)`。
 
-### 7.3 Aria2Engine（`engines/aria2.py`，M6.15）
+### 7.3 Aria2Engine（`engines/aria2.py`）
 
 aria2 是纯下载器，不解析网页。`Aria2Engine.supports()` 只认有
 `item.extra["direct_url"]` 的 item——没有直链的 item 自动回退 yt-dlp。
@@ -488,7 +487,7 @@ class DownloadPipeline:
 - 内部 `_download_with_progress`：渲染文件名 → DB 去重检查（`is_downloaded`）→ **重试循环**（`engine.download`，失败则退避后重试）→ 成功后 `_record_success`（DB + manifest）。
 - `ProgressEvent`：`job_id / item / phase / fraction / message / timestamp / extra`。phase 有 `parsing|expanding|downloading|merging|postprocess|done|failed`。
 
-#### 8.1.1 自动重试与退避（M6.9 新增，改这块先读完本节）
+#### 8.1.1 自动重试与退避（0.3.3 起，改这块先读完本节）
 
 四条硬约束，任意一条改错都会造成难查的行为退化：
 
@@ -656,7 +655,7 @@ increment_checkpoint  (platform, user_id, mode) 主键 · last_item_id/last_chec
 
 底层 `ui/auth_actions.py` 是纯 Python 包装（无 Qt 依赖，可单测）。
 
-### 11.5 M6.25 B 站登录新流程详解
+### 11.5 B 站登录新流程详解
 
 `platforms/bilibili/qr_login.py` 现在的公共 API 收口为 4 个：
 
@@ -694,7 +693,7 @@ increment_checkpoint  (platform, user_id, mode) 主键 · last_item_id/last_chec
 走 `QWebEngineView` 嵌登录页能解,但 0.3.0 才把它拆掉(节省 200 MB
 打包体积,BUILD §4.5),权衡后选择放弃,只保留 QR + 导入 Cookie。
 
-### 11.6 M6.26 抖音 headless + 扒图机制
+### 11.6 抖音 headless + 扒图机制
 
 `core/auth/browser_login.py` 加了 `qr_callback` 钩子（在
 `on_page_ready` 之后、`_wait_for_success` 之前调一次），
@@ -1311,7 +1310,7 @@ Qt 只实现 SVG Tiny 1.2，**任何**新贡献的 SVG 都可能踩 filter 坑�
   把析构真的兑现（`test_ui_restore.py`，实测回调数每轮归零）。根因与
   实测数字见坑位 31 —— 贵的不是「构造」，是**没死透的旧窗口**。
 
-### 13.9 YouTube 适配器（M6.12，`platforms/youtube/`）
+### 13.8 YouTube 适配器（`platforms/youtube/`）
 
 - **URL 分类**：watch / shorts / embed / live / youtu.be 五种视频形态 +
   /@handle / /channel/UC... 频道 + /playlist 三类容器。11 字符 video ID
@@ -1337,14 +1336,14 @@ Qt 只实现 SVG Tiny 1.2，**任何**新贡献的 SVG 都可能踩 filter 坑�
   registry 路由、ad-hoc 破坏验证。**全部不联网**——`_extract_meta`
   用 monkeypatch 替换
 
-### 13.10 注册收敛（M6.12）
+### 13.9 注册收敛
 
 - 原 3 处 ``from ..platforms import douyin, bilibili`` 的副作用 import
   （``server/app.py`` / ``mcp/server.py`` / ``core/engine_loader.py``）
   合并为单点 ``from .. import platforms``。**新增 platform 时只需改
   ``platforms/__init__.py`` 一处即可**，3 个上层模块不需要任何改动
 
-### 13.8 下载前选项对话框（M6.11，`ui/pages/parse.py::_PromptOptionsDialog`）
+### 13.10 下载前选项对话框（`ui/pages/parse.py::_PromptOptionsDialog`）
 
 - 触发：设置页「主题与外观」里 `prompt_before_download` SwitchButton，
   默认 **False**。启动时主窗口读初值下发，用户切换后通过
@@ -1755,7 +1754,7 @@ python scripts/run_full_tests.py --mode ci
 
 ---
 
-## 16.5 i18n 基础设施（M6.14）
+### 16.5 i18n 基础设施
 
 ### 设计取舍：为什么不用 Qt `.ts` / `.qm`
 
@@ -1806,7 +1805,7 @@ Qt 的 `tr()` 绑死 `QObject` 子类——模块级函数（CLI、REST、日志
 * `set_language` 切换后后续 `tr` 走新语言，未知语言回退源语言。
 * 语言枚举 / 标签 API 稳定（设置页下拉依赖它）。
 
-## 16.6 B 站直播录制（M6.15）
+### 16.6 B 站直播录制
 
 ### 三层适配
 
@@ -1842,7 +1841,7 @@ LIVE pattern（`live.bilibili.com/{room_id}`）必须排在 SPACE（`bilibili.co
 `match_url`、类型映射、extractor 识别、`supported_media_types`。真实直播循环
 （断流重连、时移边界）需真实直播流，留给集成测试。
 
-## 16.7 aria2 多线程引擎（M6.15）
+### 16.7 aria2 多线程引擎
 
 ### 实现要点
 
@@ -1967,8 +1966,8 @@ return YtDlpEngine()
 ### 对齐 Bili23 的路线图（已识别未做）
 
 按 ROI 排序：
-1. ~~**下载选项弹窗**~~ **M6.11 已做**（见 §13.8）：开关默认关，开关后下载前弹 4 字段（画质/容器/缩略图/JSON）；右键菜单与「直接 add()」路径不接弹窗。
-2. ~~**YouTube 适配器**~~ **M6.12 已做**（见 §13.9）：最低成本扩张样板，不到 200 行 adapter + 31 例测试，URL 全形态覆盖。
+1. ~~**下载选项弹窗**~~ **M6.11 已做**（见 §13.10）：开关默认关，开关后下载前弹 4 字段（画质/容器/缩略图/JSON）；右键菜单与「直接 add()」路径不接弹窗。
+2. ~~**YouTube 适配器**~~ **M6.12 已做**（见 §13.8）：最低成本扩张样板，不到 200 行 adapter + 31 例测试，URL 全形态覆盖。
 3. **解析历史**（记录近期解析过的链接，一键重解析）。
 4. **剪贴板监听**（复制链接自动弹"是否解析"）。
 5. **头像/账号入口**（左下角显示登录态，一键登出）。

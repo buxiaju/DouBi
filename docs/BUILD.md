@@ -733,10 +733,20 @@ multidict / yarl / propcache / frozenlist 各 1 个），这是 https 分片下�
 后安装目录、HKCU 键、开始菜单、桌面快捷方式全部清空，残留进程 0 个，
 而 `~/.doubi` 完好保留。
 
-#### 0.3.1 实测基线（手工打包，CI 未参与）
+#### 实测基线速查（每版手工打包，CI 未参与）
 
-安装包 `DouBi-Setup-0.3.1.exe` = **230,110,981 字节 / 219.45 MB**，
-SHA256 `c1ecd13392c3eb1aa84ac9ebe9c79c5025fde1049054ddb50a2b629945636b8f`。
+| 版本 | 安装包体积 | SHA256 | 静默装耗时 | 静默卸耗时 | 备注 |
+| --- | --- | --- | --- | --- | --- |
+| 0.3.0 | 229,657,135 B / 219.02 MB | — | — | — | aiohttp 全链补齐（M6.20 重打） |
+| 0.3.1 | 230,110,981 B / 219.45 MB | `c1ecd133…` | 37.4s | 10.2s | +443 KB（托盘 + nm3u8dl watchdog） |
+| 0.3.2 | 236,925,706 B / 225.95 MB | `18df8b5f…` | 25.3s | 6.2s | +18.6 MB（Playwright 浏览器目录版本漂移，不是代码膨胀） |
+| 0.3.3 | 237,007,016 B / 226.03 MB | `ef4723f6…` | — | — | 静默卡模态框（0.3.5 修，见下条） |
+| 0.3.9 | 见 Releases 页面 | 见 Releases 页面 | — | — | 当前版本 |
+
+> **基线共识**：所有版本实测都达成：CRC footer 写入正确、`*headless_shell*` 与 `*webengine*` 真实文件残留 0；安装包体积跳变先按文件排查（多半是浏览器目录版本漂移），不要急着改打包配置。
+
+<details>
+<summary>0.3.1 实测基线（手工打包，CI 未参与）</summary>
 
 | 项 | 0.3.0 | 0.3.1 | 备注 |
 | --- | --- | --- | --- |
@@ -762,6 +772,11 @@ SHA256 `c1ecd13392c3eb1aa84ac9ebe9c79c5025fde1049054ddb50a2b629945636b8f`。
 >
 > 也就是说，§7 清单里「卸载后零残留」这一条从 0.3.1 起的准确判据是
 > **「除 `doubi.db` 外零残留」**。
+
+</details>
+
+<details>
+<summary>0.3.2 实测基线（手工打包，CI 未参与）</summary>
 
 #### 0.3.2 实测基线（手工打包，CI 未参与）
 
@@ -789,6 +804,11 @@ SHA256 `18df8b5f949fab6e98d50ba25f8ea0d69fd6b79b05ea43bd9b0e9825b1b3722a`。
 > **0.3.2 的一条排障经验**：隔离目录 `DouBi_VerifyTest` 若不复用旧目录，
 > 装出来的文件数会比 onedir 多 2 而不是多 1（多出的是上一轮验收留下的
 > `doubi.db`）。看 `doubi.db` 的时间戳就能区分是「本次产生」还是「上轮遗留」。
+
+</details>
+
+<details>
+<summary>0.3.3 实测基线（手工打包，CI 未参与）</summary>
 
 #### 0.3.3 实测基线（手工打包，CI 未参与）
 
@@ -860,6 +880,8 @@ NSIS CRC footer 为 `CRC (0x4DD207EE): 4 / 4 bytes` +
 > translator、同一份 `zh_CN.json`，标题栏不是 `app.title_suffix` 就说明词表
 > 加载成功了。
 
+</details>
+
 ### 6.6 编译像卡住了？先确认再等
 
 LZMA solid 压缩 1.57 GB 是单线程的，中途**几分钟没有任何输出**是正常的。
@@ -909,15 +931,9 @@ if ($p) {
       插 Blocker 屏蔽 9 个可选依赖（`pydantic` / `fastapi` / `uvicorn` /
       `PySide6` / `qfluentwidgets` / `qasync` / `psutil` / `qrcode` / `mcp`）
       再跑 `pytest -q --maxfail=5`。判绿标准不是「没红」，而是
-      **passed+failed 与 CI 相等、skipped 也相等**（0.3.0 基线
-      `629 passed / 146 skipped`；0.3.1 基线 `670 passed / 175 skipped`；
-      0.3.2 基线 `981 passed / 181 skipped`；
-      0.3.3 基线 `1004 passed / 184 skipped / 19.09s`；
-      0.3.4 基线 `1029 passed / 188 skipped / 19.59s`；
-      0.3.5 基线 `1031 passed / 203 skipped / 19.21s`；
-      **0.3.6 基线 `1075 passed / 223 skipped / 20.12s`**。耗时只是参考：
-      同一台机器复跑秒数会浮动，**passed / skipped 必须逐项相等**，
-      秒数对不上不算回归）
+      **passed+failed 与 CI 相等、skipped 也相等**。
+      耗时只是参考：同一台机器复跑秒数会浮动，**passed / skipped 必须逐项相等**，
+      秒数对不上不算回归。各版本基线见 [CHANGELOG.md](CHANGELOG.md) 的版本段尾部。
 - [ ] **新测试文件别让「纯函数用例」跟着 GUI 一起被跳过**（0.3.6 教训）：
       `ci` 口径下 PySide6 被 Blocker 屏蔽，凡 `_require_gui()` 的用例都变
       skip。如果新文件的 `qapp` fixture 写成 `autouse=True`，**整份文件**
@@ -932,20 +948,9 @@ if ($p) {
       回归数必须来自这一步）：`python scripts/run_full_tests.py`（默认 local
       口径）。它带真依赖跑，只排除 `tests/test_theme_apply_gui.py`——那 28 例
       带真 PySide6 会起 Qt 事件循环反复切主题，是「本地全量跑不动」的**唯一**
-      根因。**0.3.6 基线：`1379 passed / 7 skipped / 104.85s`**
-      （0.3.5 是 `1315 passed / 7 skipped / 100.05s`；
-      0.3.4 是 `1298 passed / 7 skipped / 94.59s`；0.3.3 是 1304 收集 − 28
-      排除 = 1276 → `1269 passed / 7 skipped / 86.54s`；0.3.2 是
-      1278−28=1250 → `1243 passed / 7 skipped / 154.37s`；
-      0.3.1 是 948−28=920 → `913 passed / 7 skipped`。
-      0.3.5 的 +17 全部来自新增的 `tests/test_font_and_ui_caches.py`；
-      0.3.6 的 +22 来自 `tests/test_search_hot_no_results.py`，
-      +8 来自 `tests/test_ui_qfluent_api_guards.py`，
-      +34 来自 `tests/test_row_download_actions.py`）。
-      **0.3.3 耗时从 ~154s 降到 ~87s 不是机器变快**：主要是把 11 个「靠真网络
-      请求失败凑绿灯」的用例改成打桩——`test_pipeline_smoke.py` 36.64s→0.45s、
-      `test_server.py` 41.76s→1.12s。同样地，**拿 passed / skipped 当判据，别拿秒数**
-      ——机器负载会带来 ±20s 浮动，不是回归。
+      根因。
+      **判据是 passed / skipped 数字，不是耗时**——机器负载会带来 ±20s 浮动，
+      不是回归。每版本实测基线见 [CHANGELOG.md](CHANGELOG.md) 的版本段尾部。
       **不要再用 CHANGELOG 分批累加去推算回归数**——0.3.1 就是这么写下了一个
       不存在的「901 passed / 3 skipped」（真值 913 / 7，差 12 passed + 4 skipped）
 - [ ] **断网口径（0.3.3 新增，可选但推荐）**：确认测试套件不偷偷联网。

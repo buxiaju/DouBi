@@ -241,7 +241,7 @@ Qt 的 QSS 不支持 CSS 变量，所以「一个值用在多处」只能：
 
 「设置」页面（4 张分组卡）排版逻辑：
 
-```
+```text
 ┌─ PageHeader ──────────────────────────────┐
 │  设置                                     │
 │  账号 / 主题 / 性能 / 路径。所有改动点...    │
@@ -302,7 +302,115 @@ Mica 是 Win11 上的毛玻璃背景色，需要 `_normalBackgroundColor()` 透�
 
 ### 11.3 启动速度
 
-M6.4 之后主窗口默认 1100×760，4 个页面共享 Module-scope 单例。冷启动
+0.3.0 之后主窗口默认 1100×760，4 个页面共享 Module-scope 单例。冷启动
 约 1.5 秒（其中 PySide6 import 0.8s、QApplication 构造 0.3s、
-页面构造 0.4s）。闪屏在 PySide6 import 时还没创建，是 M6.4+ 的
-待办：把 splash 改到 PyInstaller bootloader 那一层。
+页面构造 0.4s）。闪屏在 PySide6 import 时还没创建，是后续待办：把 splash
+改到 PyInstaller bootloader 那一层。
+
+---
+
+## 12. 反馈 / 快捷键（0.3.7 新增）
+
+0.3.7 抽出两个跨页面约定，把分散在 N 个文件里的同一类东西收敛到
+一处。目的是给后续新增的页面定下规矩——禁止再「各写各的」。
+
+### 12.1 反馈：`toast_*` helpers（`ui/feedback.py`）
+
+四个具名 helper 代替裸调 `InfoBar.xxx(...)`：
+
+```python
+from doubi.ui.feedback import toast_success, toast_info, toast_warning, toast_error
+
+toast_warning(self, "标题", "正文")    # 平时 from feedback
+```
+
+**统一约定**（所有 helper 都遵守）：
+
+| 维度 | 值 | 备注 |
+| --- | --- | --- |
+| 位置 | `InfoBarPosition.TOP_RIGHT` | 之前 5/6 用 `TOP` 居中会和 H1 标题卡住 |
+| duration（success / info / warning） | 4s | |
+| duration（error） | 6s | 让用户有 4-8s 看清错误并截图反馈 |
+| 内部异常处理 | 一律 swallow + logger.debug | feedback 失败不允许触发 feedback |
+
+**AST 静态扫**（`test_pages_must_use_toast_helpers_not_infobar`）禁止
+5 页面 + main_window 里直接调 `InfoBar.xxx`。**新页面必须用 helper**。
+
+### 12.2 页面三态：`EmptyState / LoadingState / ErrorState`
+
+每个有 IO 的页面都用 `QStackedWidget` 在三个占位之间切：
+
+```text
+            +-----------+    +-----------+    +-----------+
+   初始 →   | EmptyState  | →  |LoadingState| →  | TableWidget |  成功
+            | 等待...    |    | 转圈...    |    |  数据       |
+            +-----------+    +-----------+    +-----------+
+                                  ↓ 失败
+                            +-----------+
+                            | ErrorState |    失败
+                            |  重试按钮  |
+                            +-----------+
+```
+
+**共享组件**（`ui/widgets.py`）：
+
+| 组件 | 接口 | 备注 |
+| --- | --- | --- |
+| `EmptyState` | `set_text(title, subtitle)` / `set_action(label, callback)` | 标题 + 副标题 + **可选 CTA 按钮**（0.3.7 新增） |
+| `LoadingState` | `set_message(text)` / `start()` / `stop()` | ProgressRing + 文字；`stop()` 必须调用否则藏在 stack 里也烧 CPU |
+| `ErrorState` | `set_text(title, subtitle)` / `set_action(label, callback)` | 副标题用 `status_failed_fg` 染色 + 「重试」按钮 |
+
+`EmptyState.set_action` 是 0.3.7 的新接口——解析页用它在空态放
+「试试示例链接」CTA。其他页面未来想做「找不到结果？点这里试试 X」
+也能复用。
+
+### 12.3 快捷键：`ShortcutManager`（`ui/shortcuts.py`）
+
+```python
+from doubi.ui.shortcuts import ShortcutManager
+
+mgr = ShortcutManager(parent)
+mgr.register(
+    name="跳到解析页",                  # 显示名（中文）
+    key="Ctrl+1",                       # QKeySequence 字符串
+    callback=lambda: self.switch_to(parse),
+    description="跳转到「解析」页",      # 速查卡片用
+    category="导航",                    # 速查卡片分组
+)
+```
+
+**设计约束**：
+
+1. **不依赖菜单栏**：`MSFluentWindow` 没有 `menuBar`，所有快捷键走
+   `QShortcut` 而不是菜单 action。详细论证见 `ui/shortcuts.py` 头部。
+2. **context = `ApplicationShortcut`**：跳转 / 主题 / 退出 / 关于
+   必须全局响应（包括「关窗到托盘」也要能跳回）。`Ctrl+数字` / `F5` /
+   `Ctrl+Q` / `Ctrl+,` 都不会和文本输入抢键（`QLineEdit` 不消费这些
+   组合）。
+3. **回调异常一律 swallow**：快捷键回调跑在用户事件路径上，异常
+   被 Qt 转成 showMessage 弹窗反而打断操作。包装层吞掉，记日志。
+4. **按 key 去重**：同 key 二次注册静默覆盖——manager 内部
+   `deleteLater` 旧 QShortcut，不留 dangling reference。
+
+**AST 静态扫**（`test_no_bare_qshortcut_in_pages`）禁止任何位置
+（除 `ui/shortcuts.py` 自身）直接 `QShortcut(...)`。
+**新快捷键必须走 `ShortcutManager.register(...)`**。
+
+**速查卡片**：设置页有「快捷键速查」卡片，main_window 在
+`_register_shortcuts()` 之后调 `settings_interface.set_shortcuts(mgr)`，
+触发 `_rebuild_shortcuts_card()` 重排。卡片的快捷键组合用
+`progress_normal` token 色 + 600 字重——主题的「正在运行」色，
+第一眼就能锁定。
+
+### 12.4 AST 静态扫全景（0.3.7 状态）
+
+| 规则 | 防的是 |
+| --- | --- |
+| `test_no_currentitem_used_as_platform_route` | `SegmentedWidget.currentItem()` 返回对象（不是 routeKey） |
+| `test_infobar_calls_never_use_message_keyword` | `InfoBar.*(message=...)`（参数名错 → TypeError 被静默吞） |
+| `test_infobar_method_names_exist` | `InfoBar.information` / 其它拼写错的 method |
+| `test_pages_must_use_toast_helpers_not_infobar` | 页面直接 `InfoBar.xxx`（位置 / duration 漂移） |
+| `test_pages_must_not_import_infobarposition` | 页面决定 toast 位置（应是 feedback.py 单点决策） |
+| `test_no_bare_qshortcut_in_pages` | 裸 `QShortcut(...)`（未过 manager = 没安全包装 / 没去重） |
+
+6 条全在 CI 离线可跑（不需要 QApplication 也不需要网络）。

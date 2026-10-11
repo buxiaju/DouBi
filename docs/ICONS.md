@@ -222,7 +222,7 @@ def load_splash_pixmap(width=256, height=256, accent=None, *, themed=True):
 
 ## 4. 主窗口图标全链路
 
-```
+```text
 用户切主题
     ↓
 set_theme(新主题名)
@@ -387,7 +387,7 @@ python scripts/build_icons.py --preview
 
 ### 7.1 `QPixmap.save(QBuffer, "PNG")` 在 offscreen 平台崩溃
 
-```
+```text
 STATUS_STACK_BUFFER_OVERRUN (0xC0000409)
 ```
 
