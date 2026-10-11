@@ -9,19 +9,30 @@ from __future__ import annotations
 
 def build_about_dialog():
     from PySide6.QtCore import Qt
-    from PySide6.QtGui import QPixmap
     from PySide6.QtWidgets import (
-        QDialog, QVBoxLayout, QHBoxLayout, QLabel, QWidget,
+        QDialog,
+        QHBoxLayout,
+        QLabel,
+        QVBoxLayout,
+        QWidget,
     )
     from qfluentwidgets import PushButton
 
     from ..resources import (
-        APP_COPYRIGHT, APP_NAME, APP_TAGLINE, APP_VERSION,
+        APP_COPYRIGHT,
+        APP_NAME,
+        APP_TAGLINE,
+        APP_VERSION,
         load_app_icon,
     )
     from ..theme import (
-        SPACE_LG, SPACE_SM, TYPE_BODY, TYPE_CAPTION,
-        card_qss, header_qss, muted_qss, token,
+        SPACE_LG,
+        SPACE_SM,
+        TYPE_BODY,
+        card_qss,
+        header_qss,
+        muted_qss,
+        token,
     )
 
     class AboutDialog(QDialog):

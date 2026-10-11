@@ -11,7 +11,6 @@ M6.x 重做：与其它页面共享 PageHeader / EmptyState，数据库未启用
 from __future__ import annotations
 
 import logging
-import time
 from datetime import datetime
 from typing import Optional
 
@@ -21,20 +20,35 @@ logger = logging.getLogger("doubi.ui.pages.history")
 def build_history_widgets():
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import (
-        QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFileDialog,
-        QStackedWidget, QMenu,
+        QHBoxLayout,
+        QHeaderView,
+        QLabel,
+        QMenu,
+        QStackedWidget,
+        QVBoxLayout,
+        QWidget,
     )
     from qfluentwidgets import (
-        PushButton, TableWidget, StrongBodyLabel, InfoBar, InfoBarPosition,
+        PushButton,
+        TableWidget,
     )
 
     from ...core.config import load_config
     from ...core.storage.database import Database
+    from ..feedback import toast_info, toast_warning
     from ..theme import (
-        SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL,
-        heading_qss, muted_qss, subscribe_theme, token,
+        SPACE_LG,
+        SPACE_MD,
+        SPACE_XL,
+        heading_qss,
+        subscribe_theme,
     )
-    from ..widgets import build_empty_state, build_page_header, build_stat_chip
+    from ..widgets import (
+        build_empty_state,
+        build_loading_state,
+        build_page_header,
+        build_stat_chip,
+    )
 
     class HistoryPage(QWidget):
         def __init__(self, parent: Optional[QWidget] = None):
@@ -73,6 +87,7 @@ def build_history_widgets():
         def _build_ui(self):
             PageHeader = build_page_header()
             EmptyState = build_empty_state()
+            LoadingState = build_loading_state()
             StatChip = build_stat_chip()
 
             outer = QVBoxLayout(self)
@@ -119,12 +134,41 @@ def build_history_widgets():
             self.table.setEditTriggers(TableWidget.NoEditTriggers)
             self.table.setSelectionBehavior(TableWidget.SelectRows)
             self.table.verticalHeader().setDefaultSectionSize(36)
+            # 列宽策略（0.3.7 修）：短列给足能显示**完整值**的宽度，标题列拉伸。
+            #
+            # 修之前 6 列全是 Qt 默认的 100px，表格实际只用到约 600px：
+            # 「ID」永远显示成 ``BV1vRH...``、「下载时间」永远是 ``2026-10...``、
+            # 「保存目录」永远是 ``Downlo...``——三列的信息完全读不出来，右侧
+            # 还空着 400 多像素没人用。
+            #
+            # 现在按**真实内容宽度**给定量：
+            #   * ID：B 站 ``BV1vRHa6x7h7``（12 字符）留够，抖音 19 位数字
+            #     会截断但保留前段辨识度——它本来就是长 ID，不是本文重点。
+            #   * 下载时间：``2026-10-05 09:16`` 是 16 字符，给定宽度比它宽，
+            #     保证**分钟**能读出来（修之前连小时都被切掉）。
+            #   * 下载时间：``2026-10-05 09:16`` 是 16 个字符。实测宽度要按
+            #     **最宽的可能字体**留——系统 UI 字体下约 118px，但 offscreen
+            #     等回退字体能到 224px。给 230 才不会在别人的机器上被截断。
+            #   * 标题：唯一 Stretch 的列，吃掉全部剩余宽度。
+            header = self.table.horizontalHeader()
+            header.setStretchLastSection(False)
+            for _col, _w in ((0, 92), (1, 260), (3, 132), (4, 230), (5, 176)):
+                header.setSectionResizeMode(_col, QHeaderView.Fixed)
+                self.table.setColumnWidth(_col, _w)
+            header.setSectionResizeMode(2, QHeaderView.Stretch)
             self.table.setContextMenuPolicy(Qt.CustomContextMenu)
             self.table.customContextMenuRequested.connect(self._on_context_menu)
             self._stack.addWidget(self.table)
 
             self._empty_state = EmptyState(self)
             self._stack.addWidget(self._empty_state)
+
+            # 0.3.7：加载占位——历史页首次切换时查询 SQLite，
+            # 没有 spinner 用户以为没反应。
+            self._loading_state = LoadingState(self)
+            self._loading_state.set_message("正在查询数据库…")
+            self._stack.addWidget(self._loading_state)
+
             outer.addWidget(self._stack, 1)
 
             self.count_label = QLabel("", self)
@@ -144,6 +188,11 @@ def build_history_widgets():
                 )
                 self._stack.setCurrentWidget(self._empty_state)
                 return
+            # 0.3.7：刷新中切 LoadingState——首次切到历史页或下载落库后
+            # 自动重查时给用户一个明确反馈。
+            self._loading_state.set_message("正在查询数据库…")
+            self._loading_state.start()
+            self._stack.setCurrentWidget(self._loading_state)
             try:
                 import asyncio
                 try:
@@ -171,6 +220,7 @@ def build_history_widgets():
             self._dirty = False
             self._stat_total.set_value(str(total))
             self._stat_showing.set_value(len(rows))
+            self._loading_state.stop()
             if rows:
                 self._stack.setCurrentWidget(self.table)
             else:
@@ -194,31 +244,19 @@ def build_history_widgets():
                 self.table.setItem(i, 2, _cell(r.title or ""))
                 self.table.setItem(i, 3, _cell(r.author_name or ""))
                 self.table.setItem(i, 4, _cell(dl_time))
-                self.table.setItem(i, 5, _cell(r.last_save_dir or ""))
+                self.table.setItem(i, 5, _cell(self._short_dir(r.last_save_dir)))
 
         def _open_selected_dir(self) -> None:
             sel = self.table.selectedItems()
             if not sel:
-                InfoBar.warning(
-                    title="未选择记录",
-                    content="请先在表格中选择一行。",
-                    parent=self,
-                    position=InfoBarPosition.TOP,
-                    duration=3000,
-                )
+                toast_warning(self, "未选择记录", "请先在表格中选择一行。")
                 return
             row_idx = sel[0].row()
             if not (0 <= row_idx < len(self._rows)):
                 return
             save_dir = self._rows[row_idx].last_save_dir or ""
             if not save_dir:
-                InfoBar.warning(
-                    title="无保存目录",
-                    content="这条记录没有保存路径。",
-                    parent=self,
-                    position=InfoBarPosition.TOP,
-                    duration=3000,
-                )
+                toast_warning(self, "无保存目录", "这条记录没有保存路径。")
                 return
             import os
             os.startfile(save_dir)   # Windows only; GUI is desktop-first
@@ -253,20 +291,52 @@ def build_history_widgets():
             if cb is not None:
                 cb(url)
                 return
-            # 回调未注入（测试 / 独立运行）——直接提示
+            # 回调未注入（测试 / 独立运行）——直接提示。
             # 注意：qfluentwidgets 没有 InfoBar.information，正确名是 info。
-            InfoBar.info(
-                title="重新解析",
-                content=f"已复制链接到剪贴板：{url[:60]}",
-                parent=self,
-                position=InfoBarPosition.TOP,
-                duration=3000,
+            toast_info(
+                self, "重新解析",
+                f"已复制链接到剪贴板：{url[:60]}",
             )
 
     def _cell(text: str):
         from PySide6.QtWidgets import QTableWidgetItem
         item = QTableWidgetItem(text)
         return item
+
+    def _short_dir(path) -> str:
+        """把保存路径压成能在列里读完的一行（0.3.7 修）。
+
+        真实数据里这一列 351/351 全被截断，而截断后剩下的
+        ``Downloaded\\bilibili\\中华...`` 恰恰把**最有辨识度的目录名**切掉了。
+        实测所有记录的路径形状高度一致：
+
+            Downloaded\\<platform>\\<author>\\video
+
+        尾部永远是 ``video``（351/351），首部永远是 ``Downloaded``——
+        两段都是废话，真正区分记录的是中间那截「平台 + 作者」。
+
+        所以这里剥掉固定的 ``Downloaded\\`` 前缀和末尾的 ``video``，
+        保留 ``bilibili\\中华球侠`` 这种有信息量的形态。**只是显示层裁剪，
+        不改 ``last_save_dir`` 本身**——右键「打开保存目录」用的仍是
+        ``self._rows[i].last_save_dir`` 的完整路径。
+        """
+        if not path:
+            return ""
+        import os
+
+        text = str(path).replace("/", "\\")
+        parts = [p for p in text.split("\\") if p]
+        # 丢掉固定的产出根目录
+        if parts and parts[0].lower() == "downloaded":
+            parts = parts[1:]
+        # 丢掉尾部固定的类型目录（video / audio / image …）
+        if parts and parts[-1].lower() in {"video", "audio", "image", "images", "cover"}:
+            parts = parts[:-1]
+        short = "\\".join(parts)
+        return short or os.path.basename(text.rstrip("\\/"))
+
+    # 挂到页面上：``_populate`` 用 ``self._short_dir`` 调用，测试也走同一入口。
+    HistoryPage._short_dir = staticmethod(_short_dir)
 
     def _build_url_from_row(row) -> str:
         """从 DB 记录重建可解析的 URL。

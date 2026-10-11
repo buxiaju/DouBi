@@ -286,28 +286,49 @@ except Exception:  # noqa: BLE001
 
 
 def build_parse_widgets():
-    from PySide6.QtCore import QObject, Qt, QUrl, Signal, QTimer
+    from PySide6.QtCore import Qt, QTimer, QUrl
     from PySide6.QtGui import QDesktopServices, QGuiApplication
     from PySide6.QtWidgets import (
-        QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPlainTextEdit,
-        QAbstractItemView, QHeaderView, QMenu,
+        QAbstractItemView,
+        QHBoxLayout,
+        QHeaderView,
+        QLabel,
+        QMenu,
+        QPlainTextEdit,
+        QVBoxLayout,
+        QWidget,
     )
     from qfluentwidgets import (
-        ComboBox, PushButton, CardWidget, SearchLineEdit,
-        StrongBodyLabel, InfoBar, InfoBarPosition, TableWidget,
+        CardWidget,
+        ComboBox,
+        PushButton,
+        SearchLineEdit,
+        TableWidget,
     )
 
     from ...core.config import AppConfig, load_config
     from ...core.engine_loader import build_default_pipeline
     from ...core.models import DownloadOptions, MediaItem
     from ...core.pipeline import DownloadPipeline
+    from ..feedback import (
+        toast_error,
+        toast_info,
+        toast_success,
+        toast_warning,
+    )
     from ..theme import (
-        SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS,
-        TYPE_BODY, TYPE_CAPTION, FONT_FAMILY, RADIUS_CARD,
-        heading_qss, muted_qss, subscribe_theme,
+        SPACE_LG,
+        SPACE_MD,
+        SPACE_SM,
+        SPACE_XL,
+        heading_qss,
+        muted_qss,
+        subscribe_theme,
     )
     from ..widgets import (
-        build_page_header, build_empty_state, build_platform_badge,
+        build_empty_state,
+        build_loading_state,
+        build_page_header,
     )
 
     class ParsePage(QWidget):
@@ -398,7 +419,7 @@ def build_parse_widgets():
                 self.url_input.setPlainText(current + "\n" + text)
             else:
                 self.url_input.setPlainText(text)
-            self._toast(InfoBar.info, "检测到链接",
+            toast_info(self, "检测到链接",
                         f"已从剪贴板填入：{text[:60]}")
 
         # ---- public API ----------------------------------------------
@@ -464,6 +485,7 @@ def build_parse_widgets():
         def _build_ui(self):
             PageHeader = build_page_header()
             EmptyState = build_empty_state()
+            LoadingState = build_loading_state()
 
             outer = QVBoxLayout(self)
             outer.setContentsMargins(SPACE_XL, SPACE_LG, SPACE_XL, SPACE_LG)
@@ -587,7 +609,18 @@ def build_parse_widgets():
                 "支持视频 / 图集 / 直播 / 用户主页 / 收藏夹 / 合集 / 短链接\n"
                 "粘贴后点击「解析」",
             )
+            # 0.3.7：CTA「试试示例链接」——一键把示例填进去并聚焦输入框。
+            # 不主动弹，避免用户每次进解析页都被「填示例」抢注意力。
+            self._empty.set_action("试试示例链接", self._fill_sample_links)
             self._result_stack.addWidget(self._empty)
+
+            # 0.3.7：解析中过渡态——比「按钮文字改成 解析中…」更明确，
+            # 切到 LoadingState 即隐藏 EmptyState / TableWidget，焦点也
+            # 自动让出来给动画。
+            self._loading = LoadingState(self.result_card)
+            self._loading.set_message("正在解析…")
+            self._result_stack.addWidget(self._loading)
+
             self._result_stack.setCurrentWidget(self._empty)
 
             outer.addWidget(self.result_card, 1)
@@ -615,11 +648,19 @@ def build_parse_widgets():
         def _on_parse_clicked(self):
             urls = self._parse_urls()
             if not urls:
-                self._toast(InfoBar.warning, "没有有效链接", "请至少粘贴一个 URL（每行一个）。")
+                toast_warning(self, "没有有效链接", "请至少粘贴一个 URL（每行一个）。")
                 return
             self.parse_btn.setEnabled(False)
+            self.url_input.setReadOnly(True)
             sniff_sec = self._sniff_seconds_for(urls)
             self.parse_btn.setText(f"嗅探中… ({sniff_sec}s)" if sniff_sec else "解析中…")
+            # 0.3.7：切到 LoadingState——比「按钮文字 解析中…」更明显。
+            # 长嗅探时（generic 兜底 15s+）用户也能看到 spinner。
+            self._loading.set_message(
+                f"正在嗅探…（约 {sniff_sec}s）" if sniff_sec else "正在解析…"
+            )
+            self._loading.start()
+            self._result_stack.setCurrentWidget(self._loading)
 
             async def _do():
                 try:
@@ -634,13 +675,18 @@ def build_parse_widgets():
                 finally:
                     self.parse_btn.setEnabled(True)
                     self.parse_btn.setText("解析")
+                    self.url_input.setReadOnly(False)
+                    self._loading.stop()
 
                 if not items:
                     title, content = self._empty_parse_message(per_url)
-                    self._toast(InfoBar.warning, title, content)
+                    toast_warning(self, title, content)
+                    # 让 EmptyState 重新可见——之前解析中临时切走
+                    self._result_stack.setCurrentWidget(self._empty)
                     return
                 self._fill_result_table(items)
-                self._toast(InfoBar.success, "解析完成",
+                self._result_stack.setCurrentWidget(self.result_table)
+                toast_success(self, "解析完成",
                             f"共 {len(items)} 项可下载。")
 
             asyncio.create_task(_do())
@@ -648,28 +694,47 @@ def build_parse_widgets():
         def _on_quick_download_clicked(self):
             urls = self._parse_urls()
             if not urls:
-                self._toast(InfoBar.warning, "没有有效链接", "请至少粘贴一个 URL。")
+                toast_warning(self, "没有有效链接", "请至少粘贴一个 URL。")
                 return
             url = urls[0]
             if self._task_manager is None:
-                self._toast(InfoBar.error, "未连接任务管理器",
+                toast_error(self, "未连接任务管理器",
                             "请在主窗口中打开此页面。")
                 return
 
+            # 0.3.7：解析中切 LoadingState——generic 兜底嗅探要 15s+，
+            # 没有 spinner 用户以为卡死。解析后失败时也要切回去。
+            sniff_sec = self._sniff_seconds_for([url])
+            self.quick_download_btn.setEnabled(False)
+            self.url_input.setReadOnly(True)
+            self._loading.set_message(
+                f"正在嗅探…（约 {sniff_sec}s）" if sniff_sec else "正在解析…"
+            )
+            self._loading.start()
+            self._result_stack.setCurrentWidget(self._loading)
+
             async def _do():
-                item, children = await self._pipeline.parse_and_expand(url)
+                try:
+                    item, children = await self._pipeline.parse_and_expand(url)
+                finally:
+                    self.quick_download_btn.setEnabled(True)
+                    self.url_input.setReadOnly(False)
+                    self._loading.stop()
                 if item is None:
-                    self._toast(InfoBar.error, "解析失败", f"无法解析：{url}")
+                    self._result_stack.setCurrentWidget(self._empty)
+                    toast_error(self, "解析失败", f"无法解析：{url}")
                     return
                 targets = children if children else [item]
                 if not targets:
-                    self._toast(InfoBar.warning, "无可下载内容",
+                    self._result_stack.setCurrentWidget(self._empty)
+                    toast_warning(self, "无可下载内容",
                                 "该链接没有可下载的子项。")
                     return
                 # 弹「下载选项」对话框：用户取消 = 整批不入队；用户确认 = 用
                 # 弹窗里的覆盖项拼出 options。没启用提示时直接走默认配置。
                 overrides = self._ask_prompt_overrides(targets)
                 if overrides is None:
+                    self._result_stack.setCurrentWidget(self._empty)
                     return
                 opts = self._options_for_overrides(overrides)
                 # 标题模板是 per-item 的，不能走 dataclasses.replace(options, ...)
@@ -677,7 +742,9 @@ def build_parse_widgets():
                 apply_title_template(targets, overrides.get("title_template"))
                 for it in targets:
                     self._task_manager.add(it, opts)
-                self._toast(InfoBar.success, "已加入下载队列",
+                # 让 EmptyState 重新可见（之前切到 spinner 了）
+                self._result_stack.setCurrentWidget(self._empty)
+                toast_success(self, "已加入下载队列",
                             f"共 {len(targets)} 项。")
 
             asyncio.create_task(_do())
@@ -859,7 +926,7 @@ def build_parse_widgets():
             elif chosen is single:
                 if self._task_manager is not None:
                     self._task_manager.add(item, self._options_for_overrides())
-                    self._toast(InfoBar.success, "已加入下载队列", item.title or item.item_id)
+                    toast_success(self, "已加入下载队列", item.title or item.item_id)
             elif chosen is meta:
                 self._show_metadata_dialog(item)
             elif chosen is cover:
@@ -872,25 +939,25 @@ def build_parse_widgets():
             from ...core.registry import PlatformRegistry
             adapter = PlatformRegistry.get(Platform.DOUYIN)
             if adapter is None or not hasattr(adapter, "collection_of"):
-                self._toast(InfoBar.error, "获取合集失败",
+                toast_error(self, "获取合集失败",
                             "未找到抖音适配器，请重启软件。")
                 return
             try:
                 container = await adapter.collection_of(item.item_id)
             except Exception as exc:  # noqa: BLE001
                 logger.exception("collection_of failed")
-                self._toast(InfoBar.error, "获取合集失败",
+                toast_error(self, "获取合集失败",
                             f"{item.title or item.item_id}: {exc}")
                 return
             if container is None:
-                self._toast(InfoBar.info, "不属于合集",
+                toast_info(self, "不属于合集",
                             f"{item.title or item.item_id} 不在任何合集中。")
                 return
             try:
                 children = await adapter.expand(container)
             except Exception as exc:  # noqa: BLE001
                 logger.exception("expand collection failed")
-                self._toast(InfoBar.error, "展开合集失败",
+                toast_error(self, "展开合集失败",
                             f"{container.title}: {exc}")
                 return
             if not children:
@@ -901,16 +968,16 @@ def build_parse_widgets():
                 # problems — works for both MIX 合集 and USER 用户.
                 expand_error = container.extra.get("expand_error")
                 if expand_error:
-                    self._toast(
-                        InfoBar.warning, "展开失败",
+                    toast_warning(
+                        self, "展开失败",
                         f"{container.title}：{_expand_hint_text(expand_error)}",
                     )
                 else:
-                    self._toast(InfoBar.warning, "展开为空",
+                    toast_warning(self, "展开为空",
                                 f"{container.title}：未获取到任何视频。")
                 return
             self._fill_result_table(children)
-            self._toast(InfoBar.success, "合集已展开",
+            toast_success(self, "合集已展开",
                         f"{container.title}（{len(children)} 个视频），"
                         f"请勾选后点击「下载选中」。")
 
@@ -951,7 +1018,7 @@ def build_parse_widgets():
             """Parse a row-range string (1-indexed) and check those rows."""
             indices = _parse_range(text, self.result_table.rowCount())
             if not indices:
-                self._toast(InfoBar.warning, "无效行号", f"未解析到有效行号：{text}")
+                toast_warning(self, "无效行号", f"未解析到有效行号：{text}")
                 return
             self.result_table.blockSignals(True)
             try:
@@ -1188,19 +1255,19 @@ def build_parse_widgets():
             from ...core.registry import PlatformRegistry
             adapter = PlatformRegistry.get(Platform.BILIBILI)
             if adapter is None:
-                self._toast(InfoBar.error, "展开分集失败",
+                toast_error(self, "展开分集失败",
                             "未找到 B 站适配器，请重启软件。")
                 return
             try:
                 pages = await adapter.expand_episode_pages(episode_item)
             except Exception as exc:  # noqa: BLE001
                 logger.exception("expand_episode_pages failed")
-                self._toast(InfoBar.error, "展开分集失败",
+                toast_error(self, "展开分集失败",
                             f"{episode_item.title}: {exc}")
                 return
             if len(pages) <= 1:
                 # Single-page or fetch failed — the row IS the video.
-                self._toast(InfoBar.info, "没有分集",
+                toast_info(self, "没有分集",
                             f"{episode_item.title} 没有分P。")
                 return
             key = self._episode_key_for_row(row)
@@ -1244,14 +1311,14 @@ def build_parse_widgets():
             from ...core.registry import PlatformRegistry
             adapter = PlatformRegistry.get(Platform.BILIBILI)
             if adapter is None:
-                self._toast(InfoBar.error, "展开分类失败",
+                toast_error(self, "展开分类失败",
                             "未找到 B 站适配器，请重启软件。")
                 return
             try:
                 episodes = await adapter.expand_section(section_item)
             except Exception as exc:  # noqa: BLE001
                 logger.exception("expand_section failed")
-                self._toast(InfoBar.error, "展开分类失败",
+                toast_error(self, "展开分类失败",
                             f"{section_item.title}: {exc}")
                 return
 
@@ -1477,17 +1544,17 @@ def build_parse_widgets():
         def _download_selected(self) -> None:
             rows = self._checked_rows()
             if not rows:
-                self._toast(InfoBar.warning, "未选择项目", "请先勾选要下载的条目。")
+                toast_warning(self, "未选择项目", "请先勾选要下载的条目。")
                 return
             if self._task_manager is None:
-                self._toast(InfoBar.error, "未连接任务管理器",
+                toast_error(self, "未连接任务管理器",
                             "请在主窗口中打开此页面。")
                 return
 
             async def _do():
                 targets = await self._resolve_download_targets(rows)
                 if not targets:
-                    self._toast(InfoBar.warning, "无可下载内容",
+                    toast_warning(self, "无可下载内容",
                                 "勾选项展开后没有分集。")
                     return
                 # 弹「下载选项」对话框：用户取消 = 整批不入队；用户确认 = 用
@@ -1501,7 +1568,7 @@ def build_parse_widgets():
                 apply_title_template(targets, overrides.get("title_template"))
                 for it in targets:
                     self._task_manager.add(it, opts)
-                self._toast(InfoBar.success, "已加入下载队列", f"共 {len(targets)} 项。")
+                toast_success(self, "已加入下载队列", f"共 {len(targets)} 项。")
 
             asyncio.create_task(_do())
 
@@ -1637,6 +1704,25 @@ def build_parse_widgets():
                 "没有可下载的内容，请检查链接或确认该链接可访问。",
             )
 
+        def _fill_sample_links(self) -> None:
+            """EmptyState CTA: 把 placeholder 里的示例链接填到输入框。
+
+            切到输入框并把光标放到末尾——焦点已经在输入框了，光标定位
+            让用户立刻可以打字 / 删行 / 加新链接。
+            """
+            from PySide6.QtGui import QTextCursor
+            sample = (
+                "https://www.bilibili.com/video/BV1GJ411x7h7\n"
+                "https://space.bilibili.com/486906719\n"
+                "https://www.bilibili.com/list/ml12345\n"
+                "https://www.douyin.com/video/7123456789012345678"
+            )
+            self.url_input.setPlainText(sample)
+            self.url_input.setFocus()
+            cursor = self.url_input.textCursor()
+            cursor.movePosition(QTextCursor.End)
+            self.url_input.setTextCursor(cursor)
+
         def _classify_login_required(self, url: str) -> Optional[str]:
             try:
                 from ...platforms.bilibili.url import (
@@ -1717,12 +1803,6 @@ def build_parse_widgets():
                 # what lets a user who pinned ``cookies_file`` (config file /
                 # ``DOUBI_COOKIES_FILE``) actually be honoured in the GUI.
                 cookies_file=self._cfg.cookies_file,
-            )
-
-        def _toast(self, kind, title: str, content: str) -> None:
-            kind(
-                title=title, content=content, parent=self,
-                position=InfoBarPosition.TOP_RIGHT, duration=4000,
             )
 
     # ------------------------------------------------------------------

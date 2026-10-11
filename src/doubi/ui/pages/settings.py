@@ -158,8 +158,6 @@ def build_settings_widgets():
     from qfluentwidgets import (
         CardWidget,
         ComboBox,
-        InfoBar,
-        InfoBarPosition,
         LineEdit,
         PushButton,
         StrongBodyLabel,
@@ -174,11 +172,14 @@ def build_settings_widgets():
         import_bilibili_cookies,
         import_douyin_cookies,
     )
+    from ..feedback import toast_error, toast_success
     from ..theme import (
         SPACE_LG,
         SPACE_MD,
         SPACE_SM,
         SPACE_XL,
+        SPACE_XS,
+        body_qss,
         current_theme_name,
         heading_qss,
         muted_qss,
@@ -187,6 +188,7 @@ def build_settings_widgets():
         subscribe_theme,
         theme_labels,
         theme_names,
+        token,
     )
     from ..widgets import build_page_header, build_section_divider
 
@@ -209,6 +211,10 @@ def build_settings_widgets():
             # 反向同步时用来抑制信号回环：主题下拉被程序改动时
             # 不应该再触发一次 set_theme。
             self._syncing_theme = False
+            # 0.3.7：快捷键速查卡片的 provider。主窗口构造后注入；
+            # 注入前 settings 页能正常 build（卡片区放一个占位），注入
+            # 后 rebuild 卡片区填入真实快捷键。
+            self._shortcuts_mgr = None
             self._build_ui()
             self._load_from_cfg()
             self.theme.currentIndexChanged.connect(self._on_theme_combo_changed)
@@ -227,7 +233,7 @@ def build_settings_widgets():
 
         def _build_ui(self):
             PageHeader = build_page_header()
-            SectionDivider = build_section_divider()
+            build_section_divider()
 
             outer = QVBoxLayout(self)
             outer.setContentsMargins(SPACE_XL, SPACE_LG, SPACE_XL, SPACE_LG)
@@ -443,10 +449,155 @@ def build_settings_widgets():
             cookie_form.addRow("启用下载历史数据库", self.database)
             body_layout.addWidget(self._cookie_card["widget"])
 
+            # 0.3.9：快捷键速查卡也放进滚动区（之前在 ``outer`` 里、scroll
+            # 之外的兄弟节点，导致它的自然高度永远要占满屏底）。
+            # 卡片**默认折叠**——只露标题 + 「N 个快捷键 · 展开」按钮，
+            # 不占额外高度。点开后才显示分组列表。
+            self._shortcut_card = self._build_card(
+                title="快捷键速查",
+                subtitle="点击主窗口后即可使用；本卡随快捷键增减自动刷新。",
+            )
+            # 在 body 上挂一个独立 QVBoxLayout 放占位和重建后的分组列表。
+            # _build_card 内部 body 是空 QWidget，没有自带 layout——加一层
+            # 让我们 rebuild 时可以 takeAt(0) 清空而不动标题区。
+            self._shortcut_body_layout = QVBoxLayout(self._shortcut_card["body"])
+            self._shortcut_body_layout.setContentsMargins(0, 0, 0, 0)
+            self._shortcut_body_layout.setSpacing(SPACE_SM)
+            self._shortcut_placeholder = StrongBodyLabel(
+                "尚未加载快捷键列表。", self._shortcut_card["body"],
+            )
+            self._shortcut_placeholder.setStyleSheet(muted_qss())
+            self._shortcut_body_layout.addWidget(self._shortcut_placeholder)
+
+            # 0.3.9：折叠状态 + 标题右侧的「展开/收起」按钮
+            self._shortcut_collapsed = True
+            self._shortcut_toggle_btn = PushButton("展开", self._shortcut_card["body"])
+            self._shortcut_toggle_btn.setFixedWidth(80)
+            self._shortcut_toggle_btn.clicked.connect(self._toggle_shortcut_card)
+            self._shortcut_card["title_row"].addWidget(self._shortcut_toggle_btn)
+            # 收起时整个 body 隐藏，节省卡片高度
+            self._shortcut_card["body"].hide()
+            self._shortcut_visible_count = 0   # 重建后更新（"N 个快捷键"）
+
+            body_layout.addWidget(self._shortcut_card["widget"])
+
             body_layout.addStretch(1)
 
             self._body_scroll.setWidget(body)
             outer.addWidget(self._body_scroll, 1)
+
+        # ---------------------------------------------------------- shortcuts
+
+        def set_shortcuts(self, manager) -> None:
+            """主窗口注入 :class:`ShortcutManager` 引用。
+
+            注入后立即 rebuild 快捷键速查卡片。如果调用前页面已经被用户
+            看过，也仍要 rebuild —— 不能假设用户在主窗口注册前看过。
+            """
+            self._shortcuts_mgr = manager
+            self._rebuild_shortcuts_card()
+
+        def _rebuild_shortcuts_card(self) -> None:
+            """把 self._shortcut_card 里的占位替换成分组卡片列表。
+
+            数据来源：``self._shortcuts_mgr.cheat_sheet()`` 返回
+            ``dict[category, list[ShortcutSpec]]``。每个 spec 显示
+            ``key + name + description`` 三栏。
+            """
+            if not hasattr(self, "_shortcut_card"):
+                # 还没 build_ui —— 等 build_ui 完成后 set_shortcuts 会被调
+                # 一次，彼时再走 rebuild 路径
+                return
+            layout = self._shortcut_body_layout
+            # 清掉旧 widget（占位 / 上一次 rebuild 留的）
+            while layout.count():
+                item = layout.takeAt(0)
+                w = item.widget()
+                if w is not None:
+                    w.setParent(None)
+                    w.deleteLater()
+
+            mgr = self._shortcuts_mgr
+            if mgr is None:
+                placeholder = StrongBodyLabel(
+                    "快捷键未注入；仅在主窗口中构造时会注入。",
+                    self._shortcut_card["body"],
+                )
+                placeholder.setStyleSheet(muted_qss())
+                layout.addWidget(placeholder)
+                self._shortcut_visible_count = 0
+                self._refresh_shortcut_toggle_btn()
+                return
+
+            cheat = mgr.cheat_sheet()
+            total = 0
+            for category in cheat:   # dict preserves insertion order
+                total += len(cheat[category])
+                # 一级标题：分类
+                cat_label = StrongBodyLabel(
+                    category, self._shortcut_card["body"],
+                )
+                cat_label.setStyleSheet(heading_qss(3))
+                layout.addWidget(cat_label)
+                # 二级表格：key + 名称 + 描述
+                rows_layout = QVBoxLayout()
+                rows_layout.setContentsMargins(0, 0, 0, 0)
+                rows_layout.setSpacing(SPACE_XS)
+                for spec in cheat[category]:
+                    row = QHBoxLayout()
+                    row.setContentsMargins(0, 0, 0, 0)
+                    row.setSpacing(SPACE_MD)
+                    key_label = QLabel(spec.key, self._shortcut_card["body"])
+                    # 用 progress_normal token 色 + 粗体——和普通色块遥相
+                    # 呼应（主题的「正在运行」色），让快捷键组合在视觉上
+                    # 第一眼就能识别。progress_normal 而不是 accent：
+                    # theme tokens dict 里没 "accent" 这个 key（UI_DESIGN
+                    # §3 表格里有，但 tokens 字典只放了实际用到的键）。
+                    key_label.setStyleSheet(
+                        f"color: {token('progress_normal')}; font-weight: 600;"
+                    )
+                    key_label.setFixedWidth(110)
+                    name_label = QLabel(spec.name, self._shortcut_card["body"])
+                    name_label.setStyleSheet(body_qss())
+                    name_label.setFixedWidth(140)
+                    desc_label = QLabel(spec.description, self._shortcut_card["body"])
+                    desc_label.setStyleSheet(muted_qss())
+                    desc_label.setWordWrap(True)
+                    row.addWidget(key_label, 0)
+                    row.addWidget(name_label, 0)
+                    row.addWidget(desc_label, 1)
+                    rows_layout.addLayout(row)
+                layout.addLayout(rows_layout)
+                # 分类之间留一道细分隔线
+                layout.addWidget(build_section_divider()(self._shortcut_card["body"]))
+
+            # 0.3.9：把总条数同步给折叠按钮——折叠态显示「N 个快捷键 · 展开」，
+            # 展开态显示「收起」。折叠时 body 仍按既定隐藏，否则它就白盖一层。
+            self._shortcut_visible_count = total
+            self._refresh_shortcut_toggle_btn()
+            if self._shortcut_collapsed:
+                self._shortcut_card["body"].hide()
+
+        def _refresh_shortcut_toggle_btn(self) -> None:
+            """根据 ``_shortcut_collapsed`` + ``_shortcut_visible_count`` 更新按钮文案。"""
+            btn = self._shortcut_toggle_btn
+            n = self._shortcut_visible_count
+            if self._shortcut_collapsed:
+                if n <= 0:
+                    btn.setText("展开")
+                else:
+                    btn.setText(f"{n} 个快捷键 · 展开")
+            else:
+                btn.setText("收起")
+
+        def _toggle_shortcut_card(self) -> None:
+            """切换快捷键速查卡的展开/折叠。"""
+            self._shortcut_collapsed = not self._shortcut_collapsed
+            if self._shortcut_collapsed:
+                self._shortcut_card["body"].hide()
+            else:
+                self._shortcut_card["body"].show()
+            self._refresh_shortcut_toggle_btn()
 
         def _on_sniff_toggle(self, on: bool) -> None:
             """嗅探卡折叠/展开。0.3.4 默认折叠，少一张卡挤在主页面里。"""
@@ -747,11 +898,11 @@ def build_settings_widgets():
             _spawn_account_refresh(self)
 
         def _toast(self, ok: bool, title: str, msg: str) -> None:
-            kind = InfoBar.success if ok else InfoBar.error
-            kind(
-                title=title, content=msg, parent=self,
-                position=InfoBarPosition.TOP, duration=4000,
-            )
+            """账号 / Cookie 反馈的薄包装——保留 ok 语义。0.3.7 改为调 helper。"""
+            if ok:
+                toast_success(self, title, msg)
+            else:
+                toast_error(self, title, msg)
 
         # ----------------------------------------------------- save
 
@@ -759,13 +910,7 @@ def build_settings_widgets():
             try:
                 import yaml
             except ImportError:
-                InfoBar.error(
-                    title="无法保存",
-                    content="缺少 pyyaml 依赖。",
-                    parent=self,
-                    position=InfoBarPosition.TOP,
-                    duration=3000,
-                )
+                toast_error(self, "无法保存", "缺少 pyyaml 依赖。")
                 return
 
             # 必须用 to_dict() 而不是 asdict()：后者保留 Path 对象，
@@ -818,13 +963,7 @@ def build_settings_widgets():
                 cfg_path.write_text(text, encoding="utf-8")
             except Exception as exc:   # noqa: BLE001
                 logger.exception("settings save failed")
-                InfoBar.error(
-                    title="保存失败",
-                    content=f"{exc}",
-                    parent=self,
-                    position=InfoBarPosition.TOP,
-                    duration=5000,
-                )
+                toast_error(self, "保存失败", f"{exc}")
                 return
 
             # 嗅探配置要立即在本进程生效，否则用户改完时长还得重启才看得到
@@ -844,13 +983,10 @@ def build_settings_widgets():
                 self._cfg.sniff_enabled, self._cfg.sniff_duration_sec
             )
 
-            InfoBar.success(
-                title="设置已保存",
-                content=f"已写入 {cfg_path}。大部分设置下次下载时即生效；"
-                        f"如遇异常请重启应用。",
-                parent=self,
-                position=InfoBarPosition.TOP,
-                duration=4000,
+            toast_success(
+                self, "设置已保存",
+                f"已写入 {cfg_path}。大部分设置下次下载时即生效；"
+                f"如遇异常请重启应用。",
             )
             logger.info("settings saved to %s", cfg_path)
 
@@ -866,12 +1002,6 @@ def build_settings_widgets():
                     subprocess.Popen(["xdg-open", str(cookies_dir)])
             except Exception as exc:   # noqa: BLE001
                 logger.warning("open cookies dir failed: %s", exc)
-                InfoBar.error(
-                    title="打开失败",
-                    content=f"请手动前往 {cookies_dir}。",
-                    parent=self,
-                    position=InfoBarPosition.TOP,
-                    duration=3000,
-                )
+                toast_error(self, "打开失败", f"请手动前往 {cookies_dir}。")
 
     return SettingsPage, SettingsPage

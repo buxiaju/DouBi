@@ -47,20 +47,41 @@ def build_hot_widgets():
     from PySide6.QtCore import Qt, QUrl
     from PySide6.QtGui import QDesktopServices
     from PySide6.QtWidgets import (
-        QApplication, QMenu, QMessageBox, QWidget, QVBoxLayout,
-        QHBoxLayout, QStackedWidget,
+        QApplication,
+        QHBoxLayout,
+        QMenu,
+        QMessageBox,
+        QStackedWidget,
+        QVBoxLayout,
+        QWidget,
     )
     from qfluentwidgets import (
-        PushButton, ComboBox, SegmentedWidget, TableWidget,
-        InfoBar, InfoBarPosition,
+        ComboBox,
+        PushButton,
+        SegmentedWidget,
+        TableWidget,
     )
 
     from ...core.config import load_config
+    from ..feedback import (
+        toast_error,
+        toast_info,
+        toast_success,
+        toast_warning,
+    )
     from ..theme import (
-        SPACE_LG, SPACE_MD, SPACE_XL,
+        SPACE_LG,
+        SPACE_MD,
+        SPACE_XL,
         subscribe_theme,
     )
-    from ..widgets import build_empty_state, build_page_header, build_stat_chip
+    from ..widgets import (
+        build_empty_state,
+        build_error_state,
+        build_loading_state,
+        build_page_header,
+        build_stat_chip,
+    )
 
     class HotPage(QWidget):
         def __init__(self, parent: Optional[QWidget] = None):
@@ -84,6 +105,8 @@ def build_hot_widgets():
         def _build_ui(self):
             PageHeader = build_page_header()
             EmptyState = build_empty_state()
+            ErrorState = build_error_state()
+            LoadingState = build_loading_state()
             StatChip = build_stat_chip()
 
             outer = QVBoxLayout(self)
@@ -150,6 +173,15 @@ def build_hot_widgets():
                 "点「刷新」拉取榜单数据。",
             )
             self._stack.addWidget(self._empty_state)
+
+            # 0.3.7：失败占位（区别于「尚未加载」）+ 加载占位。
+            self._error_state = ErrorState(self)
+            self._stack.addWidget(self._error_state)
+
+            self._loading_state = LoadingState(self)
+            self._loading_state.set_message("正在拉取榜单…")
+            self._stack.addWidget(self._loading_state)
+
             outer.addWidget(self._stack, 1)
 
             self._stack.setCurrentWidget(self._empty_state)
@@ -174,17 +206,32 @@ def build_hot_widgets():
         # ----------------------------------------------------------
 
         def _on_refresh(self) -> None:
+            # 0.3.7：刷新中切 LoadingState，禁用刷新按钮；失败切 ErrorState
+            # 带「重试」按钮。
+            self._loading_state.set_message("正在拉取榜单…")
+            self._loading_state.start()
+            self._stack.setCurrentWidget(self._loading_state)
+            self.refresh_btn.setEnabled(False)
             try:
                 self._run_async(self._run_hot())
             except Exception as exc:
                 logger.exception("hot list failed: %s", exc)
-                InfoBar.error(
-                    title="热榜失败",
-                    content=str(exc),
-                    parent=self,
-                    position=InfoBarPosition.TOP,
-                    duration=5000,
-                )
+                self._show_error_state(str(exc))
+
+        def _show_error_state(self, message: str) -> None:
+            """Show error placeholder with retry button.
+
+            Symmetric with search page — keep the loading and error states'
+            lifecycle in one helper each.
+            """
+            self._loading_state.stop()
+            self.refresh_btn.setEnabled(True)
+            self._error_state.set_text(
+                "热榜失败",
+                f"{message or '未知错误'}\n请检查网络后重试，或换个榜 / 平台。",
+            )
+            self._error_state.set_action("重试", self._on_refresh)
+            self._stack.setCurrentWidget(self._error_state)
 
         async def _run_hot(self) -> None:
             from doubi.cli.main import collect_hot_async
@@ -212,8 +259,13 @@ def build_hot_widgets():
                     proxy=self._cfg.proxy,
                     timeout=15.0,
                 )
-            except Exception:
-                raise
+            except Exception as exc:
+                self._show_error_state(str(exc))
+                return
+
+            # 0.3.7：成功路径恢复按钮 + 停 spinner。
+            self._loading_state.stop()
+            self.refresh_btn.setEnabled(True)
 
             self._rows = list(rows or [])
             self._stat_hits.set_value(len(self._rows))
@@ -339,7 +391,7 @@ def build_hot_widgets():
                 clipboard = QApplication.clipboard()
                 if clipboard is not None:
                     clipboard.setText(url)
-                    self._toast("已复制链接", url)
+                    toast_success(self, "已复制链接", url)
             elif chosen is browser:
                 QDesktopServices.openUrl(QUrl(url))
             elif chosen is download:
@@ -350,10 +402,7 @@ def build_hot_widgets():
         def _enqueue_row(self, record: dict, url: str) -> None:
             """把一行热榜内容解析成 MediaItem 并入队。"""
             if self._task_manager is None:
-                self._toast(
-                    "未连接任务管理器", "请在主窗口中打开此页面。",
-                    kind="error",
-                )
+                toast_error(self, "未连接任务管理器", "请在主窗口中打开此页面。")
                 return
 
             async def _do():
@@ -362,17 +411,16 @@ def build_hot_widgets():
                 item, children = await build_media_item(url)
                 targets = children or ([item] if item is not None else [])
                 if not targets:
-                    self._toast(
-                        "无法下载",
+                    toast_error(
+                        self, "无法下载",
                         f"没能解析出行内容：{row_label(record) or url}",
-                        kind="error",
                     )
                     return
                 opts = self._build_options()
                 for target in targets:
                     self._task_manager.add(target, opts)
-                self._toast(
-                    "已加入下载队列",
+                toast_success(
+                    self, "已加入下载队列",
                     f"{row_label(record) or url}（{len(targets)} 项）",
                 )
 
@@ -389,16 +437,13 @@ def build_hot_widgets():
             顺序上必须**先搜再问**——条数只有搜完才知道，预先估算会猜错。
             """
             if self._task_manager is None:
-                self._toast(
-                    "未连接任务管理器", "请在主窗口中打开此页面。",
-                    kind="error",
-                )
+                toast_error(self, "未连接任务管理器", "请在主窗口中打开此页面。")
                 return
             keyword = str(
                 record.get("word") or record.get("sentence") or ""
             ).strip()
             if not keyword:
-                self._toast("词条为空", "这一行没有可搜索的关键词。", kind="warning")
+                toast_warning(self, "词条为空", "这一行没有可搜索的关键词。")
                 return
 
             async def _do():
@@ -423,7 +468,7 @@ def build_hot_widgets():
                     )
                 except Exception as exc:  # noqa: BLE001 - reported to user
                     logger.exception("hot word search failed: %s", exc)
-                    self._toast("搜索失败", f"{keyword}：{exc}", kind="error")
+                    toast_error(self, "搜索失败", f"{keyword}：{exc}")
                     return
 
                 if not hits:
@@ -437,8 +482,8 @@ def build_hot_widgets():
                         if platform == "douyin"
                         else "换个词条或稍后重试。"
                     )
-                    self._toast(
-                        "没有搜到视频", f"「{keyword}」：{hint}", kind="warning",
+                    toast_warning(
+                        self, "没有搜到视频", f"「{keyword}」：{hint}",
                     )
                     return
 
@@ -456,10 +501,9 @@ def build_hot_widgets():
                         continue
                     pending.append(item)
                 if not pending:
-                    self._toast(
-                        "没有可入队的视频",
+                    toast_warning(
+                        self, "没有可入队的视频",
                         f"「{keyword}」命中 {len(hits)} 条，但都没能解析出媒体项。",
-                        kind="warning",
                     )
                     return
 
@@ -467,17 +511,16 @@ def build_hot_widgets():
                     kind="hot_word", label=keyword, count=len(pending),
                 )
                 if not self._confirm(plan):
-                    self._toast(
-                        "已取消",
+                    toast_info(
+                        self, "已取消",
                         f"「{keyword}」的 {len(pending)} 个视频未加入队列。",
-                        kind="info",
                     )
                     return
 
                 for item in pending:
                     self._task_manager.add(item, opts)
-                self._toast(
-                    "已加入下载队列",
+                toast_success(
+                    self, "已加入下载队列",
                     f"「{keyword}」共 {len(pending)} 个视频。",
                 )
 
@@ -535,18 +578,6 @@ def build_hot_widgets():
                 proxy=cfg.proxy,
                 rate_limit=cfg.rate_limit,
                 cookies_file=cfg.cookies_file,
-            )
-
-        def _toast(self, title: str, content: str, kind: str = "success") -> None:
-            fn = {
-                "success": InfoBar.success,
-                "warning": InfoBar.warning,
-                "error": InfoBar.error,
-                "info": InfoBar.info,
-            }[kind]
-            fn(
-                title=title, content=content, parent=self,
-                position=InfoBarPosition.TOP_RIGHT, duration=4000,
             )
 
     return HotPage, None

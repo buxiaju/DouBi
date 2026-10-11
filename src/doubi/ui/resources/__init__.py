@@ -147,17 +147,15 @@ def _to_hls(value: str) -> Optional[tuple[float, float, float]]:
     if rgb is None:
         return None
     r, g, b = (c / 255.0 for c in rgb)
-    h, l, s = colorsys.rgb_to_hls(r, g, b)
-    return h * 360.0, l, s
+    hue, lightness, saturation = colorsys.rgb_to_hls(r, g, b)
+    return hue * 360.0, lightness, saturation
 
 
 def _from_hls(hue_deg: float, lightness: float, saturation: float) -> str:
     r, g, b = colorsys.hls_to_rgb(
         (hue_deg % 360.0) / 360.0, _clamp(lightness), _clamp(saturation)
     )
-    return "#{:02X}{:02X}{:02X}".format(
-        round(r * 255), round(g * 255), round(b * 255)
-    )
+    return f"#{round(r * 255):02X}{round(g * 255):02X}{round(b * 255):02X}"
 
 
 def icon_palette(accent: Optional[str] = None) -> dict[str, str]:

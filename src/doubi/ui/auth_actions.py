@@ -12,12 +12,12 @@ without a ``QApplication``.
 
 from __future__ import annotations
 
-import json
 import logging
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Optional
 
 # PySide6 imports are kept lazy (inside each wrapper) to keep this
 # module importable in headless smoke tests, but M6.28 needs three names
@@ -234,9 +234,12 @@ def bilibili_qr_login_image(
     **Threading contract (M6.28)**: 跟原来一致,callback 通过
     ``QApplication.postEvent`` 切回主线程,GUI 端零改动。
     """
-    from ..platforms.bilibili import auth as bili_auth  # noqa: F811 — also module-level for testability
     from PySide6.QtCore import QEvent, QObject
     from PySide6.QtWidgets import QApplication
+
+    from ..platforms.bilibili import (
+        auth as bili_auth,  # noqa: F811 — also module-level for testability
+    )
 
     target = cookie_path or bili_auth.default_cookie_path()
     box: dict = {}

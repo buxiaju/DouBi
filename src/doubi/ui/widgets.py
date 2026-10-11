@@ -14,7 +14,6 @@ chip）抽到一个模块，让所有页面有同一种「讲法」。
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 logger = logging.getLogger("doubi.ui.widgets")
 
@@ -35,15 +34,22 @@ def build_page_header(parent=None):
 
     不用 :class:`QStackedWidget` 切两套 header，直接控制 QSS 与子组件可见性。
     """
-    from PySide6.QtCore import Qt
     from PySide6.QtWidgets import (
-        QWidget, QHBoxLayout, QVBoxLayout, QLabel,
+        QHBoxLayout,
+        QLabel,
+        QVBoxLayout,
+        QWidget,
     )
     from qfluentwidgets import StrongBodyLabel
 
     from .theme import (
-        SPACE_SM, SPACE_LG, TYPE_H1, TYPE_H2, TYPE_CAPTION,
-        heading_qss, body_qss, muted_qss, current_theme, token, subscribe_theme,
+        SPACE_LG,
+        SPACE_SM,
+        TYPE_H1,
+        heading_qss,
+        muted_qss,
+        subscribe_theme,
+        token,
     )
 
     class PageHeader(QWidget):
@@ -141,11 +147,16 @@ def build_stat_chip(parent=None):
     配色与状态胶囊一致：背景用 status_xxx_bg，数字用 status_xxx_fg。
     """
     from PySide6.QtCore import Qt
-    from PySide6.QtWidgets import QWidget, QHBoxLayout, QLabel
+    from PySide6.QtWidgets import QHBoxLayout, QLabel, QWidget
 
     from .theme import (
-        SPACE_SM, SPACE_MD, TYPE_H2, TYPE_CAPTION,
-        token, current_theme, subscribe_theme, RADIUS_PILL,
+        RADIUS_PILL,
+        SPACE_MD,
+        SPACE_SM,
+        TYPE_CAPTION,
+        TYPE_H2,
+        subscribe_theme,
+        token,
     )
 
     class StatChip(QWidget):
@@ -225,12 +236,22 @@ def build_empty_state(parent=None):
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QFont
     from PySide6.QtWidgets import (
-        QWidget, QVBoxLayout, QLabel, QSizePolicy,
+        QHBoxLayout,
+        QLabel,
+        QSizePolicy,
+        QVBoxLayout,
+        QWidget,
     )
+    from qfluentwidgets import PushButton
 
     from .theme import (
-        SPACE_LG, SPACE_MD, FONT_FAMILY_PRIMARY, TYPE_BODY, TYPE_CAPTION,
-        token, card_qss, current_theme, subscribe_theme,
+        FONT_FAMILY_PRIMARY,
+        SPACE_LG,
+        SPACE_MD,
+        TYPE_BODY,
+        TYPE_CAPTION,
+        subscribe_theme,
+        token,
     )
 
     class EmptyState(QWidget):
@@ -239,6 +260,7 @@ def build_empty_state(parent=None):
             self.setObjectName("emptyState")
             self._title_text = ""
             self._subtitle_text = ""
+            self._action_cb = None
             layout = QVBoxLayout(self)
             layout.setContentsMargins(SPACE_LG * 2, SPACE_LG * 3, SPACE_LG * 2, SPACE_LG * 3)
             # SPACE_LG = 16px — 给标题/副标题之间留出明确空气。
@@ -271,8 +293,21 @@ def build_empty_state(parent=None):
             self._subtitle_font.setPixelSize(TYPE_CAPTION)
             self._subtitle.setFont(self._subtitle_font)
 
+            # 0.3.7：可选 CTA 按钮（解析页用「试试示例链接」/ 其他页可复用）。
+            # 默认隐藏，set_action() 启用。
+            self._action = PushButton("", self)
+            self._action.setVisible(False)
+            self._action.clicked.connect(self._on_action_clicked)
+            self._action_row = QHBoxLayout()
+            self._action_row.setContentsMargins(0, 0, 0, 0)
+            self._action_row.setSpacing(SPACE_MD)
+            self._action_row.addStretch(1)
+            self._action_row.addWidget(self._action)
+            self._action_row.addStretch(1)
+
             layout.addWidget(self._title)
             layout.addWidget(self._subtitle)
+            layout.addLayout(self._action_row)
 
             # 防止父布局（QScrollArea + addStretch）把整张卡片压成一条缝
             self.setMinimumHeight(168)
@@ -286,6 +321,26 @@ def build_empty_state(parent=None):
             self._title.setText(title)
             self._subtitle.setText(subtitle)
             self._subtitle.setVisible(bool(subtitle))
+
+        def set_action(self, label: str, callback) -> None:
+            """Add an optional CTA button below the subtitle.
+
+            Pass ``label=""`` (default) to hide. Used by parse page's
+            "try a sample link" shortcut, and reusable by any page that
+            wants a discoverable next action on its empty state.
+            """
+            if not label or callback is None:
+                self._action.setVisible(False)
+                self._action_cb = None
+                return
+            self._action.setText(label)
+            self._action.setVisible(True)
+            self._action_cb = callback
+
+        def _on_action_clicked(self) -> None:
+            cb = self._action_cb
+            if cb is not None:
+                cb()
 
         def refresh_text(self) -> None:
             """主题切换时只重画样式，不动文案——但调用方要重读也可以走本方法。"""
@@ -331,8 +386,13 @@ def build_platform_badge(parent=None):
     from PySide6.QtWidgets import QLabel
 
     from .theme import (
-        RADIUS_PILL, SPACE_SM, SPACE_MD, TYPE_TINY,
-        token, current_theme, subscribe_theme, _hex_to_rgba,
+        RADIUS_PILL,
+        SPACE_MD,
+        TYPE_TINY,
+        _hex_to_rgba,
+        current_theme,
+        subscribe_theme,
+        token,
     )
 
     class PlatformBadge(QLabel):
@@ -411,3 +471,275 @@ def build_section_divider(parent=None):
             )
 
     return SectionDivider
+
+
+# ---------------------------------------------------------------------------
+# LoadingState — 数据加载中的占位（0.3.7 新增）
+# ---------------------------------------------------------------------------
+#
+# 与 EmptyState 共享同一套布局约定（QVBoxLayout 居中、字号层级、上下
+# 留白），但中间多一个 ProgressRing 在转。文案通常带「正在…」/「…稍候」。
+#
+# 用法：和 EmptyState 一样塞进 QStackedWidget——0.3.7 把 6 个页面的
+# 「正在拉数据」过渡态都改成这个：
+#
+#     self._stack.addWidget(self._loading)
+#     self._stack.addWidget(self._empty_state)
+#     self._stack.addWidget(self.table)
+#     # _on_refresh()
+#     self._loading.set_message("正在搜索…")
+#     self._stack.setCurrentWidget(self._loading)
+#     …
+#     self._stack.setCurrentWidget(self.table)   # 或 self._empty_state
+#
+# 内存 + CPU 占用
+# --------------
+# ProgressRing 构造出来就一直在转（qfluentwidgets 没暴露 ``start()``），
+# 所以一旦不再可见要调 ``stop()``，否则隐藏在 stack 里的 spinner 还在
+# 走 60 FPS 定时器，白白烧 CPU。Stack 切换是本组件唯一的退出路径，
+# 调用方在 ``setCurrentWidget(非 self)`` 之后调一次 ``stop()`` 即可。
+#
+# 颜色
+# ----
+# ``ProgressRing`` 默认色跟 qfluentwidgets 主题走（亮 / 暗两套），**不要**
+# 主动 ``setCustomBarColor`` —— 否则切主题时不变，会锁死在第一版调色上。
+# 文字颜色用 ``text_primary``，主题切换通过 ``subscribe_theme`` 自动重刷。
+
+
+def build_loading_state(parent=None):
+    """``QStackedWidget`` 里使用的 loading 占位卡片。
+
+    返回的 component 接口：
+    set_message(text)  改文案
+    start() / stop()  起停 spinner（不显示时停掉省 CPU）
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QFont as _QFont
+    from PySide6.QtWidgets import (
+        QLabel,
+        QSizePolicy,
+        QVBoxLayout,
+        QWidget,
+    )
+    from qfluentwidgets import ProgressRing
+
+    from .theme import (
+        FONT_FAMILY_PRIMARY,
+        SPACE_LG,
+        TYPE_BODY,
+        subscribe_theme,
+        token,
+    )
+
+    class LoadingState(QWidget):
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            self.setObjectName("loadingState")
+            self._message_text = ""
+
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(
+                SPACE_LG * 2, SPACE_LG * 3, SPACE_LG * 2, SPACE_LG * 3,
+            )
+            layout.setSpacing(SPACE_LG)
+            layout.setAlignment(Qt.AlignCenter)
+
+            # ProgressRing 默认色跟随 qfluentthemes 主题走；不要
+            # setCustomBarColor，否则切主题时不会跟随主题重画。
+            self._ring = ProgressRing(self)
+            self._ring.setFixedSize(40, 40)
+            self._ring.setStrokeWidth(4)
+            self._ring.setTextVisible(False)
+            # qfluentwidgets 的 ProgressRing 没有 ``start()`` —— 构造出来就转。
+            # 但 ``pause`` / ``resume`` 都有，所以这两个方法名对应
+            # 用户语义上的「停/启」。
+
+            self._message = QLabel(self)
+            self._message.setAlignment(Qt.AlignCenter)
+            self._message.setWordWrap(True)
+            # 同 EmptyState：Expanding 才能让 label 在父容器宽度内一行装下，
+            # 否则按"刚够装下文字"的 sizeHint 来一行一个字。
+            self._message.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            msg_font = _QFont(FONT_FAMILY_PRIMARY)
+            msg_font.setPixelSize(TYPE_BODY)
+            self._message.setFont(msg_font)
+
+            layout.addWidget(self._ring, 0, Qt.AlignHCenter)
+            layout.addWidget(self._message)
+
+            self.setMinimumHeight(168)
+            self.set_message("正在加载…")
+            self._refresh()
+            subscribe_theme(self, self._refresh)
+
+        def set_message(self, text: str) -> None:
+            self._message_text = text
+            self._message.setText(text)
+            self._message.setVisible(bool(text))
+
+        def start(self) -> None:
+            """Resume animation. 构造完即默认在跑，此处只为 API 对称。"""
+            self._ring.resume()
+
+        def stop(self) -> None:
+            """Pause animation. 从 stack 切走后调一次省 CPU。"""
+            self._ring.pause()
+
+        def _refresh(self) -> None:
+            self.setStyleSheet("background: transparent; border: none;")
+            self._message.setStyleSheet(
+                f"color: {token('text_primary')}; "
+                f"line-height: 1.6; padding: 6px 8px; "
+                f"background: transparent; border: none;"
+            )
+
+    return LoadingState
+
+
+# ---------------------------------------------------------------------------
+# ErrorState — 区别于「空 / 加载中」的错误占位（0.3.7 新增）
+# ---------------------------------------------------------------------------
+#
+# 和 EmptyState 同布局：标题 + 副标题。但副标题用 ``status_failed_fg``
+# 颜色 + 「重试」按钮，提示用户「这不是没数据，是出错了」——避免空状态
+# 文本被解读成「搜索词没结果」。
+#
+# 设计要点
+# --------
+# * 标题颜色保持 ``text_primary``（不染红）——一行大字全染红看起来像警报，
+#   其实只是「没搜到」级别的失败。
+# * 副标题颜色用 ``status_failed_fg``——温和地标出「这是错误」但不抢眼。
+# * 「重试」按钮是 ``set_action`` 的副产物，需要外部传 callable 进来。
+# * 继承 EmptyState 的布局是因为它已经经过 0.3.5 一轮关于留白/字号/
+#   字重的打磨——重写一遍只会重新踩一遍同样的坑。
+#
+# 用法：
+#     self._error = ErrorState(self)
+#     self._error.set_text("加载失败", "网络中断，请稍后重试。")
+#     self._error.set_action("重试", self._refresh)
+#     self._stack.addWidget(self._error)
+#     # 失败时
+#     self._stack.setCurrentWidget(self._error)
+
+
+def build_error_state(parent=None):
+    """失败占位卡片（区别于 EmptyState 的「空」。）
+
+    与 EmptyState 的差异：
+    * 副标题用 ``status_failed_fg`` 染色。
+    * 多一个 ``set_action(label, callback)`` 入口，加一个按钮（默认「重试」）。
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QFont as _QFont
+    from PySide6.QtWidgets import (
+        QHBoxLayout,
+        QLabel,
+        QSizePolicy,
+        QVBoxLayout,
+        QWidget,
+    )
+    from qfluentwidgets import PushButton
+
+    from .theme import (
+        FONT_FAMILY_PRIMARY,
+        SPACE_LG,
+        SPACE_MD,
+        TYPE_BODY,
+        TYPE_CAPTION,
+        subscribe_theme,
+        token,
+    )
+
+    class ErrorState(QWidget):
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            self.setObjectName("errorState")
+            self._title_text = ""
+            self._subtitle_text = ""
+
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(
+                SPACE_LG * 2, SPACE_LG * 3, SPACE_LG * 2, SPACE_LG * 3,
+            )
+            layout.setSpacing(SPACE_LG)
+            layout.setAlignment(Qt.AlignCenter)
+
+            self._title = QLabel(self)
+            self._title.setAlignment(Qt.AlignCenter)
+            self._title.setWordWrap(True)
+            self._title.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            title_font = _QFont(FONT_FAMILY_PRIMARY)
+            title_font.setPixelSize(TYPE_BODY + 1)
+            title_font.setWeight(_QFont.Medium)
+            self._title.setFont(title_font)
+
+            self._subtitle = QLabel(self)
+            self._subtitle.setAlignment(Qt.AlignCenter)
+            self._subtitle.setWordWrap(True)
+            self._subtitle.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            sub_font = _QFont(FONT_FAMILY_PRIMARY)
+            sub_font.setPixelSize(TYPE_CAPTION)
+            self._subtitle.setFont(sub_font)
+
+            # 错误专属的「重试」按钮槽
+            self._action_row = QHBoxLayout()
+            self._action_row.setContentsMargins(0, 0, 0, 0)
+            self._action_row.setSpacing(SPACE_MD)
+            self._action = PushButton("重试", self)
+            self._action.setVisible(False)
+            self._action.clicked.connect(self._on_action_clicked)
+            self._action_row.addStretch(1)
+            self._action_row.addWidget(self._action)
+            self._action_row.addStretch(1)
+
+            layout.addWidget(self._title)
+            layout.addWidget(self._subtitle)
+            layout.addLayout(self._action_row)
+
+            self.setMinimumHeight(168)
+            self._action_cb = None
+            self._refresh()
+            subscribe_theme(self, self._refresh)
+
+        def set_text(self, title: str, subtitle: str = "") -> None:
+            self._title_text = title
+            self._subtitle_text = subtitle
+            self._title.setText(title)
+            self._subtitle.setText(subtitle)
+            self._subtitle.setVisible(bool(subtitle))
+
+        def set_action(self, label: str, callback) -> None:
+            """Configure the retry button.
+
+            Pass ``label=""`` to hide the action entirely. Callback receives
+            no arguments; it's typically ``self._refresh`` or similar.
+            """
+            if not label:
+                self._action.setVisible(False)
+                self._action_cb = None
+                return
+            self._action.setText(label)
+            self._action.setVisible(True)
+            self._action_cb = callback
+
+        def _on_action_clicked(self) -> None:
+            cb = self._action_cb
+            if cb is not None:
+                cb()
+
+        def _refresh(self) -> None:
+            self.setStyleSheet("background: transparent; border: none;")
+            self._title.setStyleSheet(
+                f"color: {token('text_primary')}; "
+                f"line-height: 1.6; padding: 10px 8px; "
+                f"background: transparent; border: none;"
+            )
+            # 副标题染色为 status_failed —— 用 fg 不染红底，温和地告知失败
+            # 但不抢标题的注意力。
+            self._subtitle.setStyleSheet(
+                f"color: {token('status_failed_fg', token('text_muted'))}; "
+                f"line-height: 1.6; padding: 6px 8px; "
+                f"background: transparent; border: none;"
+            )
+
+    return ErrorState

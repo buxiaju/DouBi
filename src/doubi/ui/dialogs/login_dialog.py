@@ -38,7 +38,6 @@ Both dialogs are :class:`QDialog` instances with a "关闭" button. The
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from pathlib import Path
 from typing import Optional
@@ -57,7 +56,7 @@ logger = logging.getLogger("doubi.ui.dialogs.login")
 # 那会破坏「无 Qt 环境也能 import 本模块」这一前提。
 # 注解本身是字符串（``from __future__ import annotations``），永不求值，
 # 只有显式 ``typing.get_type_hints()`` 才会碰到它，而本项目的调用方不做这件事。
-def _build_brand_hero(platform: str, accent: str) -> "QWidget":
+def _build_brand_hero(platform: str, accent: str) -> QWidget:  # noqa: F821 — string annotation
     """登录对话框的顶部品牌区。
 
     不是直接用 main_window 的 :func:`header_qss`——主窗口的渐变配色
@@ -66,14 +65,21 @@ def _build_brand_hero(platform: str, accent: str) -> "QWidget":
     try:
         from PySide6.QtCore import Qt
         from PySide6.QtGui import QFont
-        from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QLabel
+        from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
     except ImportError:  # pragma: no cover
         return None
 
     from ..resources import APP_NAME, load_app_icon
     from ..theme import (
-        FONT_FAMILIES, SPACE_LG, SPACE_MD, RADIUS_CARD, TYPE_H1, TYPE_CAPTION,
-        _hex_to_rgba, current_theme, token,
+        FONT_FAMILIES,
+        RADIUS_CARD,
+        SPACE_LG,
+        SPACE_MD,
+        TYPE_CAPTION,
+        TYPE_H1,
+        _hex_to_rgba,
+        current_theme,
+        token,
     )
 
     pack = current_theme()
@@ -163,10 +169,16 @@ def _build_brand_hero(platform: str, accent: str) -> "QWidget":
 
 def build_bilibili_login_dialog():
     from PySide6.QtCore import Qt, QTimer
-    from PySide6.QtGui import QFont, QImage, QPixmap
+    from PySide6.QtGui import QImage, QPixmap
     from PySide6.QtWidgets import (
-        QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-        QFileDialog, QFrame, QSizePolicy,
+        QDialog,
+        QFileDialog,
+        QFrame,
+        QHBoxLayout,
+        QLabel,
+        QPushButton,
+        QSizePolicy,
+        QVBoxLayout,
     )
 
     from ...ui.auth_actions import (
@@ -250,7 +262,7 @@ def build_bilibili_login_dialog():
             self._build_import_tab()
 
         def _build_qr_tab(self):
-            from PySide6.QtWidgets import QVBoxLayout, QLabel, QPushButton, QHBoxLayout, QProgressBar
+            from PySide6.QtWidgets import QHBoxLayout, QProgressBar, QPushButton, QVBoxLayout
 
             page = QVBoxLayout(self.tab_qr)
             page.setContentsMargins(4, 8, 4, 4)
@@ -307,7 +319,7 @@ def build_bilibili_login_dialog():
             page.addLayout(row)
 
         def _build_import_tab(self):
-            from PySide6.QtWidgets import QVBoxLayout, QLabel, QPushButton, QHBoxLayout, QFileDialog
+            from PySide6.QtWidgets import QHBoxLayout, QPushButton, QVBoxLayout
 
             page = QVBoxLayout(self.tab_import)
             page.setContentsMargins(4, 8, 4, 4)
@@ -511,15 +523,20 @@ def build_douyin_browser_dialog():
        不在内部解决这些——我们把"扫码"这一步替到我们的窗口里,但
        登录态仍然由抖音自己的 web 端处理。
     """
-    from PySide6.QtCore import Qt, QEvent, QTimer, QSettings
+    from PySide6.QtCore import QEvent, QSettings, Qt, QTimer
     from PySide6.QtGui import QImage, QPixmap
     from PySide6.QtWidgets import (
-        QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-        QProgressBar, QCheckBox,
+        QCheckBox,
+        QDialog,
+        QHBoxLayout,
+        QLabel,
+        QProgressBar,
+        QPushButton,
+        QVBoxLayout,
     )
 
-    from ...ui.auth_actions import douyin_login_via_browser
     from ...platforms.douyin import auth as dy_auth
+    from ...ui.auth_actions import douyin_login_via_browser
     from ..i18n import tr
     from ..resources import load_app_icon
     from ..theme import muted_qss, token
@@ -728,7 +745,6 @@ def build_douyin_browser_dialog():
             fails, the user can retry from inside the SMS dialog
             without re-doing the QR scan.
             """
-            from .sms_verify_dialog import SmsVerifyDialog
 
             self._set_status(tr("login.dy.need_sms_verify"))
             self._sms_btn = QPushButton(

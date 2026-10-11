@@ -47,24 +47,75 @@ DEFAULT_CHANNEL: dict[str, str] = {
 }
 
 
+def _platform_has_cookie(platform: str) -> bool:
+    """True if the user has a non-empty default-path cookie file for
+    ``platform`` (0.3.9).
+
+    The previous empty-state check used ``cfg.cookies_file``, which is
+    ``None`` for users that logged in via the GUI settings page (those
+    cookies land at ``~/.doubi/cookies/<platform>.txt`` without ever
+    editing ``config.yml``). That asymmetry made every logged-in GUI
+    user see 「未登录」 — the symptom reported when the user is clearly
+    logged in on the settings page but the search page insists
+    otherwise.
+
+    The default-path check matches what
+    :class:`DouyinWebAPI` / :class:`BilibiliWebAPI` already do internally
+    when ``cookies_file=None`` is passed, so this function and the
+    actual call site stay in sync.
+    """
+    if platform == "douyin":
+        from doubi.platforms.douyin.auth import has_cookie_file
+    elif platform == "bilibili":
+        from doubi.platforms.bilibili.auth import has_cookie_file
+    else:
+        return False
+    try:
+        return bool(has_cookie_file())
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def build_search_widgets():
     from PySide6.QtCore import Qt, QUrl
     from PySide6.QtGui import QDesktopServices
     from PySide6.QtWidgets import (
-        QApplication, QMenu, QMessageBox, QWidget, QVBoxLayout,
-        QHBoxLayout, QStackedWidget,
+        QApplication,
+        QHBoxLayout,
+        QMenu,
+        QMessageBox,
+        QStackedWidget,
+        QVBoxLayout,
+        QWidget,
     )
     from qfluentwidgets import (
-        PushButton, LineEdit, ComboBox, SegmentedWidget,
-        TableWidget, InfoBar, InfoBarPosition,
+        ComboBox,
+        LineEdit,
+        PushButton,
+        SegmentedWidget,
+        TableWidget,
     )
 
     from ...core.config import load_config
+    from ..feedback import (
+        toast_error,
+        toast_info,
+        toast_success,
+        toast_warning,
+    )
     from ..theme import (
-        SPACE_LG, SPACE_MD, SPACE_XL,
+        SPACE_LG,
+        SPACE_MD,
+        SPACE_XL,
         subscribe_theme,
     )
-    from ..widgets import build_empty_state, build_page_header, build_stat_chip
+    from ..widgets import (
+        build_empty_state,
+        build_error_state,
+        build_loading_state,
+        build_page_header,
+        build_stat_chip,
+    )
 
     class SearchPage(QWidget):
         def __init__(self, parent: Optional[QWidget] = None):
@@ -89,6 +140,8 @@ def build_search_widgets():
         def _build_ui(self):
             PageHeader = build_page_header()
             EmptyState = build_empty_state()
+            ErrorState = build_error_state()
+            LoadingState = build_loading_state()
             StatChip = build_stat_chip()
 
             outer = QVBoxLayout(self)
@@ -158,6 +211,17 @@ def build_search_widgets():
                 "在上方输入关键词并回车，或点「搜索」。",
             )
             self._stack.addWidget(self._empty_state)
+
+            # 0.3.7：错误占位——区别于「空」和「加载中」。
+            # 用 ErrorState 时配一个「重试」按钮，回调当前页面的
+            # 重新搜索流程（拿回 keyword 重跑 _on_search）。
+            self._error_state = ErrorState(self)
+            self._stack.addWidget(self._error_state)
+
+            self._loading_state = LoadingState(self)
+            self._loading_state.set_message("正在搜索…")
+            self._stack.addWidget(self._loading_state)
+
             outer.addWidget(self._stack, 1)
 
             self._stack.setCurrentWidget(self._empty_state)
@@ -185,13 +249,7 @@ def build_search_widgets():
         def _on_search(self) -> None:
             keyword = self._keyword.text().strip()
             if not keyword:
-                InfoBar.warning(
-                    title="需要关键词",
-                    content="请先输入搜索关键词。",
-                    parent=self,
-                    position=InfoBarPosition.TOP,
-                    duration=3000,
-                )
+                toast_warning(self, "需要关键词", "请先输入搜索关键词。")
                 return
             # qfluentwidgets 的 SegmentedWidget.currentItem() 返回
             # SegmentedItem **对象**而非 routeKey 字符串；必须用
@@ -204,17 +262,36 @@ def build_search_widgets():
             # 而用户完全可能在拿到结果后再切 Tab（切换只刷新通道
             # 下拉，不会重搜）。用「发起搜索时」的平台才不会串台。
             self._platform = platform_route
+            # 0.3.7：搜索中切 LoadingState，禁用搜索按钮 + 关键词输入，
+            # 失败时切 ErrorState（带「重试」按钮）。
+            self._loading_state.set_message("正在搜索…")
+            self._loading_state.start()
+            self._stack.setCurrentWidget(self._loading_state)
+            self.search_btn.setEnabled(False)
+            self._keyword.setReadOnly(True)
             try:
                 self._run_async(self._run_search(platform_route, keyword))
             except Exception as exc:
                 logger.exception("search failed: %s", exc)
-                InfoBar.error(
-                    title="搜索失败",
-                    content=str(exc),
-                    parent=self,
-                    position=InfoBarPosition.TOP,
-                    duration=5000,
-                )
+                self._show_error_state(str(exc))
+
+        def _show_error_state(self, message: str) -> None:
+            """Show the error placeholder with a retry button.
+
+            Used after both sync and async failures. Centralises the
+            "stops spinner / re-enables inputs / populates message"
+            sequence so we don't repeat it in three places.
+            """
+            self._loading_state.stop()
+            self.search_btn.setEnabled(True)
+            self._keyword.setReadOnly(False)
+            # 「重试」复用 _on_search()，它会读 self._keyword 里的当前文本。
+            self._error_state.set_text(
+                "搜索失败",
+                f"{message or '未知错误'}\n请检查网络或在「设置 → 账号」登录后重试。",
+            )
+            self._error_state.set_action("重试", self._on_search)
+            self._stack.setCurrentWidget(self._error_state)
 
         async def _run_search(self, platform: str, keyword: str) -> None:
             from doubi.cli.main import collect_search_async
@@ -223,6 +300,7 @@ def build_search_widgets():
             cookies_file = (
                 self._cfg.cookies_file if self._cfg.cookies_file else None
             )
+            error_sink: dict = {}
             try:
                 rows = await collect_search_async(
                     keyword=keyword,
@@ -232,9 +310,19 @@ def build_search_widgets():
                     cookies_file=cookies_file,
                     proxy=self._cfg.proxy,
                     timeout=15.0,
+                    error_sink=error_sink,
                 )
-            except Exception:
-                raise
+            except Exception as exc:
+                # 异步路径上的异常会从 _run_async 抛出，再被 _on_search
+                # 的 try/except 接走。这里不需要再做一次。
+                self._show_error_state(str(exc))
+                return
+
+            # 0.3.7：成功跑完恢复交互态——之前 _on_search 关掉的
+            # search_btn / _keyword readOnly 重新放开。
+            self._loading_state.stop()
+            self.search_btn.setEnabled(True)
+            self._keyword.setReadOnly(False)
 
             self._rows = list(rows or [])
             self._stat_hits.set_value(len(self._rows))
@@ -242,21 +330,54 @@ def build_search_widgets():
                 self._populate_table()
                 self._stack.setCurrentWidget(self.table)
             else:
-                if not cookies_file:
-                    self._empty_state.set_text(
-                        "暂无结果（未登录）",
-                        (
-                            "抖音搜索需要登录态；B 站搜索需要至少 wbi keys。"
-                            "请前往「设置 → 账号」登录对应平台后再试。"
-                        ),
-                    )
-                else:
-                    self._empty_state.set_text(
-                        "暂无结果",
-                        "可能是关键词拼写、平台限流或登录态过期。"
-                        "请换个关键词或在设置页检查 Cookie。",
-                    )
+                self._show_empty_state(platform, error_sink)
                 self._stack.setCurrentWidget(self._empty_state)
+
+        def _show_empty_state(
+            self, platform: str, error_sink: dict
+        ) -> None:
+            """Pick the empty-state message based on real login state and
+            the douyin search gate hint (0.3.6 ``verify`` / ``need_login``).
+            """
+            hint = error_sink.get("hint") or ""
+
+            # 1. 平台被风控门拦了（verify_check）—— 用户确实登录了，
+            #    是抖音对搜索端点单独的设备/短信验证拦截。提示措辞
+            #    必须区别于"未登录"，否则会误导用户去重新登录。
+            if hint == "verify" and platform == "douyin":
+                self._empty_state.set_text(
+                    "搜索被抖音风控门拦下",
+                    (
+                        "你已登录，但搜索端点被抖音单独的设备 / 短信"
+                        "验证拦截（verify_check）。无法客户端绕过 ——"
+                        "请在浏览器打开 douyin.com 完成一次验证后重试。"
+                    ),
+                )
+                return
+
+            # 2. 平台明确说需要登录（403 / 未登录 cookie）—— 检查
+            #    默认 cookie 文件实际存在性而不是 cfg.cookies_file，
+            #    因为 GUI 登录流程写 ~/.doubi/cookies/*.txt，
+            #    cfg.cookies_file 出厂是 None。0.3.9 修复：之前用
+            #    cfg.cookies_file 判定导致登录态永远报"未登录"。
+            if hint == "need_login" or not _platform_has_cookie(platform):
+                self._empty_state.set_text(
+                    "暂无结果（未登录）",
+                    (
+                        "抖音搜索需要登录态；B 站搜索需要至少 wbi keys。"
+                        "请前往「设置 → 账号」登录对应平台后再试。"
+                    ),
+                )
+                return
+
+            # 3. 默认兜底——真没结果 / 关键词不对 / 登录态过期。
+            self._empty_state.set_text(
+                "暂无结果",
+                (
+                    "可能是关键词拼写、平台限流或登录态过期。"
+                    "请换个关键词或在设置页检查 Cookie。"
+                ),
+            )
 
         def _populate_table(self) -> None:
             from PySide6.QtWidgets import QTableWidgetItem
@@ -336,7 +457,7 @@ def build_search_widgets():
                 clipboard = QApplication.clipboard()
                 if clipboard is not None:
                     clipboard.setText(url)
-                    self._toast("已复制链接", url)
+                    toast_success(self, "已复制链接", url)
             elif chosen is browser:
                 QDesktopServices.openUrl(QUrl(url))
             elif chosen is download:
@@ -351,11 +472,7 @@ def build_search_widgets():
             不加多余弹框——否则每次下载都要点两下。
             """
             if self._task_manager is None:
-                self._toast(
-                    "未连接任务管理器",
-                    "请在主窗口中打开此页面。",
-                    kind="error",
-                )
+                toast_error(self, "未连接任务管理器", "请在主窗口中打开此页面。")
                 return
 
             async def _do():
@@ -369,10 +486,9 @@ def build_search_widgets():
                 item, children = await build_media_item(url)
                 targets = children or ([item] if item is not None else [])
                 if not targets:
-                    self._toast(
-                        "无法下载",
+                    toast_error(
+                        self, "无法下载",
                         f"没能解析出行内容：{row_label(record) or url}",
-                        kind="error",
                     )
                     return
 
@@ -383,18 +499,17 @@ def build_search_widgets():
                         count=expected_count(item, children),
                     )
                     if not self._confirm(plan):
-                        self._toast(
-                            "已取消",
+                        toast_info(
+                            self, "已取消",
                             f"{row_label(record) or url} 未加入队列。",
-                            kind="info",
                         )
                         return
 
                 opts = self._build_options()
                 for target in targets:
                     self._task_manager.add(target, opts)
-                self._toast(
-                    "已加入下载队列",
+                toast_success(
+                    self, "已加入下载队列",
                     f"{row_label(record) or url}（{len(targets)} 项）",
                 )
 
@@ -461,18 +576,6 @@ def build_search_widgets():
                 proxy=cfg.proxy,
                 rate_limit=cfg.rate_limit,
                 cookies_file=cfg.cookies_file,
-            )
-
-        def _toast(self, title: str, content: str, kind: str = "success") -> None:
-            fn = {
-                "success": InfoBar.success,
-                "warning": InfoBar.warning,
-                "error": InfoBar.error,
-                "info": InfoBar.info,
-            }[kind]
-            fn(
-                title=title, content=content, parent=self,
-                position=InfoBarPosition.TOP_RIGHT, duration=4000,
             )
 
     return SearchPage, None
