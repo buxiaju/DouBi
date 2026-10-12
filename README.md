@@ -159,6 +159,7 @@ DouBi/
 | 文档 | 内容 |
 |---|---|
 | [docs/QUICKSTART.md](docs/QUICKSTART.md) | 装完之后怎么用：CLI / GUI / REST / MCP、换主题、换语言、解析与下载操作、登录、数据与位置 |
+| [docs/USER_GUIDE.md](docs/USER_GUIDE.md) | **面向 Windows 普通用户**：装完到第一次下完的 5 分钟路线图 + 日常高频操作 + FAQ |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 分层、数据流、存储 schema、任务生命周期、主题生效链路、抖音签名采集层 |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | 开发约定、各模块要点、主题系统内幕、图标管线、抖音签名栈、测试体系 |
 | [docs/CHANGELOG.md](docs/CHANGELOG.md) | 里程碑与缺陷复盘（根因 / 修法 / 判据 / 证据链）—— 按版本号排列 |

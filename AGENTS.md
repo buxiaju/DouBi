@@ -21,7 +21,7 @@
 | 服务端 | `src/doubi/server/app.py` |
 | 平台适配器 | `src/doubi/platforms/{douyin,bilibili}/` |
 | 抖音签名 | `src/doubi/platforms/douyin/sign/{abogus,xbogus}.py`（外部移植：JohnserfSeed/f2 + Evil0ctal） |
-| 文档 | `docs/{QUICKSTART,ARCHITECTURE,BUILD,DEVELOPMENT,CHANGELOG,ICONS,UI_DESIGN,ROADMAP}.md` |
+| 文档 | `docs/{QUICKSTART,USER_GUIDE,ARCHITECTURE,BUILD,DEVELOPMENT,CHANGELOG,ICONS,UI_DESIGN,ROADMAP}.md` |
 | 全量测试 | `scripts/run_full_tests.py`（`--mode local/ci/gui-slow`） |
 | 构建产物 | `scripts/build_installer.py` + `installer/doubi.nsi`（PyInstaller + NSIS） |
 | 临时探针 | `.scratch/`（gitignore，不入版本） |
