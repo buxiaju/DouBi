@@ -90,6 +90,21 @@ jobs:
           retention-days: 14
           if-no-files-found: ignore
 
+      - name: SCA scan (osv-scanner)
+        # 依赖漏洞扫描。osv-scanner-action 默认会：
+        #   * 解析 pyproject.toml（PEP 621）
+        #   * 生成 SARIF 报告
+        #   * 上传到 GitHub Security tab（PR 上能看到 advisory）
+        # 加 ``if: always()`` 让测试段红了 SCA 仍跑——SCA 风险应可见，
+        # 不必阻塞 build。
+        # 加 ``continue-on-error: true``：个人项目偶尔会有 false positive，
+        # 让它不阻断——风险已通过 SARIF 可见，按节奏修。
+        if: always()
+        uses: google/osv-scanner-action@v1
+        with:
+          scan-args: "--lockfile=pyproject.toml"
+        continue-on-error: true
+
       - name: Build Windows installer
         # ``build_installer.py`` 默认会先跑 ``build_exe.py``（PyInstaller
         # onedir），再调 makensis 打 NSIS。这是项目入口脚本——不要在这里
