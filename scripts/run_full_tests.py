@@ -18,7 +18,9 @@
 
 ``ci``
     往 `sys.meta_path` 插一个 Blocker 屏蔽 9 个可选依赖，复刻 CI 的
-    `pytest -q --maxfail=5`（CI 只跑 `pip install .`，不带任何 extras）。
+    `pytest -q -m "not slow" --maxfail=5`（CI 只跑 `pip install .`，
+    不带任何 extras）。``-m "not slow"`` 是防御未来 CI 装了 PySide6 时
+    ``test_theme_apply_gui.py`` 整轮挂死在 87%。
     0.3.1 基线：**670 passed / 175 skipped / 96.90s**。
     用途：`docs/BUILD.md` §7 那条「模拟 CI 依赖集跑一遍全量」检查——本地装齐
     extras 的口径比 CI **大一圈**，「测试里裸导入可选依赖」这类失效模式在本地
@@ -116,9 +118,13 @@ def main() -> int:
     # 而这个脚本的日志经常要 Tee-Object 存下来对照。
     if args.mode == "ci":
         _install_blocker(CI_ABSENT)
-        argv = ["-q", "--maxfail=5"]
+        # 与 .github/workflows/build.yml 同步：CI runner 命令是
+        # `pytest -q -m "not slow" --maxfail=5`。-m "not slow" 防御
+        # 未来 CI 切到 `pip install .[all]` 时 test_theme_apply_gui.py
+        # 整轮挂死。
+        argv = ["-q", "-m", "not slow", "--maxfail=5"]
         print(f"[run_full_tests] mode=ci: blocking {len(CI_ABSENT)} optional deps, "
-              f"mirroring CI command `pytest -q --maxfail=5`")
+              f"mirroring CI command `pytest -q -m \"not slow\" --maxfail=5`")
         print("[run_full_tests] 0.3.4 baseline: 1029 passed / 188 skipped / ~20s "
               "(0.3.3 was 1004/184, 0.3.2 was 981/181)")
         print("[run_full_tests] 0.3.3 baseline: 1004 passed / 184 skipped / ~19s "

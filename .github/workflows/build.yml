@@ -61,15 +61,21 @@ jobs:
         # ``if [ ... ]; then ... fi`` 是 bash 语法，Windows runner
         # 默认 pwsh 会把它当语法错——这一步白跑 50 秒还没报清楚。
         shell: bash
-        # 跳过 GUI 类测试（无 PySide6 → 全部 skip），但**不**加
-        # ``--ignore=tests/test_*_gui.py``——它们的 skip 行为本身
-        # 是一条信息（环境里有没有 PySide6）。让 PySide6 缺失直接
-        # skip 即可。
-        # 在 CI 上用 ``--maxfail=5`` 提前结束：单测超过 5 个失败就
-        # 是灾难，不要再花 25 分钟跑剩下的（本地仍有 26 文件 / 645
-        # 用例；CI 跑 25~30 分钟是常态）。
+        # CI runner 只装 ``pip install .``，PySide6 / qfluentwidgets /
+        # qasync / psutil / qrcode / pydantic / fastapi / uvicorn / mcp
+        # 九个包一律缺失。GUI 测试会自然 skip，不影响绿红。
+        #
+        # ``-m "not slow"`` 是**防御**：哪天改切到 ``pip install .[all]``
+        # 装齐 extras，``test_theme_apply_gui.py``（gui + slow）会在
+        # CI 上真起 Qt 事件循环反复切主题，把整轮拖死在 87% 位置
+        # （见 AGENTS.md「PySide6 offscreen 跨文件 UI 测试合集跑挂起
+        # 」）。本地 ``scripts/run_full_tests.py --mode ci`` 用同样的
+        # argv 复刻，保持口径一致。
+        #
+        # ``--maxfail=5``：单测超过 5 个失败就是灾难，不要再花 25 分钟
+        # 跑剩下的（CI 跑 25~30 分钟是常态）。
         run: |
-          python -m pytest -q --maxfail=5 2>&1 | tee pytest.log
+          python -m pytest -q -m "not slow" --maxfail=5 2>&1 | tee pytest.log
           if [ ${PIPESTATUS[0]} -ne 0 ]; then
             echo "::error::Tests failed (see pytest.log artifact)"
             exit 1
