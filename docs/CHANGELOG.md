@@ -4,6 +4,7 @@
 >
 > | 版本 | 日期 | 一句话摘要 |
 > | --- | --- | --- |
+> | 0.3.10 | 2026-10-12 | 工程收口 5 步：CI 防挂死 / Dependabot / osv-scanner / USER_GUIDE / 诊断包 |
 > | 0.3.9 | 2026-10-12 | ruff 全清 0 错 + 解析链回退 + UI 收尾：feedback / shortcuts / 加载空态 |
 > | 0.3.6 | 2026-10-04 | 搜索 / 热榜「没有结果」：五个独立缺陷 |
 > | 0.3.5 | 2026-10-04 | 性能与 UI：字体族真修复 + 四处渲染热点收口 |
@@ -43,6 +44,165 @@
 > | ruff | 228 | **0** | -228 |
 
 > 版本号单一真源 `src/doubi/__init__.py` 由 0.3.6 升至 0.3.9。
+
+## 0.3.10 (2026-10-12) — 工程收口 5 步：CI 防挂死 / Dependabot / osv-scanner / USER_GUIDE / 诊断包
+
+> 本版回应**长期工程债**而不是新功能：CI 跑通（防未来挂死）、自动依赖升级、
+> 漏洞扫描、面向终端用户的手册、一键诊断包。**5 步全部用「症状/根因/修法/判据」四段式**
+> 记录——不是功能发版，是工程发版。
+
+### 一、CI runner 加 `-m "not slow"` 防御未来装齐 extras 时挂死
+
+**症状**：`pyproject.toml` 标了 `slow` 的测试（`test_theme_apply_gui.py`，28 例
+`gui + slow`）+ **6 个 PySide6 offscreen 跨文件 UI 测试**（`test_ui_feedback` /
+`test_ui_shortcuts` / `test_ui_loading_and_empty` / `test_ui_shortcuts_and_loading_e2e` /
+`test_ui_shell_regression_037` / `test_ui_shell_regression_039`）合集跑会在 87-88%
+位置挂死。CI runner 当前只装 `pip install .`，PySide6 缺失让这些测试 skip 不会挂——
+但 0.3.6 之前 4 个 import smoke 测试没加 PySide6 守护，**爆 fail**，CI 全红
+（0.2.0 → 0.3.1 共 5 次都死在测试段，见 `docs/BUILD.md` §8.6）。
+
+**根因**：
+- 0.3.9 `012a506` 修了 4 个 import smoke 测试加 `pytest.importorskip("PySide6")`，
+  让"PySide6 缺失"从 fail 变 skip——CI 理论上**现在就能跑过**
+- 但 `-m "not slow"` 没加，**未来某天 CI 切到 `pip install .[all]` 装齐 extras 时**
+  （比如要测 GUI 真实渲染），`test_theme_apply_gui.py` 会真起 Qt 事件循环反复切主题，
+  把整轮拖死在 87%
+
+**修法**：
+- `.github/workflows/build.yml`：测试命令从 `pytest -q --maxfail=5` 加 `-m "not slow"`
+- `scripts/run_full_tests.py`：CI 模式 argv 同步加 `-m "not slow"`（保持 mirror）；
+  docstring + 提示语同步
+
+**判据**：
+- 0.3.9 ci 基线 1104 passed / 281 skipped / 0 failed（012a506 后）
+- 0.3.10 ci 改为 1104 passed / 253 skipped / 28 deselected（28 例
+  `test_theme_apply_gui` 从 skip 变 deselected，passed 零回归）
+- 本地 `--mode ci` 同步验证
+- **故意没动**：Release step 的 `if: always()`——尊重 BUILD §8.6「测试红了不应发
+  未经验证产物」的结论；下次发现"测试过 + build 也过但 draft Release 没建出来"
+  再回来加
+
+### 二、Dependabot 自动升级
+
+**症状**：pyproject 10 个直接依赖 + 3 个 extras + 6 个 dev 依赖共 ~20 个三方包，
+**0 自动化升级**。yt-dlp 几乎每周出新版，playwright 内核更新频繁，依赖漂移
+只能靠人工盯。
+
+**根因**：仓库 `.github/` 目录只有 `workflows/`，没有 Dependabot / Renovate 配置。
+
+**修法**：新增 `.github/dependabot.yml`：
+- **pip 周升级**（cron `0 1 * * 1` = 北京时间周一 09:00），最多 5 个 open PR
+- **github-actions 周升级**，最多 3 个 open PR
+- PR 标题前缀 `deps:` / `ci:`，squash reword 时用户再统一成 AGENTS.md 的
+  `chore(deps):` / `chore(ci):` 风格
+- **跳过 `playwright`**：升级需 `playwright install` 重下浏览器内核（约 150 MB），
+  是独立动作，不与依赖 bump 一起处理
+
+**判据**：仓库 Settings → Code security and analysis → Dependabot →
+Version updates 启用后，每周自动开 PR（public 仓库默认 ON；private 仓库首次
+需手动启用一次）。
+
+### 三、osv-scanner SCA 依赖漏洞扫描
+
+**症状**：依赖已知漏洞但**无可见渠道**——出问题只能等用户报。
+
+**根因**：CI 没接 SCA 工具。0.3.4 之后 Dependabot alerts 的 GH native 集成是
+Project 级，跟 CI 跑不挂钩。
+
+**修法**：在 `.github/workflows/build.yml` 测试段后、build 段前加
+`google/osv-scanner-action@v1`：
+- 解析 `pyproject.toml`（PEP 621，osv-scanner v1.7+ 支持）
+- 默认生成 SARIF + 上传 GitHub Security tab（PR 上能看到 advisory）
+- `if: always()` + `continue-on-error: true`——SCA 风险可见但不阻断 build
+  （个人项目偶尔 false positive 不阻断，让用户按节奏修）
+
+**为什么不用 pip-audit**：pip-audit 不直接解析 PEP 621（要先转 requirements.txt），
+且和 GitHub Security 集成需要另起一步。osv-scanner 是 Google 维护，跨生态，
+未来加 npm/Cargo lockfile 也能复用。
+
+**判据**：CI 跑通后，GitHub Security tab 自动出现 SARIF 报告（PR / Security
+tab 都能看到 advisory）。
+
+### 四、新增 `docs/USER_GUIDE.md` 面向 Windows 普通用户
+
+**症状**：现有 8 份 docs 全是开发者视角（ARCHITECTURE / BUILD / DEVELOPMENT / ICONS /
+UI_DESIGN）。`docs/QUICKSTART.md` 写 CLI / GUI / REST / MCP 入口，但不是「装完
+第一次打开程序」的 5 分钟上手路线。
+
+**根因**：缺一份面向**终端用户**的速通手册。`docs/QUICKSTART.md` 的 GUI 段已写得
+详细但前提是「用户愿意读 CLI / 源码路径的文档」。
+
+**修法**：新增 `docs/USER_GUIDE.md`（~21 KB / 479 行），11 节 + FAQ：
+1. 装完第一件事（含「翻译正常」自检 2 条）
+2. 下第一个视频（5 步：复链 → 解析 → 选 → 下 → 找）
+3. 批量下（搜索页 + 热榜页 + 解析页批量入队）
+4. 登录（抖音 / B 站扫码路径）
+5. 主题 + 语言（7 套主题表 + 3 种切换方式）
+6. 设置详解（6 张卡片：下载 / 画质 / 附加 / 限速 / 通知 / 行为）
+7. 任务管理（暂停 / 重试 / 重新下载 / 删除 / 清空）
+8. 托盘
+9. 数据位置（`~/.doubi/` 完整结构）
+10. 异常处理（含「怎么给作者发日志」）
+11. 卸载 + FAQ（10 个常见问题）
+
+**为什么不重复 QUICKSTART.md GUI 段**：QUICKSTART 已详细写「换主题对比」、
+「解析页操作」、「下载合集三层」、「下载页操作」。USER_GUIDE 走「5 分钟上手 +
+高频操作 + FAQ」路线，深度靠截图 + 链接到 QUICKSTART，不给老读者刷屏。
+
+**判据**：截图全用 `screenshots/00..16 + icon_themes.png` 共 22 张现有截图，
+**0 新增**；README 文档表 + AGENTS.md 关键路径段同步加 USER_GUIDE.md。
+
+### 五、设置页加「诊断」卡 + 一键导出诊断包
+
+**症状**：用户报 bug 时开发者只能问「`~/.doubi/` 是啥样 / 登录啥状态 / 配置
+哪些字段」——来回 3-5 个回合才能凑齐信息。问题：**没有一键把脱敏后的 `~/.doubi/`
+关键文件 + 系统信息 + 日志打包给作者**的入口。
+
+**根因**：缺诊断包生成器。
+
+**修法**：
+- **核心逻辑**（`src/doubi/core/diagnostics.py`，~250 行，纯函数）
+    - `redact_cookies(platform, text)`：B 站 SESSDATA / bili_jct、抖音
+      sessionid / sessionid_ss / sid_tt / sid_guard 替换为 `<REDACTED-...>`
+    - `redact_config_yaml(text)`：proxy / aria2_secret / rest_token 替换
+    - `collect_system_info()`：Python / OS / DouBi 版本
+    - `build_diagnostic_bundle(out, ...)`：把 `~/.doubi/` 关键文件 + 系统信息打包成 zip
+        * `config.yml` 脱敏后 → `config.yml.redacted`
+        * `cookies/<platform>.txt` 脱敏后 → `cookies/<platform>.txt.redacted`
+        * `doubi.db` / `download_manifest.jsonl` **只记路径+大小**（不含内容——
+          体量大，按需索取）
+        * `logs/*.log` 最近 5 个原样收
+        * `bundle.json` 整体索引
+- **测试**（`tests/test_diagnostics.py`，22 例）：4 TestRedactCookies +
+  5 TestRedactConfigYaml + 4 TestCollectSystemInfo + 8 TestBuildDiagnosticBundle
+- **UI 入口**（`src/doubi/ui/pages/settings.py`）：第 8 张「诊断」卡，
+  「导出诊断包…」按钮 click → `QFileDialog` 选位置 → 调核心 → toast 成功/失败
+- **`08cb733` 修 `1ba9b60` 引入的 unpack bug**：`_build_diagnostics_card` 把
+  `self._build_card(...)` 当 3-tuple unpack 抛 `ValueError: too many values to
+  unpack`，local 口径全量 89% 位置挂死；改成 dict 取值（`card_dict["body"]`）解决
+  ——
+  1ba9b60 时单测 ci 跑没爆是因为 ci 口径下 `test_prompt_options` 是 PySide6
+  依赖 + `MainWindow()` 触发，被 PySide6 缺失整体 skip。**local 口径才暴露**。
+
+**判据**：
+- `tests/test_diagnostics.py`：22/22 通过
+- ci 口径：1104 → 1126 passed（+22 = diagnostics 测试），253 skipped / 28 deselected
+- local 拆批 a 1344 + b 146 = 1490 passed / 8 skipped
+
+### 统计
+
+| 口径 | 0.3.9 | 0.3.10 | 差值 |
+| --- | --- | --- | --- |
+| local（拆批） | 1419 passed / 7 skipped | **1490 passed / 8 skipped** | +71 passed / +1 skipped（22 diagnostics + 其他回归） |
+| ci | 1104 passed / 281 skipped | **1126 passed / 253 skipped / 28 deselected** | +22 passed / -28 skipped / 0 deselected（28 例 test_theme_apply_gui 从 skip 变 deselected） |
+| ruff | 0 | **0** | 0 |
+
+> local 全量跑存在**已知 PySide6 跨文件 UI 测试在 87-90% 位置挂起**的问题
+> （AGENTS.md「已知全量跑会挂的边界」节）。本版用「a 批：除 12 个 UI 文件 +
+> `test_theme_apply_gui.py`」+「b 批：12 个 UI 文件单跑」两口径相加——a 1344 + b 146
+> = 1490 passed / 8 skipped。CI 口径未触发该挂起（PySide6 缺失 → 整体 skip）。
+
+版本号单一真源 `src/doubi/__init__.py` 由 0.3.9 升至 0.3.10。
 
 ## 0.3.6 (2026-10-04) — 搜索 / 热榜「没有结果」：五个独立缺陷
 
