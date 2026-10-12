@@ -623,11 +623,14 @@ def build_settings_widgets():
                 2. 调 build_diagnostic_bundle
                 3. toast 成功 / 失败
             """
-            card, body, _title_row = self._build_card(
+            # _build_card 返回 dict（"widget" / "body" / "title" / "subtitle" / "title_row"），
+            # 不是 3-tuple——别 unpack。
+            card_dict = self._build_card(
                 title="诊断",
                 subtitle="导出 ~/.doubi/ 关键文件 + 系统信息 + 最近 5 个日志文件"
                 "（已脱敏）为 zip，附给作者排查问题用。",
             )
+            body = card_dict["body"]
             from qfluentwidgets import BodyLabel
 
             body_layout = QVBoxLayout(body)
@@ -649,7 +652,7 @@ def build_settings_widgets():
             self._export_btn.clicked.connect(self._on_export_diagnostics)
             body_layout.addWidget(self._export_btn, 0, Qt.AlignLeft)
 
-            return {"widget": card, "body": body, "btn": self._export_btn}
+            return {"widget": card_dict["widget"], "body": body, "btn": self._export_btn}
 
         def _on_export_diagnostics(self) -> None:
             """「导出诊断包」按钮 click handler。
