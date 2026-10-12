@@ -1,0 +1,42 @@
+# Dependabot 自动依赖升级配置
+#
+# 文档：https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+#
+# 启用位置：仓库 Settings → Code security and analysis → Dependabot →
+#   Version updates → 打开。Public 仓库默认 ON；private 仓库首次需要手动启用一次。
+#
+# 节奏：每周一（UTC cron）开 PR，最多 5/3 个 open。
+#   PR 标题前缀 `deps:` / `ci:`，用户 squash reword 时再统一成 AGENTS.md
+#   的 `chore(deps):` / `chore(ci):` 格式（AGENTS.md 的 commit 格式是给手动
+#   commit 用的，Dependabot 自动 PR 不强求）。
+#
+# 跳过 `playwright`：升级需要 `playwright install` 重新下浏览器内核
+#   （约 150 MB），是独立动作，不与依赖 bump 一起处理。
+
+version: 2
+
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      # 周一 09:00 (Asia/Shanghai) = UTC 01:00。
+      # 周末晚发 → 周一上午到 → 用户有完整工作日审 PR。
+      cron: "0 1 * * 1"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+    ignore:
+      - dependency-name: "playwright"
+        # 升级需 `playwright install` 重下浏览器内核（约 150 MB），
+        # 与依赖 bump 不是同一个动作，应手动处理。
+        # 触发后再写专门的 commit（chore(release): playwright 升级 + 浏览器内核更新）。
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      cron: "0 1 * * 1"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "ci"
