@@ -4,6 +4,7 @@
 >
 > | 版本 | 日期 | 一句话摘要 |
 > | --- | --- | --- |
+> | 0.3.9 | 2026-10-12 | ruff 全清 0 错 + 解析链回退 + UI 收尾：feedback / shortcuts / 加载空态 |
 > | 0.3.6 | 2026-10-04 | 搜索 / 热榜「没有结果」：五个独立缺陷 |
 > | 0.3.5 | 2026-10-04 | 性能与 UI：字体族真修复 + 四处渲染热点收口 |
 > | 0.3.4 | 2026-10-03 | UI 完善：B 站采集 + 主题重调 + 字体清晰化 |
@@ -20,8 +21,28 @@
 > - **测试基线**（passed / skipped）→ 见每版段尾的「统计」表，或者直接读 [BUILD.md](BUILD.md) §6.5 / §7 的本地全量 + ci 双口径脚本。
 > - **构建产物基线**（体积 / SHA256）→ 见 [BUILD.md](BUILD.md) §6.5 的「实测基线速查表」。
 > - **检索**：编辑器用 `Ctrl+F` 搜版本号（如 `0.3.6` 或 `M6.48`）是最快的跳转方式。
->
-> **注意**：0.3.7 / 0.3.8 / 0.3.9 是工作树里正在整理的下一版本，正文节尚未提交，速查表暂不收录——发版时一起补上即可。
+
+## 0.3.9 (2026-10-12) — ruff 全清 0 错 + 解析链回退 + UI 收尾：feedback / shortcuts / 加载空态
+
+> 本版合并 0.3.7 / 0.3.8 / 0.3.9 三个工作分支的整理成果——单次发版，不分版本号。
+> 核心是**工程收口**而非新功能：
+
+> - **ruff 0 错**：228 → 0（两轮 `--fix` + `--unsafe-fixes` + 8 处手工）
+> - **解析链断裂已修**：`PlatformRegistry.detect` 改为 `detect_chain` 沿优先级回退，ytdlp_generic / generic 不再被遮蔽
+> - **服务端 collect_* NameError**：`collect_search` / `collect_hot` 自由变量 `cfg` 改为内联 `load_config(None)`
+> - **搜索页「未登录」误报**：按平台查 `~/.doubi/cookies/<platform>.txt` 实际存在性，三档文案（verify_check / need_login / 真没结果）
+> - **UI 收尾**：`feedback`（toast_* 包装）/ `shortcuts`（ShortcutManager）+ 6 套未跟踪 UI 测试 + 启动截图存档
+> - **文档瘦身**：README -54%（22 KB → 13.6 KB），8 文档同步版号与标题层级，删除废弃 INTEGRATION_PLAN.md
+
+> 三个口径基线：
+
+> | 口径 | 0.3.6 | 0.3.9 | 差值 |
+> | --- | --- | --- | --- |
+> | local | 1337 passed / 7 skipped | **1419 passed / 7 skipped** | +82（UI 收尾 + 回归测试） |
+> | ci | 1053 passed / 203 skipped | **1104 passed / 281 skipped** | +51 passed / +78 skipped（PySide6 依赖测试） |
+> | ruff | 228 | **0** | -228 |
+
+> 版本号单一真源 `src/doubi/__init__.py` 由 0.3.6 升至 0.3.9。
 
 ## 0.3.6 (2026-10-04) — 搜索 / 热榜「没有结果」：五个独立缺陷
 
