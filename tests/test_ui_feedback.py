@@ -47,6 +47,8 @@ def parent(qapp):
 
 def test_import_smoke():
     """Module should be importable without an InfoBar parent."""
+    pytest.importorskip("PySide6")
+    pytest.importorskip("qfluentwidgets")
     from doubi.ui import feedback
     for name in ("toast_success", "toast_info", "toast_warning", "toast_error"):
         assert callable(getattr(feedback, name))

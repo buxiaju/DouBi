@@ -124,6 +124,7 @@ def test_main_window_imports_new_pages():
     # were added to ``pages/__init__.py``, the import block in
     # ``main_window.py`` was forgotten — ``NameError: name
     # 'build_search_widgets' is not defined`` at first build. Pin it.
+    pytest.importorskip("PySide6")
     import importlib
     importlib.import_module("doubi.ui.main_window")
     # Importing the module just imports the docstring / globals; the

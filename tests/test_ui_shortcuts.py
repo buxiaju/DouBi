@@ -49,6 +49,7 @@ def parent(qapp):
 def test_import_smoke():
     """The module should be importable without a QApplication around
     (the module-level imports are stdlib + dataclasses only)."""
+    pytest.importorskip("PySide6")
     from doubi.ui import shortcuts
     assert hasattr(shortcuts, "ShortcutManager")
     assert hasattr(shortcuts, "ShortcutSpec")
