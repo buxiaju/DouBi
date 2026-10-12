@@ -165,6 +165,7 @@ def build_settings_widgets():
     )
 
     from ...core.config import DEFAULT_CONFIG_PATH, load_config
+    from ...core.diagnostics import build_diagnostic_bundle
     from ...ui.auth_actions import (
         LoginStatus,
         bilibili_status,
@@ -481,6 +482,13 @@ def build_settings_widgets():
 
             body_layout.addWidget(self._shortcut_card["widget"])
 
+            # ---- 8) 诊断卡（最末位） ----
+            # 用户报 bug 时一键导出 ~/.doubi/ 关键文件 + 系统信息 + 最近日志
+            # 为 zip（已脱敏）。核心逻辑在 core.diagnostics 里，本卡只负责
+            # 弹文件对话框 + toast 反馈。
+            self._diagnostics_card = self._build_diagnostics_card()
+            body_layout.addWidget(self._diagnostics_card["widget"])
+
             body_layout.addStretch(1)
 
             self._body_scroll.setWidget(body)
@@ -603,6 +611,77 @@ def build_settings_widgets():
             """嗅探卡折叠/展开。0.3.4 默认折叠，少一张卡挤在主页面里。"""
             self._sniff_card["body"].setVisible(on)
             self._sniff_toggle_btn.setText("隐藏高级" if on else "显示高级")
+
+        # -------------------------------------------------------- 诊断卡
+
+        def _build_diagnostics_card(self) -> dict:
+            """诊断卡：导出诊断包。
+
+            核心逻辑在 :func:`core.diagnostics.build_diagnostic_bundle`，
+            本卡只负责：
+                1. 弹 QFileDialog 选保存位置（默认 ``~/Downloads/doubi-diag-<时间>.zip``）
+                2. 调 build_diagnostic_bundle
+                3. toast 成功 / 失败
+            """
+            card, body, _title_row = self._build_card(
+                title="诊断",
+                subtitle="导出 ~/.doubi/ 关键文件 + 系统信息 + 最近 5 个日志文件"
+                "（已脱敏）为 zip，附给作者排查问题用。",
+            )
+            from qfluentwidgets import BodyLabel
+
+            body_layout = QVBoxLayout(body)
+            body_layout.setContentsMargins(0, 0, 0, 0)
+            body_layout.setSpacing(SPACE_SM)
+
+            hint = BodyLabel(
+                "包含：config.yml（敏感字段已脱敏）、cookies/<platform>.txt（敏感字段"
+                "已脱敏）、最近 5 个 logs/*.log。\n"
+                "不包含：doubi.db / download_manifest.jsonl 的内容（仅记录文件大小"
+                "——需要时再单独索取）。",
+                body,
+            )
+            hint.setStyleSheet(muted_qss())
+            hint.setWordWrap(True)
+            body_layout.addWidget(hint)
+
+            self._export_btn = PushButton("导出诊断包…", body)
+            self._export_btn.clicked.connect(self._on_export_diagnostics)
+            body_layout.addWidget(self._export_btn, 0, Qt.AlignLeft)
+
+            return {"widget": card, "body": body, "btn": self._export_btn}
+
+        def _on_export_diagnostics(self) -> None:
+            """「导出诊断包」按钮 click handler。
+
+            弹 QFileDialog → 调 :func:`build_diagnostic_bundle` → toast 反馈。
+            失败（含 OSError / PermissionError）只 toast，**不**抛。
+            """
+            from PySide6.QtWidgets import QFileDialog
+            from datetime import datetime
+
+            default_name = (
+                f"doubi-diag-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
+            )
+            out_path, _selected = QFileDialog.getSaveFileName(
+                self,
+                "导出诊断包",
+                default_name,
+                "Zip (*.zip)",
+            )
+            if not out_path:
+                return  # 用户取消
+            try:
+                result = build_diagnostic_bundle(Path(out_path))
+            except (OSError, PermissionError, ValueError) as exc:
+                logger.warning("diagnostics: export failed: %s", exc)
+                toast_error(f"诊断包导出失败：{exc}", self)
+                return
+            except Exception as exc:  # noqa: BLE001  # 兜底：诊断不应让 GUI 崩
+                logger.exception("diagnostics: unexpected error: %s", exc)
+                toast_error(f"诊断包导出失败：{exc}", self)
+                return
+            toast_success(f"诊断包已导出：{result.name}", self)
 
         def _build_card(self, title: str, subtitle: str) -> dict:
             """构造一张带「标题 / 副标题 / 右侧动作槽 / body 容器」的可复用卡片。
