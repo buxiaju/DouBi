@@ -46,23 +46,31 @@ jobs:
 
       - name: Install runtime + dev dependencies
         # 不用 ``pip install -e .``：CI 不需要可编辑模式，反而会引入
-        # 与本地开发不同的 import 路径。``pip install .`` 一次性装完
-        # 生产依赖，再补 dev 依赖。
+        # 与本地开发不同的 import 路径。``pip install .[gui]`` 一次性装完
+        # 生产 + GUI 依赖（PySide6 / PySide6-Fluent-Widgets / qasync）——
+        # 这些是 ``build_exe.py`` 跑 PyInstaller 时静态分析 import 必须的；
+        # 缺它们 PyInstaller 走两步就 ``ModuleNotFoundError`` 退出。
+        # 测试段 ``-m "not slow"`` 已经把 GUI 集成测试排除掉了，不在
+        # CI runner 上跑 PySide6 渲染循环。
         #
         # ``pyinstaller`` **不**放在 ``[project.optional-dependencies]``
-        # 的 dev / build 里——它是 **CI 发版专用**工具，不参与日常 dev
-        # 工作流；放在那里会让 ``pip install .[dev]`` 多装一个 30 MB
-        # 二进制。所以这里单列一行加注释说明。
-        # 0.3.10 Run #26 实际栽过：``pip install .``（生产 only）不带
-        # PyInstaller，``scripts/build_installer.py`` 一启动就在
-        # ``python -m PyInstaller`` 处 ``ModuleNotFoundError`` exit 1
-        # （CI 1 秒挂 vs 本地 7-8 分钟跑通，差异完全在 PyInstaller 装没装）。
+        # 里——它是 **CI 发版专用**工具，不参与日常 dev 工作流；放在
+        # 那里会让 ``pip install .[dev]`` 多装一个 30 MB 二进制。所以
+        # 这里单列一行加注释说明。
+        # 0.3.10 Run #26–27 实际栽过两次：
+        #   Run #26: ``pip install .``（生产 only）不带 PyInstaller，
+        #     ``scripts/build_installer.py`` 一启动就在 ``python -m
+        #     PyInstaller`` 处 ``ModuleNotFoundError`` exit 1（1 秒挂）。
+        #   Run #27: 加上 ``pyinstaller`` 但忘了 GUI extras，PyInstaller
+        #     启动起来 import ``doubi.ui.app`` →  ``from PySide6.QtCore
+        #     import ...`` → ``ModuleNotFoundError: PySide6``，约 30 秒
+        #     后 exit 1。
         # （仓库里 ``pyproject.toml`` 的 ``[project.optional-dependencies]``
         # 故意不列 PyInstaller——依赖树「最小化」是 AGENTS.md 风格；
         # 在 CI workflow 里显式 pip install 是更准的位置。）
         run: |
           python -m pip install --upgrade pip
-          python -m pip install .
+          python -m pip install ".[gui]"
           python -m pip install pytest pytest-asyncio ruff pyinstaller
 
       - name: Run tests
