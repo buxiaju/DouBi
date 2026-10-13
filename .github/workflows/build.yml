@@ -90,20 +90,22 @@ jobs:
           retention-days: 14
           if-no-files-found: ignore
 
-      - name: SCA scan (osv-scanner)
-        # 依赖漏洞扫描。osv-scanner-action 默认会：
-        #   * 解析 pyproject.toml（PEP 621）
-        #   * 生成 SARIF 报告
-        #   * 上传到 GitHub Security tab（PR 上能看到 advisory）
-        # 加 ``if: always()`` 让测试段红了 SCA 仍跑——SCA 风险应可见，
-        # 不必阻塞 build。
-        # 加 ``continue-on-error: true``：个人项目偶尔会有 false positive，
-        # 让它不阻断——风险已通过 SARIF 可见，按节奏修。
-        if: always()
-        uses: google/osv-scanner-action@v1
-        with:
-          scan-args: "--lockfile=pyproject.toml"
-        continue-on-error: true
+      # 0.3.10 临时移除 SCA（osv-scanner-action）：仓库根 action.yml 没有
+      # ``runs:`` 段（monorepo，只发布 reusable workflow），所有 ``@v1`` /
+      # ``@v1.9.2`` / ``@v2`` / ``@v2.7.0`` 引用都报 ``Top level 'runs:'
+      # section is required``（parse-time 失败，continue-on-error 也兜不住）。
+      # 正确用法是把它做成一个独立 job 调 reusable workflow：
+      #   jobs:
+      #     sca:
+      #       uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@v2.7.0
+      #       with: { scan-args: "--lockfile=pyproject.toml" }
+      #       permissions: { security-events: write, contents: read }
+      # 但本仓只有 pyproject.toml（PEP 621 直接声明，无 uv.lock / requirements.txt），
+      # 即便切到 reusable workflow 也扫不出已解析版本——需要先用 pip-compile / uv
+      # lock 生成 lockfile。这块工作量 + 配套 permissions + SARIF 上传配置权衡
+      # 下来，对个人项目 ROI 太低。先删 SCA 让 CI 绿，恢复路径见上。
+      # （0.3.10 三次 force-push tag 验证：v1.9.2 / v2.7.0 都不行，commit
+      # 9690815 / 62e5f06 / 87df681 全部 revert 在本次修复 commit 里。）
 
       - name: Build Windows installer
         # ``build_installer.py`` 默认会先跑 ``build_exe.py``（PyInstaller
