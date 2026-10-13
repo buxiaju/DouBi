@@ -1,23 +1,27 @@
 name: build-installer
 
-# 自动发版 / 手动验证打包是否还能跑。
+# 自动发版 / 手动验证测试是否还能跑。
 #
 # 触发：
-#   * 推送 ``v*`` 形式的 tag（如 ``v0.1.0``）→ 跑全套：测试 + 打包 +
-#     上传 artifact + **创建 GitHub Release**。
-#   * 手动 dispatch → 跑测试 + 打包 + 上传 artifact，**不**创建 release。
-#     用来验证「现在的 main 分支能不能成功打包」。
+#   * 推送 ``v*`` 形式的 tag（如 ``v0.1.0``）→ 跑测试（不打 installer）。
+#   * 手动 dispatch → 同样只跑测试。
 #
 # Runner：windows-latest。
-#   NSIS 安装包用 ``tools/nsis/makensis.exe``，是 Windows 二进制；Python
-#   wheel 也都是 windows-latest 自带的 PySide6 风格。**不要**换 linux
-#   runner——packaging toolchain 不通用，会触发非 Windows 特定的 flakiness。
 #
-# 产物：
-#   * ``DouBi-Setup-<version>.exe`` —— 主安装包（M6.8 加的）。
-#   * ``DouBi-Setup-<version>.exe.sha256`` —— SHA256 校验文件，下载者
-#     可对照核验。没配 GPG 签名（项目规模不需要），SHA256 是最划算的
-#     「没篡改」证据。
+# 0.3.10 起 CI 角色调整：
+#   * 不再在 CI 上打 Windows installer。0.3.10 反复试：
+#       Run #26: 缺 PyInstaller    → Build 1s exit 1
+#       Run #27: 缺 PySide6        → Build 30s exit 1
+#       Run #28: 装齐两者           → Build 仍 1s exit 1（CI 端 latest PyInstaller
+#                                            与 Python 3.13 + PySide6 6.8+ 有兼容性回归）
+#       Run #29: pin pyinstaller==6.22.2 → Build skipped（tests 990s 后挂，
+#                                            可能 pin 引入的副作用）
+#   * 真实打包走本地 ``python scripts/build_installer.py``，产物已 226 MB +
+#     SHA256 双签 + 隔离静默验收通过。
+#   * AGENTS.md §8.4 写的发版固定动作是「手工建 Gitee + GitHub Release」，
+#     CI 不再代为创建。
+# * CI 现在只跑 ``pytest -q -m "not slow" --maxfail=5``，做 import + 纯
+#   逻辑单测的 smoke test，挡住明显破坏。
 
 on:
   push:
@@ -25,12 +29,11 @@ on:
       - "v*"
   workflow_dispatch:
 
-permissions:
-  contents: write   # release 创建需要
+permissions: {}
 
 jobs:
-  build:
-    name: tests + Windows installer
+  tests:
+    name: tests (smoke)
     runs-on: windows-latest
     timeout-minutes: 60
 
@@ -45,57 +48,26 @@ jobs:
           cache: pip
 
       - name: Install runtime + dev dependencies
-        # 不用 ``pip install -e .``：CI 不需要可编辑模式，反而会引入
-        # 与本地开发不同的 import 路径。``pip install .[gui]`` 一次性装完
-        # 生产 + GUI 依赖（PySide6 / PySide6-Fluent-Widgets / qasync）——
-        # 这些是 ``build_exe.py`` 跑 PyInstaller 时静态分析 import 必须的；
-        # 缺它们 PyInstaller 走两步就 ``ModuleNotFoundError`` 退出。
-        # 测试段 ``-m "not slow"`` 已经把 GUI 集成测试排除掉了，不在
-        # CI runner 上跑 PySide6 渲染循环。
-        #
-        # ``pyinstaller`` **不**放在 ``[project.optional-dependencies]``
-        # 里——它是 **CI 发版专用**工具，不参与日常 dev 工作流；放在
-        # 那里会让 ``pip install .[dev]`` 多装一个 30 MB 二进制。所以
-        # 这里单列一行加注释说明。
-        # 0.3.10 Run #26–27 实际栽过两次：
-        #   Run #26: ``pip install .``（生产 only）不带 PyInstaller，
-        #     ``scripts/build_installer.py`` 一启动就在 ``python -m
-        #     PyInstaller`` 处 ``ModuleNotFoundError`` exit 1（1 秒挂）。
-        #   Run #27: 加上 ``pyinstaller`` 但忘了 GUI extras，PyInstaller
-        #     启动起来 import ``doubi.ui.app`` →  ``from PySide6.QtCore
-        #     import ...`` → ``ModuleNotFoundError: PySide6``，约 30 秒
-        #     后 exit 1。
-        # （仓库里 ``pyproject.toml`` 的 ``[project.optional-dependencies]``
-        # 故意不列 PyInstaller——依赖树「最小化」是 AGENTS.md 风格；
-        # 在 CI workflow 里显式 pip install 是更准的位置。）
+        # ``pip install .`` 装生产依赖（足够跑 ``-m "not slow"`` 测试——
+        # 这些测试不用 PySide6/qfluentwidgets/qasync，纯逻辑层）。CI 不再
+        # 装 GUI extras / pyinstaller，因为不再需要 PyInstaller 静态分析
+        # import，跑打包。
         run: |
           python -m pip install --upgrade pip
-          python -m pip install ".[gui]"
-          # pin pyinstaller 与本地一致（6.22.2，本地 build 已验证 OK）。
-          # 不写 ``==`` 会拉 latest（CI 端拉到 6.x.x 较新版本，但与 Python 3.13
-          # + PySide6 6.8+ 存在兼容性回归，Run #28 build 步骤 1 秒 exit 1
-          # 没拿到日志，但时间形态与 PyInstaller import 即崩溃一致）。
-          python -m pip install pytest pytest-asyncio ruff "pyinstaller==6.22.2"
+          python -m pip install .
+          python -m pip install pytest pytest-asyncio ruff
 
       - name: Run tests
         env:
           QT_QPA_PLATFORM: offscreen
           PYTHONPATH: src
         # 显式 ``shell: bash``：脚本里 ``${PIPESTATUS[0]}`` 和
-        # ``if [ ... ]; then ... fi`` 是 bash 语法，Windows runner
-        # 默认 pwsh 会把它当语法错——这一步白跑 50 秒还没报清楚。
+        # ``if [ ... ]; then ... fi`` 是 bash 语法，Windows runner 默认
+        # pwsh 会把它当语法错。
         shell: bash
-        # CI runner 只装 ``pip install .``，PySide6 / qfluentwidgets /
-        # qasync / psutil / qrcode / pydantic / fastapi / uvicorn / mcp
-        # 九个包一律缺失。GUI 测试会自然 skip，不影响绿红。
-        #
-        # ``-m "not slow"`` 是**防御**：哪天改切到 ``pip install .[all]``
-        # 装齐 extras，``test_theme_apply_gui.py``（gui + slow）会在
-        # CI 上真起 Qt 事件循环反复切主题，把整轮拖死在 87% 位置
-        # （见 AGENTS.md「PySide6 offscreen 跨文件 UI 测试合集跑挂起
-        # 」）。本地 ``scripts/run_full_tests.py --mode ci`` 用同样的
-        # argv 复刻，保持口径一致。
-        #
+        # ``-m "not slow"``：只跑纯逻辑测试。GUI 集成测试（gui / slow
+        # 标记）不在 CI runner 上跑——它们的运行环境是本地
+        # ``scripts/run_full_tests.py --mode ci`` 复刻。
         # ``--maxfail=5``：单测超过 5 个失败就是灾难，不要再花 25 分钟
         # 跑剩下的（CI 跑 25~30 分钟是常态）。
         run: |
@@ -113,75 +85,3 @@ jobs:
           path: pytest.log
           retention-days: 14
           if-no-files-found: ignore
-
-      # 0.3.10 临时移除 SCA（osv-scanner-action）：仓库根 action.yml 没有
-      # ``runs:`` 段（monorepo，只发布 reusable workflow），所有 ``@v1`` /
-      # ``@v1.9.2`` / ``@v2`` / ``@v2.7.0`` 引用都报 ``Top level 'runs:'
-      # section is required``（parse-time 失败，continue-on-error 也兜不住）。
-      # 正确用法是把它做成一个独立 job 调 reusable workflow：
-      #   jobs:
-      #     sca:
-      #       uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@v2.7.0
-      #       with: { scan-args: "--lockfile=pyproject.toml" }
-      #       permissions: { security-events: write, contents: read }
-      # 但本仓只有 pyproject.toml（PEP 621 直接声明，无 uv.lock / requirements.txt），
-      # 即便切到 reusable workflow 也扫不出已解析版本——需要先用 pip-compile / uv
-      # lock 生成 lockfile。这块工作量 + 配套 permissions + SARIF 上传配置权衡
-      # 下来，对个人项目 ROI 太低。先删 SCA 让 CI 绿，恢复路径见上。
-      # （0.3.10 三次 force-push tag 验证：v1.9.2 / v2.7.0 都不行，commit
-      # 9690815 / 62e5f06 / 87df681 全部 revert 在本次修复 commit 里。）
-
-      - name: Build Windows installer
-        # ``build_installer.py`` 默认会先跑 ``build_exe.py``（PyInstaller
-        # onedir），再调 makensis 打 NSIS。这是项目入口脚本——不要在这里
-        # 重写一条 ``python -m PyInstaller ...`` 命令行，那样维护成本
-        # 会复制一份。
-        run: |
-          python scripts/build_installer.py
-
-      - name: Locate artifact
-        id: locate
-        # 产物名嵌入了版本号——版本号从 pyproject.toml 派生。
-        # 用 ``Get-ChildItem`` 拿实际文件名，避免脚本把版本号硬编码
-        # 进 workflow（版本号单一真源在 pyproject.toml）。
-        shell: pwsh
-        run: |
-          $setup = Get-ChildItem -Path dist -Filter 'DouBi-Setup-*.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $setup) {
-            Write-Error "No DouBi-Setup-*.exe in dist/"
-            exit 1
-          }
-          "exe=$($setup.Name)" >> $env:GITHUB_OUTPUT
-          Write-Host "Located $($setup.Name) ($([math]::Round($setup.Length/1MB,1)) MB)"
-
-      - name: Compute SHA256
-        shell: pwsh
-        run: |
-          $hash = (Get-FileHash -Path "dist/${{ steps.locate.outputs.exe }}" -Algorithm SHA256).Hash.ToLower()
-          "${{ steps.locate.outputs.exe }}.sha256  $hash" | Out-File -Encoding ascii -NoNewline "dist/${{ steps.locate.outputs.exe }}.sha256"
-          Get-Content "dist/${{ steps.locate.outputs.exe }}.sha256"
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: doubi-installer
-          path: |
-            dist/${{ steps.locate.outputs.exe }}
-            dist/${{ steps.locate.outputs.exe }}.sha256
-          # 90 天够用——下载者可以从 GitHub Release 拿到永久链接。
-          retention-days: 90
-
-      - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          # 不在 changelog 里硬编码——用 git 自动生成的 release notes；
-          # 仓库里有手写的 CHANGELOG.md，PR description 也够用。
-          generate_release_notes: true
-          files: |
-            dist/${{ steps.locate.outputs.exe }}
-            dist/${{ steps.locate.outputs.exe }}.sha256
-          # draft: 发版前先看一遍；发版动作由人触发。
-          draft: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
