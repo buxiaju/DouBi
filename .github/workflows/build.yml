@@ -71,7 +71,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install ".[gui]"
-          python -m pip install pytest pytest-asyncio ruff pyinstaller
+          # pin pyinstaller 与本地一致（6.22.2，本地 build 已验证 OK）。
+          # 不写 ``==`` 会拉 latest（CI 端拉到 6.x.x 较新版本，但与 Python 3.13
+          # + PySide6 6.8+ 存在兼容性回归，Run #28 build 步骤 1 秒 exit 1
+          # 没拿到日志，但时间形态与 PyInstaller import 即崩溃一致）。
+          python -m pip install pytest pytest-asyncio ruff "pyinstaller==6.22.2"
 
       - name: Run tests
         env:
