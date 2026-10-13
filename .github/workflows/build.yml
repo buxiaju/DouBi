@@ -48,10 +48,22 @@ jobs:
         # 不用 ``pip install -e .``：CI 不需要可编辑模式，反而会引入
         # 与本地开发不同的 import 路径。``pip install .`` 一次性装完
         # 生产依赖，再补 dev 依赖。
+        #
+        # ``pyinstaller`` **不**放在 ``[project.optional-dependencies]``
+        # 的 dev / build 里——它是 **CI 发版专用**工具，不参与日常 dev
+        # 工作流；放在那里会让 ``pip install .[dev]`` 多装一个 30 MB
+        # 二进制。所以这里单列一行加注释说明。
+        # 0.3.10 Run #26 实际栽过：``pip install .``（生产 only）不带
+        # PyInstaller，``scripts/build_installer.py`` 一启动就在
+        # ``python -m PyInstaller`` 处 ``ModuleNotFoundError`` exit 1
+        # （CI 1 秒挂 vs 本地 7-8 分钟跑通，差异完全在 PyInstaller 装没装）。
+        # （仓库里 ``pyproject.toml`` 的 ``[project.optional-dependencies]``
+        # 故意不列 PyInstaller——依赖树「最小化」是 AGENTS.md 风格；
+        # 在 CI workflow 里显式 pip install 是更准的位置。）
         run: |
           python -m pip install --upgrade pip
           python -m pip install .
-          python -m pip install pytest pytest-asyncio ruff
+          python -m pip install pytest pytest-asyncio ruff pyinstaller
 
       - name: Run tests
         env:
