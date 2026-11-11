@@ -25,6 +25,7 @@ def build_history_widgets():
         QLabel,
         QMenu,
         QStackedWidget,
+        QTableWidgetItem,
         QVBoxLayout,
         QWidget,
     )
@@ -156,6 +157,11 @@ def build_history_widgets():
                 header.setSectionResizeMode(_col, QHeaderView.Fixed)
                 self.table.setColumnWidth(_col, _w)
             header.setSectionResizeMode(2, QHeaderView.Stretch)
+            # 表头点击排序（下载时间默认倒序，与 list_recent 的 SQL 排序一致）。
+            # 排序实际开关在 _populate 里控制——填充过程中必须关闭，
+            # 否则 setItem 会把行插进「当前排序位置」，行序直接错乱。
+            header.setSortIndicatorShown(True)
+            header.setSortIndicator(4, Qt.DescendingOrder)
             self.table.setContextMenuPolicy(Qt.CustomContextMenu)
             self.table.customContextMenuRequested.connect(self._on_context_menu)
             self._stack.addWidget(self.table)
@@ -229,32 +235,66 @@ def build_history_widgets():
                     "完成一次下载后，记录会自动出现在这里。",
                 )
                 self._stack.setCurrentWidget(self._empty_state)
+            header = self.table.horizontalHeader()
+            prev_section = header.sortIndicatorSection()
+            prev_order = header.sortIndicatorOrder()
+            self.table.setSortingEnabled(False)
             self.table.setRowCount(len(rows))
             for i, r in enumerate(rows):
                 dl_time = ""
+                dl_ts = None
                 if r.last_download_time:
+                    dl_ts = r.last_download_time
                     try:
                         dl_time = datetime.fromtimestamp(r.last_download_time).strftime(
                             "%Y-%m-%d %H:%M"
                         )
                     except (OverflowError, OSError, ValueError):
                         dl_time = str(r.last_download_time)
-                self.table.setItem(i, 0, _cell(r.platform or ""))
-                self.table.setItem(i, 1, _cell(r.item_id or ""))
-                self.table.setItem(i, 2, _cell(r.title or ""))
-                self.table.setItem(i, 3, _cell(r.author_name or ""))
-                self.table.setItem(i, 4, _cell(dl_time))
-                self.table.setItem(i, 5, _cell(self._short_dir(r.last_save_dir)))
+                        dl_ts = None
+                cells = (
+                    _cell(r.platform or ""),
+                    _cell(r.item_id or ""),
+                    _cell(r.title or ""),
+                    _cell(r.author_name or ""),
+                    _SortCell(dl_time, sort_key=dl_ts),
+                    _cell(self._short_dir(r.last_save_dir)),
+                )
+                for col, item in enumerate(cells):
+                    # 记录本体挂在每格上：排序打乱行序后，行 → 数据
+                    # 的映射跟着单元格走（见 _row_record）。
+                    item.setData(_REC_ROLE, r)
+                    self.table.setItem(i, col, item)
+            self.table.setSortingEnabled(True)
+            # 保留用户上一次选的排序列 / 方向；首次填充落到 _build_ui
+            # 设好的默认（下载时间倒序）。
+            header.setSortIndicator(prev_section, prev_order)
+
+        def _row_record(self, row_idx: int):
+            """视觉行 → 数据记录。
+
+            表头排序会打乱视觉行序，所以记录本体从单元格（``_REC_ROLE``）
+            里取；单元格为空时退回 ``self._rows[row_idx]``（排序从未启用
+            的旧路径 / 防御）。
+            """
+            item = self.table.item(row_idx, 0)
+            if item is not None:
+                rec = item.data(_REC_ROLE)
+                if rec is not None:
+                    return rec
+            if 0 <= row_idx < len(self._rows):
+                return self._rows[row_idx]
+            return None
 
         def _open_selected_dir(self) -> None:
             sel = self.table.selectedItems()
             if not sel:
                 toast_warning(self, "未选择记录", "请先在表格中选择一行。")
                 return
-            row_idx = sel[0].row()
-            if not (0 <= row_idx < len(self._rows)):
+            record = self._row_record(sel[0].row())
+            if record is None:
                 return
-            save_dir = self._rows[row_idx].last_save_dir or ""
+            save_dir = record.last_save_dir or ""
             if not save_dir:
                 toast_warning(self, "无保存目录", "这条记录没有保存路径。")
                 return
@@ -273,13 +313,15 @@ def build_history_widgets():
 
         def _on_context_menu(self, pos) -> None:
             row = self.table.rowAt(pos.y())
-            if row < 0 or row >= len(self._rows):
+            if row < 0:
                 return
             self.table.setCurrentCell(row, self.table.currentColumn())
             menu = QMenu(self.table)
             menu.addAction("打开保存目录", self._open_selected_dir)
             # 重新解析：用 platform + item_id 重建 URL
-            r = self._rows[row]
+            r = self._row_record(row)
+            if r is None:
+                return
             url = _build_url_from_row(r)
             if url:
                 menu.addAction("重新解析", lambda: self._reparse(url))
@@ -298,10 +340,33 @@ def build_history_widgets():
                 f"已复制链接到剪贴板：{url[:60]}",
             )
 
-    def _cell(text: str):
+    def _cell(text: str, *, sort_key=None):
+        """普通文本单元格；``sort_key`` 存 UserRole 供数值排序用。"""
         from PySide6.QtWidgets import QTableWidgetItem
         item = QTableWidgetItem(text)
+        if sort_key is not None:
+            from PySide6.QtCore import Qt
+            item.setData(Qt.ItemDataRole.UserRole, sort_key)
         return item
+
+    # 记录本体挂在单元格上（UserRole+1）：表头排序会打乱视觉行序，
+    # 行 → 数据的映射必须跟着单元格走，不能再用 ``self._rows[row]``。
+    _REC_ROLE = Qt.ItemDataRole.UserRole + 1
+
+    class _SortCell(QTableWidgetItem):
+        """数值角色优先的排序单元格：时间列按时间戳排，其余按文本。"""
+
+        def __init__(self, text: str, *, sort_key=None):
+            super().__init__(text)
+            if sort_key is not None:
+                self.setData(Qt.ItemDataRole.UserRole, sort_key)
+
+        def __lt__(self, other):
+            a = self.data(Qt.ItemDataRole.UserRole)
+            b = other.data(Qt.ItemDataRole.UserRole)
+            if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+                return a < b
+            return super().__lt__(other)
 
     def _short_dir(path) -> str:
         """把保存路径压成能在列里读完的一行（0.3.7 修）。

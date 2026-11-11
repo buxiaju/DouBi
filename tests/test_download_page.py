@@ -405,3 +405,161 @@ class TestMaybeNotifyCompletion:
         assert page._succeeded_pending == 0
         assert page._failed_pending == 0
 
+
+
+# ----------------------------------------------------------------------
+# P1-4: speed / ETA / size formatting and row display
+# ----------------------------------------------------------------------
+
+
+class TestFormatHelpers:
+    """纯函数，无需 QApplication。"""
+
+    def test_speed_invalid_inputs_return_empty(self):
+        from doubi.ui.pages.download import format_speed
+        assert format_speed(None) == ""
+        assert format_speed("abc") == ""
+        assert format_speed(0) == ""
+        assert format_speed(-5) == ""
+
+    def test_speed_units(self):
+        from doubi.ui.pages.download import format_speed
+        assert format_speed(512) == "512 B/s"
+        assert format_speed(1024) == "1.0 KB/s"
+        assert format_speed(5.2 * 1024 * 1024) == "5.2 MB/s"
+        assert format_speed(1.5 * 1024 ** 3) == "1.50 GB/s"
+
+    def test_eta_invalid_inputs_return_empty(self):
+        from doubi.ui.pages.download import format_eta
+        assert format_eta(None) == ""
+        assert format_eta("x") == ""
+        assert format_eta(0) == ""
+        assert format_eta(-1) == ""
+
+    def test_eta_buckets(self):
+        from doubi.ui.pages.download import format_eta
+        assert format_eta(19) == "剩 19 秒"
+        assert format_eta(200) == "剩 3 分"
+        assert format_eta(4000) == "剩 1 时"
+
+    def test_size(self):
+        from doubi.ui.pages.download import format_size
+        assert format_size(None) == ""
+        assert format_size(0) == ""
+        assert format_size(100 * 1024 * 1024) == "100.0 MB"
+        assert format_size(10.5 * 1024 ** 3) == "10.50 GB"
+
+
+class _SpeedPipeline:
+    """Emits one speed-bearing tick, then lingers so the row can be
+    inspected mid-flight."""
+
+    async def download_item(self, item, options, *, on_progress=None):
+        from doubi.core.pipeline import ProgressEvent
+        if on_progress is not None:
+            on_progress(ProgressEvent(
+                job_id="j", item=item, phase="downloading",
+                fraction=0.4, message="downloading 40%",
+                extra={"speed": 5.2 * 1024 * 1024, "eta": 19,
+                       "downloaded_bytes": 40 * 1024 * 1024,
+                       "total_bytes": 100 * 1024 * 1024},
+            ))
+        await asyncio.sleep(0.5)
+        return True
+
+
+async def test_task_row_swaps_message_for_speed_and_eta(qapp, tmp_path):
+    """Running + known speed: speed/ETA replace the message column."""
+    from doubi.ui.pages.download import build_download_widgets
+    from doubi.ui.task_manager import TaskManager
+
+    cls, _ = build_download_widgets()
+    page = cls()
+    mgr = TaskManager(_SpeedPipeline())
+    page.set_task_manager(mgr)
+
+    task_id = mgr.add(_make_item(), _make_options(tmp_path))
+    for _ in range(3):
+        await asyncio.sleep(0)
+    qapp.processEvents()
+
+    row = page._rows[task_id]
+    assert row.message_label.isHidden(), "message must yield to speed/eta"
+    assert not row.speed_label.isHidden()
+    assert row.speed_label.text() == "5.2 MB/s"
+    assert row.eta_label.text() == "剩 19 秒"
+
+    # 汇总条：总速度 + 会话已下字节量
+    assert "总速度 5.2 MB/s" in page.active_summary.text()
+    assert "已下 40.0 MB" in page.active_summary.text()
+
+    await _drain()
+
+
+async def test_task_row_pause_restores_message_column(qapp, tmp_path):
+    """非 running 状态必须换回 message——暂停行显示「已暂停」比陈旧
+    速度有用。"""
+    from doubi.ui.pages.download import build_download_widgets
+    from doubi.ui.task_manager import TaskManager
+
+    class _SlowSpeedPipeline(_SpeedPipeline):
+        async def download_item(self, item, options, *, on_progress=None):
+            from doubi.core.pipeline import ProgressEvent
+            if on_progress is not None:
+                on_progress(ProgressEvent(
+                    job_id="j", item=item, phase="downloading",
+                    fraction=0.4, message="downloading 40%",
+                    extra={"speed": 2048.0, "eta": 30,
+                           "downloaded_bytes": 4096,
+                           "total_bytes": 10240},
+                ))
+            await asyncio.sleep(1.5)
+            return True
+
+    cls, _ = build_download_widgets()
+    page = cls()
+    mgr = TaskManager(_SlowSpeedPipeline())
+    page.set_task_manager(mgr)
+
+    task_id = mgr.add(_make_item(), _make_options(tmp_path))
+    for _ in range(3):
+        await asyncio.sleep(0)
+    qapp.processEvents()
+    row = page._rows[task_id]
+    assert row.speed_label.isVisibleTo(row.info_slot)
+
+    assert mgr.pause(task_id)
+    qapp.processEvents()
+    assert not row.message_label.isHidden()
+    assert row.speed_label.isHidden()
+    assert row.eta_label.isHidden()
+
+    await _drain()
+
+
+async def test_summary_omits_speed_when_no_metrics(qapp, tmp_path):
+    """分段引擎（无字节信息）不产生误导性的「总速度 0 B/s」。"""
+    from doubi.ui.pages.download import build_download_widgets
+    from doubi.ui.task_manager import TaskManager
+
+    class _NoMetricsPipeline:
+        async def download_item(self, item, options, *, on_progress=None):
+            await asyncio.sleep(0.5)
+            return True
+
+    cls, _ = build_download_widgets()
+    page = cls()
+    mgr = TaskManager(_NoMetricsPipeline())
+    page.set_task_manager(mgr)
+
+    mgr.add(_make_item(), _make_options(tmp_path))
+    for _ in range(3):
+        await asyncio.sleep(0)
+    qapp.processEvents()
+
+    text = page.active_summary.text()
+    assert "1 个任务正在下载" in text
+    assert "总速度" not in text
+    assert "已下" not in text
+
+    await _drain()

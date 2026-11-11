@@ -173,7 +173,7 @@ def build_settings_widgets():
         import_bilibili_cookies,
         import_douyin_cookies,
     )
-    from ..feedback import toast_error, toast_success
+    from ..feedback import toast_error, toast_success, toast_warning
     from ..theme import (
         SPACE_LG,
         SPACE_MD,
@@ -194,14 +194,19 @@ def build_settings_widgets():
     from ..widgets import build_page_header, build_section_divider
 
     class SettingsPage(QWidget):
-        # 保存后通知主窗口把 prompt_before_download 推到 parse_page，
-        # 这样不重启也能生效。仅这一个字段需要即时下发——其他字段的
-        # 变更要么重启生效（database_path / theme），要么下一次下载
-        # 入队时自然重新读（container / max_quality 等）。
+        # 保存后通知主窗口把 prompt_before_download 推到 parse_page。
+        # 现在所有字段经 configSaved 广播后都会被页面重新持有，这个
+        # 信号保留是因为 parse_page 对该字段还有独立的开关 UI 联动。
         promptBeforeDownloadChanged = pyqtSignal(bool)
         # 保存后通知主窗口把嗅探配置推到 parse_page（解析按钮的
         # 「嗅探中… (Ns)」文案要用到 N），载荷是 ``(enabled, duration_sec)``。
         sniffConfigChanged = pyqtSignal(bool, int)
+        # 保存成功后广播整份刷新的 AppConfig。各页面持有的是构造时
+        # load_config 出来的独立快照，不广播的话 parse/search/hot/history
+        # 会一直用旧值——「下次下载生效」就变成了「重启才生效」。
+        # 载荷是 settings 页刷新后的同一 AppConfig 实例，页面直接
+        # ``self._cfg = cfg`` 即可（对象共享，后续保存自动跟随）。
+        configSaved = pyqtSignal(object)
 
         def __init__(self, parent: Optional[QWidget] = None):
             super().__init__(parent)
@@ -227,6 +232,22 @@ def build_settings_widgets():
             )
             # 别处（导航栏主题按钮、CLI）切换主题时，下拉框跟着走。
             subscribe_theme(self, self._sync_theme_combo)
+            # ---- P1-3 自动保存 ----
+            # 任意控件改动后 500ms 自动写回 config.yml，不再依赖「保存」
+            # 按钮（按钮保留，改名「立即保存」用于强制写一次 + 完整提示）。
+            # arm 放在 __init__ 末尾是关键：_build_ui / _load_from_cfg 里
+            # 的程序化 setChecked / _set_combo / setCurrentIndex 都发生在
+            # arm 之前，不会触发启动期的一次多余落盘。
+            self._auto_save_armed = False
+            # 最近一次写盘是否改了语言（语言是唯一需要重启才全界面
+            # 生效的字段），由 _write_config 设置、保存入口消费。
+            self._language_changed = False
+            self._save_timer = QTimer(self)
+            self._save_timer.setSingleShot(True)
+            self._save_timer.setInterval(500)
+            self._save_timer.timeout.connect(self._auto_save)
+            self._wire_auto_save()
+            self._auto_save_armed = True
             # Populate the account block asynchronously
             QTimer.singleShot(50, lambda: _spawn_account_refresh(self))
 
@@ -244,9 +265,9 @@ def build_settings_widgets():
             self._header = PageHeader(self)
             self._header.set_title("设置")
             self._header.set_subtitle(
-                "账号、下载、网络、嗅探、存储。所有改动点「保存设置」后才会写入配置文件。"
+                "账号、下载、网络、嗅探、存储。改动后自动写回配置文件，「立即保存」可手动触发一次。"
             )
-            self.save_btn = PushButton("保存设置", self)
+            self.save_btn = PushButton("立即保存", self)
             self.save_btn.setFixedWidth(120)
             self.save_btn.clicked.connect(self._on_save)
             self._header.add_action(self.save_btn)
@@ -299,6 +320,17 @@ def build_settings_widgets():
             download_form.addRow("文件名模板", self.filename_template)
             download_form.addRow("容器格式", self.container)
             download_form.addRow("最高画质", self.max_quality)
+
+            # 附加内容 sidecar：CLI 有 --nfo/--danmaku/--subtitles，搬运链
+            # （_build_options → 引擎）早已全通，唯独 GUI 一直没有入口——
+            # 用户只能手改 config.yml，属于「静默失效开关」的 GUI 变体。
+            # 补齐三端对齐的最后一块。默认值都来自 AppConfig（默认关）。
+            self.write_nfo = SwitchButton(self._download_card["body"])
+            download_form.addRow("NFO 刮削文件", self.write_nfo)
+            self.write_danmaku = SwitchButton(self._download_card["body"])
+            download_form.addRow("弹幕 (XML)", self.write_danmaku)
+            self.write_subtitles = SwitchButton(self._download_card["body"])
+            download_form.addRow("字幕", self.write_subtitles)
             body_layout.addWidget(self._download_card["widget"])
 
             # ---- 3) 网络与性能卡 ----
@@ -365,7 +397,7 @@ def build_settings_widgets():
             # ---- 5) 主题与外观卡（合并了原「主题」与「下载前询问 / 通知」偏好） ----
             self._appearance_card = self._build_card(
                 "主题与外观",
-                "切换主题包会立即生效；点「保存设置」才会写入配置文件",
+                "切换主题包会立即生效并自动写回配置文件",
             )
             appearance_form = QFormLayout(self._appearance_card["body"])
             appearance_form.setVerticalSpacing(SPACE_MD)
@@ -398,6 +430,11 @@ def build_settings_widgets():
             # 默认 False——「点一下就走」是绝大多数用户的心智模型。
             self.prompt_before_download = SwitchButton(self._appearance_card["body"])
             appearance_form.addRow("下载前询问选项", self.prompt_before_download)
+
+            # 剪贴板监听：解析页轮询剪贴板，复制已知平台链接自动填入。
+            # 默认关——自动抢粘贴对部分用户是惊扰，要用的人自己开。
+            self.clipboard_watch = SwitchButton(self._appearance_card["body"])
+            appearance_form.addRow("剪贴板自动识别链接", self.clipboard_watch)
 
             # 下载完成通知：控制 Windows toast 的触发场景。
             # 三个档位映射到 AppConfig.notify_on_completion：
@@ -660,8 +697,9 @@ def build_settings_widgets():
             弹 QFileDialog → 调 :func:`build_diagnostic_bundle` → toast 反馈。
             失败（含 OSError / PermissionError）只 toast，**不**抛。
             """
-            from PySide6.QtWidgets import QFileDialog
             from datetime import datetime
+
+            from PySide6.QtWidgets import QFileDialog
 
             default_name = (
                 f"doubi-diag-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
@@ -783,8 +821,11 @@ def build_settings_widgets():
             self.bili_qr_btn.clicked.connect(self._on_bilibili_qr_login)
             self.bili_import_btn = PushButton("导入 Cookie 文件", card)
             self.bili_import_btn.clicked.connect(self._on_bilibili_import)
+            self.bili_logout_btn = PushButton("登出", card)
+            self.bili_logout_btn.clicked.connect(self._on_bilibili_logout)
             bili_row.addWidget(self.bili_qr_btn)
             bili_row.addWidget(self.bili_import_btn)
+            bili_row.addWidget(self.bili_logout_btn)
             layout.addLayout(bili_row)
 
             bili_detail = QLabel(
@@ -806,8 +847,11 @@ def build_settings_widgets():
             self.dy_qr_btn.clicked.connect(self._on_douyin_browser_login)
             self.dy_import_btn = PushButton("导入 Cookie 文件", card)
             self.dy_import_btn.clicked.connect(self._on_douyin_import)
+            self.dy_logout_btn = PushButton("登出", card)
+            self.dy_logout_btn.clicked.connect(self._on_douyin_logout)
             dy_row.addWidget(self.dy_qr_btn)
             dy_row.addWidget(self.dy_import_btn)
+            dy_row.addWidget(self.dy_logout_btn)
             layout.addLayout(dy_row)
 
             dy_detail = QLabel(
@@ -830,7 +874,11 @@ def build_settings_widgets():
             self.concurrent.setText(str(self._cfg.concurrent_jobs))
             self.rate_limit.setText(self._cfg.rate_limit or "")
             self.database.setChecked(self._cfg.database)
+            self.write_nfo.setChecked(self._cfg.write_nfo)
+            self.write_danmaku.setChecked(self._cfg.write_danmaku)
+            self.write_subtitles.setChecked(self._cfg.write_subtitles)
             self.prompt_before_download.setChecked(self._cfg.prompt_before_download)
+            self.clipboard_watch.setChecked(self._cfg.clipboard_watch)
             self._notify_combo_set(self._cfg.notify_on_completion)
             self.sniff_enabled.setChecked(self._cfg.sniff_enabled)
             self.sniff_duration.setText(str(self._cfg.sniff_duration_sec))
@@ -868,7 +916,7 @@ def build_settings_widgets():
                     label.setStyleSheet(muted_qss())
 
         def _on_theme_combo_changed(self, _index: int) -> None:
-            """选中即预览：立即生效，但只有点「保存设置」才写入配置。"""
+            """选中即预览：立即生效，配置文件由自动保存（500ms debounce）写回。"""
             if self._syncing_theme:
                 return
             set_theme(self._selected_theme_name())
@@ -933,6 +981,46 @@ def build_settings_widgets():
             else:
                 self.dy_status_label.setText("抖音：未知（点击右上角刷新）")
 
+        def _logout_platform(self, platform: str, label: str) -> None:
+            """登出共用主体：删 cookie → toast → 刷新状态。
+
+            确认框留给调用方（_on_*_logout），这里只做不可逆动作之后的
+            收尾，方便测试直接调。
+            """
+            from ..auth_actions import logout
+            ok, message = logout(platform)
+            if ok:
+                toast_success(self, f"{label}已登出", message)
+            else:
+                toast_error(self, f"{label}登出失败", message)
+            _spawn_account_refresh(self)
+
+        def _on_bilibili_logout(self) -> None:
+            from qfluentwidgets import MessageBox
+            box = MessageBox(
+                "登出 B 站？",
+                "将删除本地 Cookie 文件（~/.doubi/cookies/ 下），"
+                "不影响远端账号。重新扫码或导入 Cookie 即可再登录。",
+                self.window(),
+            )
+            box.yesButton.setText("登出")
+            box.cancelButton.setText("取消")
+            if box.exec():
+                self._logout_platform("bilibili", "B 站")
+
+        def _on_douyin_logout(self) -> None:
+            from qfluentwidgets import MessageBox
+            box = MessageBox(
+                "登出抖音？",
+                "将删除本地 Cookie 文件（~/.doubi/cookies/ 下），"
+                "不影响远端账号。重新扫码或导入 Cookie 即可再登录。",
+                self.window(),
+            )
+            box.yesButton.setText("登出")
+            box.cancelButton.setText("取消")
+            if box.exec():
+                self._logout_platform("douyin", "抖音")
+
         def _on_bilibili_qr_login(self) -> None:
             from ...ui.dialogs.login_dialog import build_bilibili_login_dialog
             cls = build_bilibili_login_dialog()
@@ -986,14 +1074,94 @@ def build_settings_widgets():
             else:
                 toast_error(self, title, msg)
 
+        # ---------------------------------------------------- auto-save
+
+        def _wire_auto_save(self) -> None:
+            """把「用户改动」信号全部接到 debounce 计时器上。
+
+            LineEdit 用 ``textEdited`` 而不是 ``textChanged``：程序化
+            ``setText``（如 ``_load_from_cfg`` 回填）不该触发写盘，
+            ``textEdited`` 只对用户输入（含粘贴）发信号。ComboBox /
+            SwitchButton 没有这种区分，靠 ``_auto_save_armed`` 标志挡住
+            构造期的程序化赋值——它们的 ``setChecked`` / ``setCurrentIndex``
+            都发生在 ``__init__`` 里 arm 之前。
+
+            主题下拉**故意不挡**外部同步：导航栏循环切主题经
+            ``_sync_theme_combo`` 程序化改下拉框，那是真实的用户动作，
+            自动保存让它持久化——旧行为「导航栏切主题要进设置页点保存
+            才记住」在自动保存时代是反直觉的。
+            """
+            line_edits = (self.output_root, self.filename_template,
+                          self.proxy, self.concurrent, self.rate_limit,
+                          self.sniff_duration, self.sniff_user_agent)
+            for w in line_edits:
+                w.textEdited.connect(self._schedule_auto_save)
+            combos = (self.container, self.max_quality, self.theme,
+                      self.language, self.notify_on_completion)
+            for w in combos:
+                w.currentIndexChanged.connect(self._schedule_auto_save)
+            switches = (self.database, self.prompt_before_download,
+                        self.clipboard_watch,
+                        self.write_nfo, self.write_danmaku,
+                        self.write_subtitles,
+                        self.sniff_enabled, self.sniff_headless,
+                        self.sniff_auto_play)
+            for w in switches:
+                w.checkedChanged.connect(self._schedule_auto_save)
+
+        def _schedule_auto_save(self, *_args) -> None:
+            """任意改动重置 500ms 倒计时——连续输入只落最后一次盘。"""
+            if not self._auto_save_armed:
+                return
+            self._save_timer.start()
+
+        def _auto_save(self) -> None:
+            """debounce 到期：静默写盘 + 广播配置。
+
+            成功不弹常规 toast——连续调整设置时提示会刷屏；失败照样弹，
+            磁盘出问题时用户必须看得到。唯一例外是语言：它是唯一改完
+            **不能**立即生效的字段（已渲染控件不重译），静默过去用户会
+            以为切坏了，所以这种情况弹一次轻提示。
+            """
+            if self._write_config():
+                logger.info("settings auto-saved to %s", DEFAULT_CONFIG_PATH)
+                if self._language_changed:
+                    toast_warning(
+                        self, "语言已保存",
+                        "重启应用后对全界面生效；其余设置已保存。",
+                    )
+
         # ----------------------------------------------------- save
 
         def _on_save(self) -> None:
+            """「立即保存」按钮：跳过 debounce 马上写盘，带成功提示。"""
+            self._save_timer.stop()
+            if self._write_config():
+                tail = ("语言将在重启后对全界面生效。"
+                        if self._language_changed else
+                        "改动即时生效或下次下载时生效。")
+                toast_success(
+                    self, "设置已保存",
+                    f"已写入 {DEFAULT_CONFIG_PATH}。{tail}",
+                )
+                logger.info("settings saved to %s (manual)", DEFAULT_CONFIG_PATH)
+
+        def _write_config(self) -> bool:
+            """收集全部控件值 → 写回 config.yml → 刷新内存配置 → 推副作用。
+
+            手动保存与自动保存共用这一条路，保证两条入口写出的配置
+            逐字节一致。成功后：从磁盘重载 ``self._cfg``（控件值经过
+            归一化，重载保证内存与磁盘逐字段一致）、经
+            :attr:`configSaved` 广播给主窗口转发的各页面、嗅探配置
+            注入 ``GenericAdapter``。返回 ``False`` 表示写盘失败
+            （已记日志 + toast）；成功时 ``self._language_changed``
+            记录语言是否变动（唯一需重启才全界面生效的字段）。
+            """
             try:
                 import yaml
             except ImportError:
                 toast_error(self, "无法保存", "缺少 pyyaml 依赖。")
-                return
+                return False
 
             # 必须用 to_dict() 而不是 asdict()：后者保留 Path 对象，
             # yaml.safe_dump 无法表示，会 RepresenterError。
@@ -1010,7 +1178,11 @@ def build_settings_widgets():
             data["rate_limit"] = self.rate_limit.text().strip() or None
             data["database"] = self.database.isChecked()
             data["prompt_before_download"] = self.prompt_before_download.isChecked()
+            data["clipboard_watch"] = self.clipboard_watch.isChecked()
             data["notify_on_completion"] = self._notify_combo_value()
+            data["write_nfo"] = self.write_nfo.isChecked()
+            data["write_danmaku"] = self.write_danmaku.isChecked()
+            data["write_subtitles"] = self.write_subtitles.isChecked()
 
             # 通用嗅探。时长夹到 5–60：低于 5 秒基本抓不到 m3u8（页面还没起播），
             # 高于 60 秒用户会以为程序卡死。非法输入回落到默认 15。
@@ -1025,16 +1197,23 @@ def build_settings_widgets():
 
             theme_name = self._selected_theme_name()
             data["theme"] = theme_name
-            set_theme(theme_name)
+            # 主题在 _on_theme_combo_changed 里已经实时应用过；只有当前
+            # 生效主题与选择不一致时才补一刀（老 _on_save 的兜底语义）。
+            # set_theme 没有同名早退，无条件调用会让每次自动保存都整页
+            # 重刷一遍。
+            if theme_name != current_theme_name():
+                set_theme(theme_name)
 
-            # 语言：写入配置即可，下次启动时 app.py 读 config 调 set_language。
-            # 这里不实时切语言——已渲染的控件不会重译，切了反而半中半英。
+            # 语言：写入配置即可。运行时 ``set_language`` 虽然可用，但已渲染
+            # 的控件不会重译，切了反而半中半英——所以语言改动要重启才对
+            # 全界面生效，这个差异在 _auto_save / _on_save 里提示。
             from ..i18n import available_languages, language_labels
             lang_labels = language_labels()
             lang_idx = self.language.currentIndex()
             if 0 <= lang_idx < len(lang_labels):
                 langs = available_languages()
                 data["language"] = langs[lang_idx]
+            language_changed = data["language"] != self._cfg.language
 
             cfg_path = DEFAULT_CONFIG_PATH
             try:
@@ -1046,16 +1225,16 @@ def build_settings_widgets():
             except Exception as exc:   # noqa: BLE001
                 logger.exception("settings save failed")
                 toast_error(self, "保存失败", f"{exc}")
-                return
+                return False
+
+            # 从刚写好的文件重载整份 AppConfig：控件值里做过归一化
+            # （并发数夹底、时长夹 5-60），重载保证内存与磁盘逐字段一致，
+            # 也避免逐字段手抄产生漂移。
+            self._cfg = load_config(None)
 
             # 嗅探配置要立即在本进程生效，否则用户改完时长还得重启才看得到
-            # 变化。``self._cfg`` 是内存里那份，同步它 + 重新注入兜底适配器，
-            # 就等于走了一遍启动时的 ``GenericAdapter.set_config``。
-            self._cfg.sniff_enabled = data["sniff_enabled"]
-            self._cfg.sniff_duration_sec = data["sniff_duration_sec"]
-            self._cfg.sniff_headless = data["sniff_headless"]
-            self._cfg.sniff_auto_play = data["sniff_auto_play"]
-            self._cfg.sniff_user_agent = data["sniff_user_agent"]
+            # 变化。重新注入兜底适配器，就等于走了一遍启动时的
+            # ``GenericAdapter.set_config``。
             try:
                 from ...platforms.generic import GenericAdapter
                 GenericAdapter.set_config(self._cfg)
@@ -1065,12 +1244,13 @@ def build_settings_widgets():
                 self._cfg.sniff_enabled, self._cfg.sniff_duration_sec
             )
 
-            toast_success(
-                self, "设置已保存",
-                f"已写入 {cfg_path}。大部分设置下次下载时即生效；"
-                f"如遇异常请重启应用。",
-            )
-            logger.info("settings saved to %s", cfg_path)
+            # 广播整份新配置：parse / search / hot / history 各自持有
+            # 构造期的独立快照，不广播的话它们的「下次下载」读的还是旧值。
+            self.configSaved.emit(self._cfg)
+
+            # 给生效提示用的差异记录（语言改动需重启，见 _auto_save）。
+            self._language_changed = language_changed
+            return True
 
         def _on_open_cookies_dir(self) -> None:
             cookies_dir = Path(self.cookies_dir_label.text())

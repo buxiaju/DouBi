@@ -132,12 +132,14 @@ def test_collect_prompt_overrides_returns_exactly_five_fields(host):
     try:
         out = collect_prompt_overrides(dlg)
         # M6.16：多了一个 title_template（默认 None = 不改）。
+        # 分段下载再加一个 download_sections（默认 None = 下载完整视频）。
         assert set(out) == {
             "max_quality", "container", "write_thumbnail", "write_metadata_json",
-            "title_template",
-        }, f"overrides 只能暴露 5 个字段，实际 {set(out)}"
+            "download_sections", "title_template",
+        }, f"overrides 字段集不符，实际 {set(out)}"
         # 默认未勾选 → title_template 必须是 None（区别于空字符串 ""）。
         assert out["title_template"] is None
+        assert out["download_sections"] is None
     finally:
         dlg.deleteLater()
 
@@ -162,8 +164,42 @@ def test_collect_prompt_overrides_reflects_user_edits(host):
             "container": "mkv",
             "write_thumbnail": True,
             "write_metadata_json": True,
+            "download_sections": None,
             "title_template": "番外-{title}",
         }
+    finally:
+        dlg.deleteLater()
+
+
+def test_collect_prompt_overrides_sections_opt_in(host):
+    """分段下载与标题修改同一契约：勾选才生效，勾选后取输入框原文。"""
+    from doubi.ui.pages.parse import PromptOptionsDialog, collect_prompt_overrides
+    from doubi.core.models import DownloadOptions
+
+    dlg = PromptOptionsDialog(host, DownloadOptions())
+    try:
+        dlg.sections_input.setText("0:10-0:20")
+        out = collect_prompt_overrides(dlg)
+        assert out["download_sections"] is None, "未勾选时残留文字不生效"
+
+        dlg.sections_check.setChecked(True)
+        out = collect_prompt_overrides(dlg)
+        assert out["download_sections"] == "0:10-0:20"
+    finally:
+        dlg.deleteLater()
+
+
+def test_dialog_seed_prefills_sections(host):
+    """seed 带 download_sections 时弹窗回填并勾选（重试场景）。"""
+    from doubi.ui.pages.parse import PromptOptionsDialog
+    from doubi.core.models import DownloadOptions
+
+    seed = DownloadOptions(download_sections="1:00-2:30")
+    dlg = PromptOptionsDialog(host, seed)
+    try:
+        assert dlg.sections_check.isChecked() is True
+        assert dlg.sections_input.text() == "1:00-2:30"
+        assert dlg.sections_input.isEnabled() is True
     finally:
         dlg.deleteLater()
 

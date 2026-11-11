@@ -68,6 +68,9 @@ DEFAULTS: dict[str, Any] = {
     # GUI 行为偏好：下载前是否弹出选项对话框让用户覆盖画质/容器等。
     # 默认 False 是有意为之——绝大多数下载用户就是「点一下就走」。
     "prompt_before_download": False,
+    # 解析页剪贴板监听：复制已知平台链接时自动填入输入框并提示。
+    # 默认关——不打断用户的复制粘贴流是底线，要用的人自己开。
+    "clipboard_watch": False,
     # 重复下载策略：skip（跳过）/ redownload（重新下载）/ ask（询问）
     "duplicate_policy": "skip",
     # UI 语言。空串/未知值回退到 zh_CN。GUI 切换后需重启生效。
@@ -140,6 +143,9 @@ class AppConfig:
     )
     theme: str = DEFAULTS["theme"]
     prompt_before_download: bool = DEFAULTS["prompt_before_download"]
+    #: 解析页剪贴板监听开关（默认关）。False 时解析页的轮询定时器
+    #: 完全不启动——不是「检测到再忽略」，是零轮询开销。
+    clipboard_watch: bool = DEFAULTS["clipboard_watch"]
     duplicate_policy: str = DEFAULTS["duplicate_policy"]
     language: str = DEFAULTS["language"]
     engine: str = DEFAULTS["engine"]
@@ -305,6 +311,10 @@ def load_config(path: Optional[Path] = None, *, env_prefix: str = "DOUBI_") -> A
         prompt_before_download=_coerce(
             data.get("prompt_before_download", DEFAULTS["prompt_before_download"]),
             DEFAULTS["prompt_before_download"],
+        ),
+        clipboard_watch=_coerce(
+            data.get("clipboard_watch", DEFAULTS["clipboard_watch"]),
+            DEFAULTS["clipboard_watch"],
         ),
         duplicate_policy=str(data.get("duplicate_policy", DEFAULTS["duplicate_policy"])),
         language=str(data.get("language", DEFAULTS["language"])),

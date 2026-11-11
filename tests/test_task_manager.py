@@ -934,3 +934,134 @@ async def test_discard_restorable_without_a_database_is_a_no_op(qapp, tmp_path):
 
     # Nothing was asked for, so nothing was deleted from the real database.
     assert len(await TaskManager.list_restorable(opts.database)) == len(rows)
+
+
+# ----------------------------------------------------------------------
+# P1-4: transfer metrics (speed / ETA / bytes) absorbed from engine extra
+# ----------------------------------------------------------------------
+
+
+async def test_metrics_absorbed_then_cleared_on_merge_tick(qapp, tmp_path):
+    """Bytes ride along in ``extra``; a non-transfer tick clears the
+    speed but keeps the byte counters for the session summary."""
+    from doubi.ui.task_manager import TaskManager
+
+    script = [
+        dict(phase="downloading", fraction=0.4, message="downloading 40%",
+             extra={"speed": 2048.0, "eta": 12,
+                    "downloaded_bytes": 4096, "total_bytes": 10240}),
+        dict(phase="downloading", fraction=0.9,
+             message="download finished, post-processing",
+             extra={"filename": "x.mp4"}),
+        dict(phase="downloading", fraction=0.6, message="downloading 60%",
+             extra={"speed": 4096.0, "eta": 5,
+                    "downloaded_bytes": 6144, "total_bytes": 10240}),
+    ]
+    mgr = TaskManager(_ScriptedProgressPipeline(script, ok=False))
+    seen: list[tuple] = []
+    mgr.task_progress.connect(
+        lambda tid, f, m: seen.append((
+            mgr.get(tid).bytes_per_sec,
+            mgr.get(tid).eta_seconds,
+            mgr.get(tid).downloaded_bytes,
+            mgr.get(tid).total_bytes,
+        )))
+
+    task_id = mgr.add(_make_item(), _make_options(tmp_path))
+    await _drain()
+
+    # Tick 1: engine-supplied metrics land verbatim.
+    assert seen[0] == (2048.0, 12, 4096, 10240)
+    # Merging tick: no speed key → speed/ETA cleared, bytes retained.
+    assert seen[1] == (None, None, 4096, 10240)
+    # Transfer resumed: fresh metrics.
+    assert seen[2] == (4096.0, 5, 6144, 10240)
+    # Terminal state: speed cleared, byte counters survive for the
+    # "已下 X" session summary.
+    info = mgr.get(task_id)
+    assert info.status == "failed"
+    assert info.bytes_per_sec is None
+    assert info.eta_seconds is None
+    assert info.downloaded_bytes == 6144
+    assert info.total_bytes == 10240
+
+
+async def test_metrics_absent_extra_leaves_everything_none(qapp, tmp_path):
+    """Segment engines (m3u8) carry no byte keys at all — all four
+    metric fields must stay None, never a fabricated number."""
+    from doubi.ui.task_manager import TaskManager
+
+    script = [
+        dict(phase="downloading", fraction=0.5, message="50%",
+             extra={"downloaded_count": 3, "child_count": 6}),
+    ]
+    mgr = TaskManager(_ScriptedProgressPipeline(script, ok=False))
+    task_id = mgr.add(_make_item(), _make_options(tmp_path))
+    await _drain()
+    info = mgr.get(task_id)
+    assert info.bytes_per_sec is None
+    assert info.eta_seconds is None
+    assert info.downloaded_bytes is None
+    assert info.total_bytes is None
+
+
+class _BytesOnlyPipeline:
+    """Emits byte counts but no ``speed`` key — the manager must derive
+    the speed from consecutive ``downloaded_bytes`` samples itself."""
+
+    async def download_item(self, item, options, *, on_progress=None):
+        from doubi.core.pipeline import ProgressEvent
+
+        def tick(frac, done):
+            on_progress(ProgressEvent(
+                job_id="j", item=item, phase="downloading",
+                fraction=frac, message="downloading",
+                extra={"downloaded_bytes": done, "total_bytes": 10240},
+            ))
+
+        tick(0.1, 1024)
+        await asyncio.sleep(0.05)
+        tick(0.5, 5120)
+        return True
+
+
+async def test_speed_derived_from_byte_deltas(qapp, tmp_path):
+    from doubi.ui.task_manager import TaskManager
+
+    mgr = TaskManager(_BytesOnlyPipeline())
+    seen: list = []
+    mgr.task_progress.connect(
+        lambda tid, f, m: seen.append(mgr.get(tid).bytes_per_sec))
+
+    task_id = mgr.add(_make_item(), _make_options(tmp_path))
+    await _drain()
+
+    assert seen[0] is None, "first sample has no predecessor to diff against"
+    assert seen[1] is not None and seen[1] > 0
+    info = mgr.get(task_id)
+    assert info.status == "completed"
+    assert info.bytes_per_sec is None  # cleared by the terminal transition
+
+
+async def test_retry_resets_metrics(qapp, tmp_path):
+    """A retried task must not surface the previous attempt's numbers."""
+    from doubi.ui.task_manager import TaskManager
+
+    script = [
+        dict(phase="downloading", fraction=0.5, message="downloading 50%",
+             extra={"speed": 2048.0, "eta": 12,
+                    "downloaded_bytes": 4096, "total_bytes": 10240}),
+    ]
+    mgr = TaskManager(_ScriptedProgressPipeline(script, ok=False))
+    task_id = mgr.add(_make_item(), _make_options(tmp_path))
+    await _drain()
+    assert mgr.get(task_id).status == "failed"
+
+    assert mgr.retry(task_id)
+    info = mgr.get(task_id)
+    assert info.status == "running"
+    assert info.bytes_per_sec is None
+    assert info.eta_seconds is None
+    assert info.downloaded_bytes is None
+    assert info.total_bytes is None
+    await _drain()

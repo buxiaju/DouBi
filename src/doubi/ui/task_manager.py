@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
@@ -63,6 +64,16 @@ class TaskInfo:
     created_at: datetime = field(default_factory=datetime.now)
     finished_at: Optional[datetime] = None
     save_path: Optional[str] = None
+    # ---- P1-4 实时传输度量（都是可选的，None = 引擎没给） ----
+    #
+    # 字节型引擎（yt-dlp / aria2）从进度 ``extra`` 里带来；分段型引擎
+    # （m3u8 / nm3u8dl）没有字节概念，四个字段保持 None，UI 显示为空
+    # 而不是编一个数字。只活在内存里：不进 pending_task 行（见
+    # ``_persist_row``），恢复 / 重试后归零是符合直觉的。
+    bytes_per_sec: Optional[float] = None
+    eta_seconds: Optional[float] = None
+    downloaded_bytes: Optional[int] = None
+    total_bytes: Optional[int] = None
 
     def is_terminal(self) -> bool:
         return self.status in ("completed", "failed", "cancelled")
@@ -131,6 +142,11 @@ class TaskManager(QObject):
         # Serialises the pending-row writes so they commit in the order
         # the transitions happened; see :meth:`_run_db`.
         self._db_lock = asyncio.Lock()
+        # P1-4 速度降级推导的采样表：task_id -> (monotonic 时刻, 上次字节量)。
+        # 引擎没给 speed 但给了 downloaded_bytes 时，用相邻两次样本差分。
+        # 只在 _on_progress（引擎线程）里读写，_forget 时随手清掉，
+        # 不会跨任务泄漏。
+        self._last_bytes: dict[str, tuple[float, int]] = {}
 
     # ---- cross-process resume persistence -----------------------------
     #
@@ -439,6 +455,13 @@ class TaskManager(QObject):
         info.error = None
         info.finished_at = None
         info.save_path = None
+        # P1-4 度量跟着重试一起归零：上一次尝试的速度 / ETA 对新尝试
+        # 没有意义，留着会让行在首个进度 tick 之前显示陈旧数字。
+        info.bytes_per_sec = None
+        info.eta_seconds = None
+        info.downloaded_bytes = None
+        info.total_bytes = None
+        self._last_bytes.pop(task_id, None)
         info.created_at = datetime.now()
         self._active[task_id] = info
         self.task_added.emit(task_id)
@@ -655,6 +678,9 @@ class TaskManager(QObject):
         if self._tasks.get(task_id) is task:
             self._tasks.pop(task_id, None)
             self._flags.pop(task_id, None)
+            # 该尝试的速度采样随之作废——resume / retry 会起新尝试，
+            # 新旧样本差分出来的“速度”会把两段传输的间隙算进去。
+            self._last_bytes.pop(task_id, None)
 
     def _stop_attempt(self, task_id: str, reason: str) -> None:
         """Stop the current attempt of *task_id* using both mechanisms.
@@ -674,6 +700,65 @@ class TaskManager(QObject):
         task = self._tasks.get(task_id)
         if task is not None and not task.done():
             task.cancel()
+
+    def _absorb_metrics(
+        self, task_id: str, info: TaskInfo, ev: ProgressEvent,
+    ) -> None:
+        """Fold engine transfer metrics from ``ev.extra`` into *info*.
+
+        字节型引擎把 ``speed`` / ``eta`` / ``downloaded_bytes`` /
+        ``total_bytes`` 放进进度 ``extra``（见 engines/yt_dlp.py 与
+        engines/aria2.py）。分段型引擎（m3u8）的 extra 没有这些键，
+        四个字段保持 None——行上不显示速度，诚实留空好过编造数字。
+
+        两条非显然的规则：
+
+        * **键存在但值为 None 也算一次更新。** yt-dlp 在 total 未知时
+          ``speed=None``——把 None 写回 info 是对的（这 tick 确实测不到），
+          但 ``downloaded_bytes`` / ``total_bytes`` 只在非 None 时覆盖，
+          避免一次 total 缺失抹掉上次已知的总量。
+        * **非传输 tick（合并 / 后处理 / 重试）要清速度。**
+          "download finished, post-processing" 不带 speed 键；不清的话
+          行上会继续挂着合并阶段的速度，看起来像还在下载。
+        """
+        extra = ev.extra or {}
+        # 注意入口条件：downloaded_bytes / total_bytes 单独存在（引擎没带
+        # speed，交给差分推导）也要进来，不能只认 "speed" 键。
+        if ("speed" in extra or "downloaded_bytes" in extra
+                or "total_bytes" in extra):
+            info.bytes_per_sec = extra.get("speed")
+            info.eta_seconds = extra.get("eta")
+            if extra.get("downloaded_bytes") is not None:
+                info.downloaded_bytes = extra["downloaded_bytes"]
+            if extra.get("total_bytes") is not None:
+                info.total_bytes = extra["total_bytes"]
+            if info.bytes_per_sec is None and info.downloaded_bytes is not None:
+                # 引擎没给速度但给了字节量：差分推导。推导失败（首个
+                # 样本）保持 None，speed_label 那一栏继续留空。
+                info.bytes_per_sec = self._derive_speed(
+                    task_id, info.downloaded_bytes,
+                )
+            else:
+                # 引擎自带速度时不需要差分采样，样本表清掉防止陈旧。
+                self._last_bytes.pop(task_id, None)
+            return
+        # 非传输 tick：清掉会误导的速度 / ETA，但保留 downloaded_bytes
+        # ——「本次会话已下多少」的汇总条还要用它。
+        info.bytes_per_sec = None
+        info.eta_seconds = None
+        self._last_bytes.pop(task_id, None)
+
+    def _derive_speed(self, task_id: str, downloaded: int) -> Optional[float]:
+        """Speed from two consecutive ``downloaded_bytes`` samples, B/s."""
+        now = time.monotonic()
+        prev = self._last_bytes.get(task_id)
+        self._last_bytes[task_id] = (now, downloaded)
+        if prev is None:
+            return None
+        dt = now - prev[0]
+        if dt <= 0:
+            return None
+        return max(0.0, (downloaded - prev[1]) / dt)
 
     async def _run_download(
         self, task_id: str, item: MediaItem, options: DownloadOptions,
@@ -703,6 +788,7 @@ class TaskManager(QObject):
                 if not (ev.extra or {}).get("retry"):
                     info.fraction = ev.fraction
                 info.message = ev.message or ""
+                self._absorb_metrics(task_id, info, ev)
                 # Guard: emit is a cross-thread / cross-loop boundary. Any
                 # Qt exception raised by a slot will propagate back *through*
                 # the engine's call site and kill the download if we don't
@@ -750,12 +836,18 @@ class TaskManager(QObject):
             info.fraction = 1.0
             info.title = item.title or info.title
             info.finished_at = datetime.now()
+            # 终态行不再有「当前速度」可言；downloaded_bytes 保留，
+            # 会话汇总条还要统计它。
+            info.bytes_per_sec = None
+            info.eta_seconds = None
             self._move_to_completed(task_id)
             self.task_finished.emit(task_id, info.title)
         else:
             info.status = "failed"
             info.error = info.message or "下载失败"
             info.finished_at = datetime.now()
+            info.bytes_per_sec = None
+            info.eta_seconds = None
             self._move_to_completed(task_id)
             self.task_failed.emit(task_id, info.error)
 

@@ -882,3 +882,75 @@ def test_douyin_qr_login_image_polls_until_qr_appears(monkeypatch, qapp, tmp_pat
         f"M6.39: should have polled at least 3 times before finding "
         f"the QR, got {poll_count[0]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# logout（P2 账号入口收口）：删本地 cookie 文件即登出
+# ---------------------------------------------------------------------------
+
+
+def test_logout_bilibili_removes_cookie_file(tmp_path, monkeypatch):
+    """登出 = 删 cookie 文件；文件存在时删掉并返回成功。"""
+    from doubi.platforms.bilibili import auth as bili_auth
+    from doubi.ui.auth_actions import logout
+
+    cookie = tmp_path / "bilibili_cookies.txt"
+    cookie.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+    monkeypatch.setattr(bili_auth, "default_cookie_path", lambda: cookie)
+
+    ok, msg = logout("bilibili")
+    assert ok is True
+    assert not cookie.exists()
+    assert "登出完成" in msg
+
+
+def test_logout_douyin_removes_cookie_file(tmp_path, monkeypatch):
+    from doubi.platforms.douyin import auth as dy_auth
+    from doubi.ui.auth_actions import logout
+
+    cookie = tmp_path / "douyin_cookies.txt"
+    cookie.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+    monkeypatch.setattr(dy_auth, "default_cookie_path", lambda: cookie)
+
+    ok, msg = logout("douyin")
+    assert ok is True
+    assert not cookie.exists()
+
+
+def test_logout_is_idempotent(tmp_path, monkeypatch):
+    """文件不存在也算成功（幂等）——重复点登出不报错。"""
+    from doubi.platforms.bilibili import auth as bili_auth
+    from doubi.ui.auth_actions import logout
+
+    cookie = tmp_path / "never_existed.txt"
+    monkeypatch.setattr(bili_auth, "default_cookie_path", lambda: cookie)
+
+    ok, msg = logout("bilibili")
+    assert ok is True
+    assert "无需登出" in msg
+
+
+def test_logout_unknown_platform(tmp_path, monkeypatch):
+    from doubi.ui.auth_actions import logout
+    ok, msg = logout("youtube")
+    assert ok is False
+    assert "未知平台" in msg
+
+
+def test_logout_unlink_failure_reports_error(tmp_path, monkeypatch):
+    """删除失败（权限等）要如实报错，不能假成功。"""
+    from doubi.platforms.bilibili import auth as bili_auth
+    from doubi.ui import auth_actions
+    from doubi.ui.auth_actions import logout
+
+    cookie = tmp_path / "b.txt"
+    cookie.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(bili_auth, "default_cookie_path", lambda: cookie)
+
+    def _boom():
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(auth_actions.Path, "unlink", lambda self: _boom())
+    ok, msg = logout("bilibili")
+    assert ok is False
+    assert "失败" in msg

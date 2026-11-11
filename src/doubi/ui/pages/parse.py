@@ -159,6 +159,16 @@ def _build_prompt_dialog_class():
             self.thumb = QCheckBox("生成缩略图 (.jpg)", self)
             self.metadata_json = QCheckBox("写入 metadata.json", self)
 
+            # ---- 分段下载（章节）：勾选才编辑，与标题修改同一语义 ----
+            self.sections_check = QCheckBox("只下载部分片段", self)
+            self.sections_input = QLineEdit(self)
+            self.sections_input.setPlaceholderText(
+                "如 1:00-2:30；多段逗号分隔：0:10-0:20,3:00-3:30"
+            )
+            self.sections_input.setEnabled(False)
+            self.sections_check.setChecked(False)
+            self.sections_check.toggled.connect(self.sections_input.setEnabled)
+
             # ---- 标题修改区：只读 + 复选框（默认不修改）----
             # 见 CHANGELOG M6.16：勾选才编辑，规避「我想用默认结果但忘了清空
             # 输入框」导致的整批重命名事故。批量时模板用 {title} 占位，单条
@@ -180,6 +190,10 @@ def _build_prompt_dialog_class():
             self.container.setCurrentText(str(seed.container))
             self.thumb.setChecked(bool(seed.write_thumbnail))
             self.metadata_json.setChecked(bool(seed.write_metadata_json))
+            seed_sections = getattr(seed, "download_sections", None)
+            if seed_sections:
+                self.sections_check.setChecked(True)
+                self.sections_input.setText(str(seed_sections))
 
             form = QFormLayout()
             form.setSpacing(8)
@@ -187,6 +201,7 @@ def _build_prompt_dialog_class():
             form.addRow("容器格式", self.container)
             form.addRow("附加产物", self.thumb)
             form.addRow("", self.metadata_json)
+            form.addRow(self.sections_check, self.sections_input)
             form.addRow(self.modify_title_check, self.title_input)
             self.viewLayout.addLayout(form)
 
@@ -207,17 +222,23 @@ def collect_prompt_overrides(dialog) -> dict:
     """
     # 复选框未勾选 → 一律视为不改；即使输入框里残留文字也不生效。这把
     # 「勾选才生效」的承诺写进 collect 端，避免后续 apply_title_template
-    # 还要再判一次 enable 状态。
+    # 还要再判一次 enable 状态。分段下载同理。
     if not dialog.modify_title_check.isChecked():
         title_template: Optional[str] = None
     else:
         text = dialog.title_input.text().strip()
         title_template = text or "{title}"
+    if not getattr(dialog, "sections_check", None) or \
+            not dialog.sections_check.isChecked():
+        download_sections: Optional[str] = None
+    else:
+        download_sections = dialog.sections_input.text().strip() or None
     return {
         "max_quality": dialog.quality.currentText(),
         "container": dialog.container.currentText(),
         "write_thumbnail": dialog.thumb.isChecked(),
         "write_metadata_json": dialog.metadata_json.isChecked(),
+        "download_sections": download_sections,
         "title_template": title_template,
     }
 
@@ -295,6 +316,7 @@ def build_parse_widgets():
         QLabel,
         QMenu,
         QPlainTextEdit,
+        QPushButton,
         QVBoxLayout,
         QWidget,
     )
@@ -358,17 +380,21 @@ def build_parse_widgets():
             self._clipboard_timer = QTimer(self)
             self._clipboard_timer.setInterval(1500)
             self._clipboard_timer.timeout.connect(self._poll_clipboard)
-            self._clipboard_timer.start()
+            # 开关（config.clipboard_watch，默认关）——关着就不启动轮询，
+            # 是零开销而不是「轮询了再忽略」。showEvent 里按开关决定启停。
+            if self._cfg.clipboard_watch:
+                self._clipboard_timer.start()
 
         def showEvent(self, event) -> None:        # noqa: N802 (Qt naming)
             super().showEvent(event)
-            if not self._clipboard_timer.isActive():
+            if self._cfg.clipboard_watch and not self._clipboard_timer.isActive():
                 self._clipboard_timer.start()
+            # 解析历史行按 config 当前值重画（其他入口可能刚更新过）。
+            self._load_recent_on_show()
 
         def hideEvent(self, event) -> None:        # noqa: N802 (Qt naming)
             super().hideEvent(event)
             self._clipboard_timer.stop()
-
         def _on_theme_changed(self) -> None:
             """换主题后刷新自绘颜色的控件。"""
             # hint 文案由 PageHeader 的副标题承载——但有些旧调用点（解析按钮
@@ -515,6 +541,23 @@ def build_parse_widgets():
             self.url_input.setFixedHeight(110)
             input_layout.addWidget(self.url_input)
 
+            # ---- 最近解析（P2：解析历史）----
+            # 内存 + config 双层：最多 8 条 URL，最近的在最前。点击回填
+            # 输入框；空历史时整行隐藏。持久化借 config 的 extra 字典
+            # （不新增 AppConfig 字段——这属于 UI 便利记忆，不是下载语义）。
+            self.recent_row = QWidget(input_card)
+            recent_layout = QHBoxLayout(self.recent_row)
+            recent_layout.setContentsMargins(0, 0, 0, 0)
+            recent_layout.setSpacing(SPACE_SM)
+            recent_label = QLabel("最近解析：", self.recent_row)
+            recent_label.setStyleSheet(muted_qss())
+            recent_layout.addWidget(recent_label)
+            self.recent_links_layout = QHBoxLayout()
+            self.recent_links_layout.setSpacing(SPACE_SM)
+            recent_layout.addLayout(self.recent_links_layout, 1)
+            self.recent_row.hide()
+            input_layout.addWidget(self.recent_row)
+
             btn_row = QHBoxLayout()
             btn_row.setSpacing(SPACE_SM)
             btn_row.addStretch(1)
@@ -645,11 +688,89 @@ def build_parse_widgets():
                     return int(getattr(self._cfg, "sniff_duration_sec", 15))
             return 0
 
+        # -------------------------------------------------- 解析历史
+
+        RECENT_PARSE_KEY = "recent_parse_urls"
+        RECENT_PARSE_MAX = 8
+
+        def _recent_parse_load(self) -> list[str]:
+            """从 config 的 extra 字典读最近解析 URL 列表（容错：坏数据当空）。"""
+            extra = getattr(self._cfg, "extra", None)
+            if not isinstance(extra, dict):
+                return []
+            urls = extra.get(self.RECENT_PARSE_KEY)
+            if not isinstance(urls, list):
+                return []
+            return [u for u in urls if isinstance(u, str) and u][: self.RECENT_PARSE_MAX]
+
+        def _recent_parse_save(self, urls: list[str]) -> None:
+            """写回 config extra 并落盘。失败只记日志（记忆类功能不弹错）。"""
+            extra = getattr(self._cfg, "extra", None)
+            if not isinstance(extra, dict):
+                return
+            extra[self.RECENT_PARSE_KEY] = urls[: self.RECENT_PARSE_MAX]
+            try:
+                import yaml
+
+                from ...core.config import DEFAULT_CONFIG_PATH
+                data = self._cfg.to_dict()
+                text = yaml.safe_dump(data, allow_unicode=True, sort_keys=False)
+                DEFAULT_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+                DEFAULT_CONFIG_PATH.write_text(text, encoding="utf-8")
+            except Exception:  # noqa: BLE001
+                logger.debug("failed to persist recent parse urls", exc_info=True)
+
+        def _record_recent_parse(self, urls: list[str]) -> None:
+            """解析触发时记录（去重、新者居前、截断到上限），并刷新显示。"""
+            recent = self._recent_parse_load()
+            for url in urls:
+                if url in recent:
+                    recent.remove(url)
+                recent.insert(0, url)
+            recent = recent[: self.RECENT_PARSE_MAX]
+            self._recent_parse_save(recent)
+            self._render_recent(recent)
+
+        def _render_recent(self, urls: list[str]) -> None:
+            """重画「最近解析」链接行。"""
+            # 清空旧链接
+            while self.recent_links_layout.count():
+                item = self.recent_links_layout.takeAt(0)
+                w = item.widget()
+                if w is not None:
+                    w.deleteLater()
+            if not urls:
+                self.recent_row.hide()
+                return
+            for url in urls:
+                # 显示压缩：协议与查询串去掉，留主机 + 路径主干
+                shown = url.split("//", 1)[-1].split("?")[0]
+                if len(shown) > 36:
+                    shown = shown[:35] + "…"
+                link = QPushButton(shown, self.recent_row)
+                link.setFlat(True)
+                link.setStyleSheet("text-align: left; padding: 0 2px;")
+                link.setCursor(Qt.PointingHandCursor)
+                link.setToolTip(url)
+                link.setFixedWidth(min(300, 8 * len(shown) + 24))
+                link.clicked.connect(lambda _=False, u=url: self._fill_recent(u))
+                self.recent_links_layout.addWidget(link)
+            self.recent_links_layout.addStretch(1)
+            self.recent_row.show()
+
+        def _fill_recent(self, url: str) -> None:
+            """点击历史条目：替换输入框内容（单条语义）。"""
+            self.url_input.setPlainText(url)
+
+        def _load_recent_on_show(self) -> None:
+            self._render_recent(self._recent_parse_load())
+
         def _on_parse_clicked(self):
             urls = self._parse_urls()
             if not urls:
                 toast_warning(self, "没有有效链接", "请至少粘贴一个 URL（每行一个）。")
                 return
+            self._record_recent_parse(urls)
             self.parse_btn.setEnabled(False)
             self.url_input.setReadOnly(True)
             sniff_sec = self._sniff_seconds_for(urls)

@@ -83,6 +83,34 @@ async def douyin_status() -> LoginStatus:
     )
 
 
+def logout(platform: str) -> tuple[bool, str]:
+    """删除平台 cookie 文件（登出的本质——本地凭据没了就是没登录）。
+
+    纯文件操作，同步执行。返回 ``(ok, message)``；文件本就不存在时
+    也算成功（幂等），提示「未登录」。对远端无操作——B 站 / 抖音
+    没有可编程的单点登出 API，删本地 cookie 后服务端 session 会自然
+    过期，这是各家第三方下载器的通行做法。
+    """
+    if platform == "bilibili":
+        from ..platforms.bilibili import auth as bili_auth
+        path = bili_auth.default_cookie_path()
+    elif platform == "douyin":
+        from ..platforms.douyin import auth as dy_auth
+        path = dy_auth.default_cookie_path()
+    else:
+        return False, f"未知平台：{platform}"
+
+    if not path.exists():
+        return True, "本就没有登录凭据，无需登出"
+    try:
+        path.unlink()
+    except OSError as exc:
+        logger.warning("logout: failed to remove %s: %s", path, exc)
+        return False, f"删除 cookie 文件失败：{exc}"
+    logger.info("logout: removed %s", path)
+    return True, f"已删除 {path.name}，登出完成"
+
+
 # ---------------------------------------------------------------------------
 # Cookie import (synchronous — pure file ops)
 # ---------------------------------------------------------------------------

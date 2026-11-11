@@ -82,6 +82,69 @@ def friendly_phase(message: str) -> str:
     return cleaned[:11] + "…"
 
 
+# ---------------------------------------------------------------------------
+# P1-4 传输度量格式化
+#
+# 与 friendly_phase 同款约定：模块级纯函数，无 Qt 依赖，测试可以直接
+# import 而不用起 QApplication。所有函数对 None / 非法值返回空串——
+# 上层据此隐藏标签，而不是显示 "None MB/s"。
+# ---------------------------------------------------------------------------
+
+def format_speed(bps) -> str:
+    """Bytes-per-second → ``"5.2 MB/s"`` 风格；无效输入返回空串。"""
+    try:
+        value = float(bps)
+    except (TypeError, ValueError):
+        return ""
+    if value <= 0:
+        return ""
+    kb = value / 1024.0
+    if kb < 1.0:
+        return f"{value:.0f} B/s"
+    if kb < 1024.0:
+        return f"{kb:.1f} KB/s" if kb < 10.0 else f"{kb:.0f} KB/s"
+    mb = kb / 1024.0
+    if mb < 1024.0:
+        return f"{mb:.1f} MB/s"
+    return f"{mb / 1024.0:.2f} GB/s"
+
+
+def format_eta(seconds) -> str:
+    """剩余秒数 → ``"剩 19 秒"`` 风格；分钟以上不带货秒（列宽固定，
+    ``"剩 59 分 59 秒"`` 会截断），无效输入返回空串。"""
+    try:
+        value = float(seconds)
+    except (TypeError, ValueError):
+        return ""
+    if value <= 0:
+        return ""
+    total = int(round(value))
+    if total < 60:
+        return f"剩 {total} 秒"
+    if total < 3600:
+        return f"剩 {total // 60} 分"
+    return f"剩 {total // 3600} 时"
+
+
+def format_size(nbytes) -> str:
+    """字节数 → ``"123.4 MB"`` 风格（汇总条 / tooltip 用）；无效输入返回空串。"""
+    try:
+        value = float(nbytes)
+    except (TypeError, ValueError):
+        return ""
+    if value <= 0:
+        return ""
+    kb = value / 1024.0
+    if kb < 1.0:
+        return f"{value:.0f} B"
+    if kb < 1024.0:
+        return f"{kb:.1f} KB" if kb < 10.0 else f"{kb:.0f} KB"
+    mb = kb / 1024.0
+    if mb < 1024.0:
+        return f"{mb:.1f} MB"
+    return f"{mb / 1024.0:.2f} GB"
+
+
 def build_download_widgets():
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QFontMetrics
@@ -237,12 +300,44 @@ def build_download_widgets():
             progress_wrap_layout.addWidget(self.progress_percent, 0)
             self.progress_wrap.setFixedWidth(196)
 
-            self.message_label = QLabel(self)
+            # message / speed / eta 三个标签共用一个 150px 固定宽槽位，
+            # 靠「哪个可见」切换而不是各占一列——窗口最小宽度 820，
+            # 再加两列固定宽，标题列在最小尺寸下就被挤没了。运行中且
+            # 有速度数据时 speed+eta 替换 message，其余状态换回
+            # message，列宽恒定不抖（见 _sync_net_labels）。
+            self.info_slot = QWidget(self)
+            self.info_slot.setFixedWidth(150)
+            info_slot_layout = QHBoxLayout(self.info_slot)
+            info_slot_layout.setContentsMargins(0, 0, 0, 0)
+            info_slot_layout.setSpacing(6)
+
+            self.message_label = QLabel(self.info_slot)
             self.message_label.setStyleSheet(_muted_qss())
             self.message_label.setFixedWidth(150)
             self.message_label.setFixedHeight(20)
             self.message_label.setWordWrap(False)
             self.message_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+
+            self.speed_label = QLabel(self.info_slot)
+            self.speed_label.setStyleSheet(_muted_qss())
+            self.speed_label.setFixedWidth(70)
+            self.speed_label.setFixedHeight(20)
+            self.speed_label.setWordWrap(False)
+            self.speed_label.setAlignment(Qt.AlignVCenter | Qt.AlignRight)
+            self.speed_label.hide()
+
+            self.eta_label = QLabel(self.info_slot)
+            self.eta_label.setStyleSheet(_muted_qss())
+            self.eta_label.setFixedWidth(74)
+            self.eta_label.setFixedHeight(20)
+            self.eta_label.setWordWrap(False)
+            self.eta_label.setAlignment(Qt.AlignVCenter | Qt.AlignRight)
+            self.eta_label.hide()
+
+            info_slot_layout.addWidget(self.message_label, 0)
+            info_slot_layout.addStretch(1)
+            info_slot_layout.addWidget(self.speed_label, 0)
+            info_slot_layout.addWidget(self.eta_label, 0)
 
             # Same fixed-width holder trick as the retry column: the
             # button swaps between 暂停 / 继续 and hides entirely once the
@@ -284,7 +379,7 @@ def build_download_widgets():
             layout.addWidget(self.status_label, 0)
             layout.addWidget(self.title_label, 1)
             layout.addWidget(self.progress_wrap, 0)
-            layout.addWidget(self.message_label, 0)
+            layout.addWidget(self.info_slot, 0)
             layout.addWidget(self.pause_slot, 0)
             layout.addWidget(self.retry_slot, 0)
             layout.addWidget(self.remove_btn, 0)
@@ -463,6 +558,7 @@ def build_download_widgets():
             except (TypeError, ValueError):
                 self.progress.setValue(0)
             self.progress_percent.setText(self._percent_text(fraction))
+            self._sync_net_labels()
             self._apply_progress_color()
             self._refresh_texts()
 
@@ -491,6 +587,30 @@ def build_download_widgets():
             self.setToolTip("\n".join(tip))
             self.title_label.setToolTip("\n".join(tip))
             self.message_label.setToolTip(info.error or self._message_full)
+
+        def _sync_net_labels(self) -> None:
+            """速度 / ETA 与消息列互斥：仅在「运行中且测得到速度」时显示。
+
+            只有 running 状态才换出 speed/eta——暂停行要显示「已暂停」、
+            终态行要显示「已保存 / 文件已删除」，这些文案比一个陈旧的
+            速度数字更有用。eta 测不到时（引擎没给）只显示速度半边，
+            留空的标签隐藏而不是显示 "剩 0 秒"。
+            """
+            info = self.info
+            speed = getattr(info, "bytes_per_sec", None)
+            show_net = (
+                info.status == "running"
+                and speed is not None
+                and speed > 0
+            )
+            if show_net:
+                self.speed_label.setText(format_speed(speed))
+                self.eta_label.setText(format_eta(getattr(info, "eta_seconds", None)))
+            self.speed_label.setVisible(show_net)
+            # ETA 单独判：引擎没给 eta 时只显示速度半边，
+            # 不留一个空标签占位。
+            self.eta_label.setVisible(show_net and self.eta_label.text() != "")
+            self.message_label.setVisible(not show_net)
 
         def _sync_pause_btn(self) -> None:
             """Make the button describe the *next* action, not the state.
@@ -555,6 +675,8 @@ def build_download_widgets():
                 row._apply_progress_color()
                 row.progress_percent.setStyleSheet(_muted_qss())
                 row.message_label.setStyleSheet(_muted_qss())
+                row.speed_label.setStyleSheet(_muted_qss())
+                row.eta_label.setStyleSheet(_muted_qss())
             # 顶部 summary 走 heading_qss(3)，重新刷一次颜色
             self.active_summary.setStyleSheet(heading_qss(3))
             self.completed_summary.setStyleSheet(heading_qss(3))
@@ -1057,14 +1179,13 @@ def build_download_widgets():
             running = self._manager.running_count()
             if not active:
                 self.active_summary.setText("暂无正在下载的任务。")
-            elif paused:
-                # Spell out the split so a stalled-looking list is
-                # explained by the summary rather than by the rows alone.
-                self.active_summary.setText(
-                    f"{running} 个任务正在下载，{paused} 个已暂停",
-                )
             else:
-                self.active_summary.setText(f"{active} 个任务正在下载")
+                # P1-4: 数量之后带总速度与本次会话已下字节量，批量下载
+                # 时不用逐行去加。分段引擎（无字节信息）贡献 0，此时
+                # 对应片段自动省略——不显示 "总速度 0 B/s"。
+                self.active_summary.setText(
+                    self._build_active_summary(active, paused, running),
+                )
             # The button mirrors _on_pause_all's own rule, so its label
             # always matches what a click would actually do.
             self.pause_all_btn.setEnabled(bool(active))
@@ -1079,6 +1200,44 @@ def build_download_widgets():
             self.retry_all_btn.setEnabled(bool(failed))
             self._update_stat_chips(running, paused, completed, failed)
             self._update_empty_visibility(active, completed)
+
+        def _build_active_summary(
+            self, active: int, paused: int, running: int,
+        ) -> str:
+            """「下载中」卡的汇总句：数量 + 总速度 + 会话已下字节量。"""
+            parts = []
+            if paused:
+                # Spell out the split so a stalled-looking list is
+                # explained by the summary rather than by the rows alone.
+                parts.append(f"{running} 个任务正在下载，{paused} 个已暂停")
+            else:
+                parts.append(f"{active} 个任务正在下载")
+            total_speed, downloaded = self._transfer_totals()
+            if running and total_speed > 0:
+                parts.append(f"总速度 {format_speed(total_speed)}")
+            if downloaded > 0:
+                parts.append(f"已下 {format_size(downloaded)}")
+            return "，".join(parts)
+
+        def _transfer_totals(self) -> tuple[float, int]:
+            """运行中任务的速度总和 + 本会话所有任务的已下字节总量。
+
+            只统计 ``downloaded_bytes`` 已知的任务（yt-dlp / aria2）；
+            分段引擎贡献 0。速度只算 running——暂停任务的 0 会把总和
+            拉低成误导性的小数字。
+            """
+            total_speed = 0.0
+            downloaded = 0
+            active = self._manager.active_tasks()
+            for ti in active:
+                if ti.status == "running" and ti.bytes_per_sec:
+                    total_speed += float(ti.bytes_per_sec)
+                if ti.downloaded_bytes:
+                    downloaded += int(ti.downloaded_bytes)
+            for ti in self._manager.completed_tasks():
+                if ti.downloaded_bytes:
+                    downloaded += int(ti.downloaded_bytes)
+            return total_speed, downloaded
 
         def _update_stat_chips(
             self, running: int, paused: int, completed: int, failed: int,

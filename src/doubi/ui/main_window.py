@@ -198,6 +198,12 @@ def build_main_window():
             self.settings_interface.sniffConfigChanged.connect(
                 self.parse_interface.set_sniff_config
             )
+            # 设置页每次写盘广播整份 AppConfig：parse / search / hot /
+            # history 各自持有构造期 load_config 的独立快照，不刷新的话
+            # 用户改完代理 / 输出目录 / 数据库开关等要重启才生效。
+            self.settings_interface.configSaved.connect(
+                self._on_config_saved
+            )
 
             # 主题循环按钮固定在导航栏底部
             self.theme_toggle = NavigationToolButton(FluentIcon.BRUSH)
@@ -590,6 +596,27 @@ def build_main_window():
             app = QApplication.instance()
             if app is not None:
                 app.setWindowIcon(icon)
+
+        def _on_config_saved(self, cfg) -> None:
+            """设置页写盘成功后，把刷新的 AppConfig 推给各持有方。
+
+            parse / search / hot / history 的 ``self._cfg`` 都是构造时
+            ``load_config`` 出来的独立快照（见各自模块），只在此处统一
+            替换——主窗口做路由，页面之间不互相伸手。
+            """
+            was_watching = self.parse_interface._cfg.clipboard_watch
+            self.parse_interface._cfg = cfg
+            self.search_interface._cfg = cfg
+            self.hot_interface._cfg = cfg
+            self.history_interface._cfg = cfg
+            # 剪贴板监听开关实时跟随：开了且页面可见 → 启动轮询；
+            # 关了 → 停（零开销语义，不是「轮询了再忽略」）。
+            now_watching = cfg.clipboard_watch
+            if now_watching and not was_watching:
+                if self.parse_interface.isVisible():
+                    self.parse_interface._clipboard_timer.start()
+            elif was_watching and not now_watching:
+                self.parse_interface._clipboard_timer.stop()
 
         def _cycle_theme(self) -> None:
             """在内置主题包之间循环切换。
