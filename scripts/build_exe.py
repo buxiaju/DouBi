@@ -203,19 +203,79 @@ def _find_playwright_browsers_dir() -> Path | None:
 _BROWSER_SKIP_PREFIXES = ("chromium_headless_shell",)
 
 
+def _required_browser_revisions() -> dict[str, str]:
+    """读**已装** Playwright 的 browsers.json，拿各二进制的目标 revision。
+
+    本机 ``ms-playwright`` 目录里经常同时躺着多个 ``chromium-XXXX`` /
+    ``ffmpeg-XXXX``——Playwright 升级过、旧 revision 没被清掉（实测：
+    1.62.0 要 chromium 1234 + ffmpeg 1011，目录里还残留一个 451 MB 的
+    chromium-1254 和一个 ffmpeg-1013）。打包脚本原先把整个目录逐项
+    收进包，残留 revision 就是纯死重，光 chromium-1254 就吃掉安装包
+    1/3 体积。
+
+    Playwright 是 collect-all 进包的（含自带的 driver），所以以
+    ``playwright/driver/package/browsers.json`` 为准；读不到（文件
+    缺失 / JSON 坏 / 结构变了）就返回空表——调用方对空表的处理是
+    **不过滤**，宁可打包退回旧行为，也不冒少收运行时必需二进制的险。
+    """
+    import json
+
+    import playwright
+
+    manifest = (
+        Path(playwright.__file__).parent / "driver" / "package" / "browsers.json"
+    )
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    revisions: dict[str, str] = {}
+    for browser in data.get("browsers", []):
+        name = browser.get("name", "")
+        revision = browser.get("revision")
+        # 只认会在磁盘上落成 <name>-<revision> 目录的条目；
+        # chromium_headless_shell 已被 _BROWSER_SKIP_PREFIXES 整类排除。
+        if name in ("chromium", "ffmpeg", "winldd") and revision:
+            revisions[name] = str(revision)
+    return revisions
+
+
 def _browser_add_data(browsers_dir: Path, sep: str) -> list[str]:
-    """把 ms-playwright 目录按子项展开成 --add-data 参数，跳过 headless_shell。
+    """把 ms-playwright 目录按子项展开成 --add-data 参数，跳过死重。
+
+    两类跳过：
+
+    - ``chromium_headless_shell-*``（独立 headless 二进制，sniffer /
+      browser_login 都走 ``channel="chromium"`` 用不到，见上方注释）；
+    - **revision 不匹配的** ``chromium-*`` / ``ffmpeg-*`` / ``winldd-*``：
+      以已装 Playwright 的 browsers.json 为准
+      （见 :func:`_required_browser_revisions`），映射为空就不过滤——
+      宁可多收也不少收。
 
     不整目录一把梭的原因：``--add-data src;dst`` 没有排除语法，想少收
     一个子目录就只能自己逐项列。目标路径保持
     ``playwright_browsers/<子目录名>``，与启动壳设的
     ``PLAYWRIGHT_BROWSERS_PATH`` 布局一致。
     """
+    required = _required_browser_revisions()
     args: list[str] = []
     for child in sorted(browsers_dir.iterdir()):
         if child.name.startswith(_BROWSER_SKIP_PREFIXES):
             print(f"跳过（体积精简）：{child.name}")
             continue
+        if required:
+            stale = False
+            for name, revision in required.items():
+                prefix = f"{name}-"
+                if child.name.startswith(prefix) and child.name != prefix + revision:
+                    print(
+                        f"跳过（revision 不匹配，已装 Playwright 要 "
+                        f"{prefix}{revision}）：{child.name}"
+                    )
+                    stale = True
+                    break
+            if stale:
+                continue
         if child.is_dir():
             dst = f"playwright_browsers/{child.name}"
         else:
