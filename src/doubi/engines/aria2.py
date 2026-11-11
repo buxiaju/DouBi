@@ -310,10 +310,16 @@ class Aria2Engine(Engine):
                         last_fraction = frac
                         if on_progress is not None:
                             speed = _parse_byte_str(status.get("downloadSpeed"))
+                            # P1-4: 与 yt_dlp 引擎对齐，把字节量一并带出，
+                            # 供 GUI 汇总「总速度 / 已下多少」。
                             on_progress(EngineProgress(
                                 fraction=frac,
                                 message=f"aria2 {int(frac * 100)}%",
-                                extra={"speed": speed},
+                                extra={
+                                    "speed": speed,
+                                    "downloaded_bytes": done,
+                                    "total_bytes": total,
+                                },
                             ))
 
                 await asyncio.sleep(_POLL_INTERVAL)

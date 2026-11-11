@@ -61,7 +61,7 @@ _JOBS: dict[str, dict[str, Any]] = {}
 
 def _record_job(url: str, result: Any) -> str:
     job_id = uuid.uuid4().hex[:12]
-    _JOBS[job_id] = {
+    record: dict[str, Any] = {
         "job_id": job_id,
         "url": url,
         "status": "completed" if result is not None else "failed",
@@ -69,6 +69,19 @@ def _record_job(url: str, result: Any) -> str:
         "item_title": result.title if result is not None else None,
         "item_author": result.author.name if result is not None and result.author else None,
     }
+    if result is not None and "child_count" in (result.extra or {}):
+        # 容器作业：把子项记账透出（与 REST /jobs 的字段对齐），
+        # retry_failed 工具靠 failed_items 做子项级重试。
+        record["total"] = int(result.extra.get("child_count") or 0)
+        record["succeeded"] = int(result.extra.get("downloaded_count") or 0)
+        record["failed"] = int(result.extra.get("failed_count") or 0)
+        record["failed_items"] = [
+            {"platform": p, "item_id": iid, "source_url": u}
+            for p, iid, u in (result.extra.get("failed_items") or [])
+        ]
+        if record["failed"] and not record["succeeded"]:
+            record["status"] = "failed"
+    _JOBS[job_id] = record
     return job_id
 
 
@@ -299,12 +312,10 @@ def _tool_list_supported_sites(arguments: dict) -> dict:
     }
 
 
-async def _tool_add_to_queue(arguments: dict) -> dict:
-    url = (arguments.get("url") or "").strip()
-    if not url:
-        return {"error": "the 'url' argument is required"}
+def _mcp_download_options() -> DownloadOptions:
+    """从当前配置构造 MCP 侧的下载选项（add_to_queue / retry_failed 共用）。"""
     cfg = load_config(None)
-    options = DownloadOptions(
+    return DownloadOptions(
         output_root=cfg.output_root,
         filename_template=cfg.filename_template,
         container=cfg.container,
@@ -312,13 +323,39 @@ async def _tool_add_to_queue(arguments: dict) -> dict:
         database=cfg.database_path if cfg.database else None,
         manifest=cfg.manifest_path,
     )
+
+
+async def _download_one(url: str, download_sections: Optional[str] = None) -> dict:
+    """跑完一条 URL 并记账，返回 add_to_queue / retry_failed 的条目格式。
+
+    ``download_sections`` 为分段下载表达式（与 CLI ``--sections`` /
+    REST ``download_sections`` 同一待遇的每请求临时覆盖）。
+    """
+    options = _mcp_download_options()
+    if download_sections:
+        import dataclasses
+        options = dataclasses.replace(options, download_sections=download_sections)
     pipeline = build_default_pipeline()
     item = await pipeline.process_url(url, options)
     job_id = _record_job(url, item)
     return {
+        "url": url,
         "job_id": job_id,
         "status": "completed" if item is not None else "failed",
         "title": item.title if item else None,
+    }
+
+
+async def _tool_add_to_queue(arguments: dict) -> dict:
+    url = (arguments.get("url") or "").strip()
+    if not url:
+        return {"error": "the 'url' argument is required"}
+    sections = (arguments.get("download_sections") or "").strip() or None
+    entry = await _download_one(url, sections)
+    return {
+        "job_id": entry["job_id"],
+        "status": entry["status"],
+        "title": entry["title"],
     }
 
 
@@ -336,6 +373,34 @@ def _tool_list_jobs(arguments: dict) -> dict:
     limit = int(arguments.get("limit", 20))
     items = list(_JOBS.values())[:limit]
     return {"jobs": items}
+
+
+async def _tool_retry_failed(arguments: dict) -> dict:
+    """子项级重试：把一个容器作业失败的子项逐个重新下载。
+
+    不重跑整个容器——只补 ``failed_items`` 里记录的那几条。
+    """
+    job_id = (arguments.get("job_id") or "").strip()
+    if not job_id:
+        return {"error": "the 'job_id' argument is required"}
+    job = _JOBS.get(job_id)
+    if job is None:
+        return {"error": f"job not found: {job_id}"}
+    failed = job.get("failed_items") or []
+    if not failed:
+        return {
+            "parent_job_id": job_id,
+            "retried": [],
+            "message": "no failed child items to retry",
+        }
+    retried = []
+    for child in failed:
+        entry = dict(await _download_one(child["source_url"]))
+        entry["platform"] = child.get("platform")
+        entry["item_id"] = child.get("item_id")
+        retried.append(entry)
+    return {"parent_job_id": job_id, "retried": retried,
+            "count": len(retried)}
 
 
 # ---------------------------------------------------------------------------
@@ -456,12 +521,23 @@ TOOLS: dict[str, dict[str, Any]] = {
     "add_to_queue": {
         "description": (
             "Submit a URL for download. Returns a job_id you can poll with "
-            "get_status. Supports 抖音, B 站, and any URL yt-dlp can handle."
+            "get_status. Supports 抖音, B 站, and any URL yt-dlp can handle. "
+            "Optionally pass download_sections to fetch only time ranges "
+            "(e.g. '1:00-2:30' or '0:10-0:20,3:00-3:30'; SS / MM:SS / "
+            "HH:MM:SS)."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "url": {"type": "string", "description": "The URL to download."},
+                "download_sections": {
+                    "type": "string",
+                    "description": (
+                        "Optional. Download only these time ranges, "
+                        "e.g. '1:00-2:30' or '0:10-0:20,3:00-3:30'. "
+                        "Omit for the full video."
+                    ),
+                },
             },
             "required": ["url"],
             "additionalProperties": False,
@@ -485,6 +561,23 @@ TOOLS: dict[str, dict[str, Any]] = {
             "properties": {
                 "limit": {"type": "integer", "description": "Max jobs to return (default 20)."},
             },
+            "additionalProperties": False,
+        },
+    },
+    "retry_failed": {
+        "description": (
+            "Retry only the FAILED child items of a container job "
+            "(playlist / collection), without re-downloading the whole "
+            "container. Use get_status first: if the job reports "
+            "failed_items, pass its job_id here. Returns a new job_id "
+            "per child for further get_status polling."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "job_id": {"type": "string", "description": "The container job_id whose failed children should be retried."},
+            },
+            "required": ["job_id"],
             "additionalProperties": False,
         },
     },
@@ -599,6 +692,7 @@ _HANDLERS: dict[str, Callable[[dict], Any]] = {
     "add_to_queue": _tool_add_to_queue,
     "get_status": _tool_get_status,
     "list_jobs": _tool_list_jobs,
+    "retry_failed": _tool_retry_failed,
     "sniff_status": _tool_sniff_status,
     "list_supported_sites": _tool_list_supported_sites,
     "collect_search": _tool_collect_search,

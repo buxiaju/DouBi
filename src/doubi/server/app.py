@@ -246,8 +246,14 @@ def build_app(*, token: str | None = None):
     # 某个 token 是否存在。
     require_token = make_token_guard(expected_token)
 
-    async def _executor(url: str) -> dict[str, Any]:
-        return await _execute_download(url, options)
+    async def _executor(url: str, req_options=None) -> dict[str, Any]:
+        # per-request 覆盖（如 download_sections）：clone 共享 options
+        # 再替换字段——并发作业直接改共享实例会互相污染。
+        run_options = options
+        if req_options is not None:
+            import dataclasses
+            run_options = dataclasses.replace(options, **req_options)
+        return await _execute_download(url, run_options)
 
     manager = JobManager(executor=_executor, max_concurrency=2)
 
@@ -292,7 +298,12 @@ def build_app(*, token: str | None = None):
     async def create_job(req: DownloadRequest = Body(...)) -> dict[str, Any]:
         if not req.url:
             raise HTTPException(status_code=400, detail="url is required")
-        job = await manager.submit(req.url)
+        # per-request 覆盖打包成 {field: value}，executor 里统一
+        # dataclasses.replace——以后加新的请求级覆盖字段不用动这里。
+        overrides = {}
+        if req.download_sections:
+            overrides["download_sections"] = req.download_sections
+        job = await manager.submit(req.url, overrides or None)
         return job.to_dict()
 
     @app.get("/api/v1/jobs/{job_id}", dependencies=[Depends(require_token)])
@@ -306,6 +317,47 @@ def build_app(*, token: str | None = None):
     async def list_jobs() -> dict[str, Any]:
         jobs = await manager.list_jobs()
         return {"jobs": [j.to_dict() for j in jobs]}
+
+    @app.post(
+        "/api/v1/jobs/{job_id}/retry-failed",
+        dependencies=[Depends(require_token)],
+    )
+    async def retry_failed_children(job_id: str) -> dict[str, Any]:
+        """把一个容器作业里失败的子项逐个重新入队（子项级重试）。
+
+        只重提 ``failed_items`` 里的 ``source_url``——成功的子项不会碰，
+        已在数据库里的由 ``duplicate_policy`` 把关。返回新作业的
+        ``job_id``，客户端用 ``GET /jobs/{new_id}`` 继续轮询。
+        """
+        job = await manager.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="job not found")
+        if job.status.value == "running":
+            raise HTTPException(
+                status_code=409,
+                detail="job is still running; wait for it to finish first",
+            )
+        if not job.failed_items:
+            return {
+                "parent_job_id": job_id,
+                "retried": [],
+                "message": "no failed child items to retry",
+            }
+        retried: list[dict[str, Any]] = []
+        for platform, item_id, source_url in job.failed_items:
+            child = await manager.submit(source_url)
+            retried.append({
+                "platform": platform,
+                "item_id": item_id,
+                "url": source_url,
+                "job_id": child.job_id,
+            })
+        logger.info(
+            "retry-failed: parent %s -> %d child job(s)",
+            job_id, len(retried),
+        )
+        return {"parent_job_id": job_id, "retried": retried,
+                "count": len(retried)}
 
     # ---- 通用嗅探（M6.16）---------------------------------------------
     # 解析走「提交 + 轮询」而不是同步返回：兜底嗅探要真起一个无头浏览器、

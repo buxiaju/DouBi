@@ -227,3 +227,31 @@ def test_mcp_sniff_status_reports_config(monkeypatch):
     assert out["duration_sec"] == 42
     assert out["enabled"] is False
     assert "available" in out, "缺少 Playwright 可用性自检字段"
+
+
+# ---------------------------------------------------------------------------
+# 分段下载（章节）三端对齐：CLI --sections / REST download_sections / MCP
+# download_sections 是每请求临时覆盖（不入 AppConfig），三端都要能透传
+# ---------------------------------------------------------------------------
+
+
+def test_cli_sections_reaches_download_options():
+    """CLI --sections 必须原样落到 DownloadOptions.download_sections。"""
+    import argparse
+
+    from doubi.cli.main import _build_options
+    args = argparse.Namespace(
+        config=None, no_database=False, no_manifest=False,
+        database=None, manifest=None, output=None, output_template=None,
+        filename=None, container=None, quality=None, format=None,
+        thumbnail=None, metadata=None, nfo=None, danmaku=None,
+        subtitles=None, resume=None, rate_limit=None, proxy=None,
+        cookies_file=None, sections="1:00-2:30",
+    )
+    opts = _build_options(args)
+    assert opts.download_sections == "1:00-2:30"
+
+    args.sections = None
+    assert _build_options(args).download_sections is None
+
+

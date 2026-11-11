@@ -16,7 +16,7 @@ import logging
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Optional
 
@@ -45,6 +45,10 @@ class Job:
     item_title: Optional[str] = None
     item_author: Optional[str] = None
     item_id: Optional[str] = None
+    #: 容器作业的失败子项，形如 ``(platform, item_id, source_url)`` 元组
+    #: （来自 pipeline ``process_batch`` 的记录）。供子项级重试——
+    #: 不必重跑整个容器，只补下失败的那几个。
+    failed_items: list = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -61,12 +65,22 @@ class Job:
             "item_title": self.item_title,
             "item_author": self.item_author,
             "item_id": self.item_id,
+            "failed_items": [
+                {"platform": p, "item_id": iid, "source_url": u}
+                for p, iid, u in self.failed_items
+            ],
         }
 
 
-#: Signature of the per-job executor: takes a URL, returns a dict with
-#: any of {total, succeeded, failed, item_title, item_author, item_id}.
-ExecutorFn = Callable[[str], Awaitable[dict[str, Any]]]
+#: Per-job executor: takes a URL plus optional per-request download
+#: options (None when the request carries no overrides); returns a dict
+#: with any of {total, succeeded, failed, item_title, item_author,
+#: item_id, failed_items}.
+ExecutorFn = Callable[[str, Any], Awaitable[dict[str, Any]]]
+
+#: Same as :data:`ExecutorFn` but the caller may pass per-request download
+#: options alongside the URL (e.g. REST ``download_sections`` overrides).
+OptionsExecutorFn = ExecutorFn
 
 
 class JobManager:
@@ -99,12 +113,20 @@ class JobManager:
 
     # ---- submission -------------------------------------------------
 
-    async def submit(self, url: str) -> Job:
+    async def submit(self, url: str, options: Any = None) -> Job:
+        """入队一个下载作业。
+
+        ``options`` 可选：带上传给 executor 的第二参（per-request 下载
+        覆盖项，如 ``download_sections``）。``None`` 时 executor 收到
+        ``None``——单参 executor 用 ``lambda url, opts=None: fn(url)``
+        适配即可；本项目 executor 统一两参签名。
+        """
         async with self._lock:
             self._evict_locked()
             job = Job(job_id=uuid.uuid4().hex, url=url,
                       submitted_at=time.time())
             self._jobs[job.job_id] = job
+            job._options = options
 
         # Schedule the actual download outside the lock
         asyncio.create_task(self._run(job))
@@ -117,7 +139,7 @@ class JobManager:
                 job.started_at = time.time()
 
             try:
-                result = await self._executor(job.url)
+                result = await self._executor(job.url, getattr(job, "_options", None))
             except Exception as exc:
                 logger.exception("job %s failed", job.job_id)
                 async with self._lock:
@@ -135,6 +157,7 @@ class JobManager:
                 job.item_title = result.get("item_title")
                 job.item_author = result.get("item_author")
                 job.item_id = result.get("item_id")
+                job.failed_items = list(result.get("failed_items") or [])
                 job.finished_at = time.time()
                 # A job just finished → evict any surplus completed
                 # jobs so the store stays within max_jobs over time

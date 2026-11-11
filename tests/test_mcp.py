@@ -49,6 +49,7 @@ def test_tools_list_includes_all_registered():
     # 用 == 而非 >= 是刻意的：新增工具时这里必须同步更新，删掉工具时也会立刻变红。
     assert names == {
         "platforms", "parse_url", "add_to_queue", "get_status", "list_jobs",
+        "retry_failed",                            # P2 收口：容器子项级重试
         "sniff_status", "list_supported_sites",   # M6.17+ 暴露 yt-dlp 1800+ extractor
         "collect_search", "collect_hot",          # 0.3.3 P1-4：采集能力对上 CLI
     }
@@ -378,3 +379,136 @@ def _call_list_supported_sites_sync() -> dict:
         })
     resp = asyncio.run(_run())
     return json.loads(resp["result"]["content"][0]["text"])
+
+
+# ---------------------------------------------------------------------------
+# 容器子项级重试（P2 收口）：容器记账透出 + retry_failed 工具
+# ---------------------------------------------------------------------------
+
+
+def test_record_job_container_accounting():
+    """容器作业的子项记账必须进 _JOBS 记录（与 REST /jobs 字段对齐），
+    retry_failed 靠它找失败子项。"""
+    from types import SimpleNamespace
+
+    mcp_server._JOBS.clear()
+    try:
+        item = SimpleNamespace(
+            item_id="coll1", title="合集",
+            author=SimpleNamespace(name="UP"),
+            extra={"child_count": 3, "downloaded_count": 2,
+                   "failed_count": 1,
+                   "failed_items": [("bilibili", "BV1zzz", "https://b23.tv/BV1zzz")]},
+        )
+        job_id = mcp_server._record_job("https://x/coll", item)
+        record = mcp_server._JOBS[job_id]
+        assert record["total"] == 3
+        assert record["succeeded"] == 2
+        assert record["failed"] == 1
+        assert record["status"] == "completed"  # 部分成功也算 completed
+        assert record["failed_items"] == [{
+            "platform": "bilibili", "item_id": "BV1zzz",
+            "source_url": "https://b23.tv/BV1zzz",
+        }]
+    finally:
+        mcp_server._JOBS.clear()
+
+
+def test_record_job_all_failed_container_marks_failed():
+    from types import SimpleNamespace
+
+    mcp_server._JOBS.clear()
+    try:
+        item = SimpleNamespace(
+            item_id="coll2", title="全挂", author=None,
+            extra={"child_count": 2, "downloaded_count": 0,
+                   "failed_count": 2, "failed_items": []},
+        )
+        job_id = mcp_server._record_job("https://x/coll2", item)
+        assert mcp_server._JOBS[job_id]["status"] == "failed"
+    finally:
+        mcp_server._JOBS.clear()
+
+
+def test_retry_failed_tool_roundtrip(monkeypatch):
+    mcp_server._JOBS.clear()
+    mcp_server._JOBS["parent"] = {
+        "job_id": "parent", "url": "https://x/coll", "status": "completed",
+        "failed_items": [{"platform": "bilibili", "item_id": "BV1zzz",
+                          "source_url": "https://b23.tv/BV1zzz"}],
+    }
+    seen: list = []
+
+    async def _fake_download_one(url):
+        seen.append(url)
+        return {"url": url, "job_id": f"child-{len(seen)}",
+                "status": "completed", "title": "子项"}
+
+    monkeypatch.setattr(mcp_server, "_download_one", _fake_download_one)
+    try:
+        async def _run():
+            return await mcp_server._dispatch({
+                "jsonrpc": "2.0", "id": 30, "method": "tools/call",
+                "params": {"name": "retry_failed",
+                           "arguments": {"job_id": "parent"}},
+            })
+        resp = asyncio.run(_run())
+        payload = json.loads(resp["result"]["content"][0]["text"])
+        assert payload["count"] == 1
+        entry = payload["retried"][0]
+        assert entry["item_id"] == "BV1zzz"
+        assert entry["platform"] == "bilibili"
+        assert entry["job_id"] == "child-1"
+        assert seen == ["https://b23.tv/BV1zzz"]
+    finally:
+        mcp_server._JOBS.clear()
+
+
+def test_retry_failed_tool_handles_empty_and_missing():
+    mcp_server._JOBS.clear()
+    try:
+        async def _run(name, arguments):
+            return await mcp_server._dispatch({
+                "jsonrpc": "2.0", "id": 31, "method": "tools/call",
+                "params": {"name": name, "arguments": arguments},
+            })
+
+        resp = asyncio.run(_run("retry_failed", {"job_id": "ghost"}))
+        payload = json.loads(resp["result"]["content"][0]["text"])
+        assert "error" in payload and "not found" in payload["error"]
+
+        mcp_server._JOBS["clean"] = {"job_id": "clean", "url": "u",
+                                     "status": "completed"}
+        resp = asyncio.run(_run("retry_failed", {"job_id": "clean"}))
+        payload = json.loads(resp["result"]["content"][0]["text"])
+        assert payload["retried"] == []
+    finally:
+        mcp_server._JOBS.clear()
+
+
+def test_mcp_add_to_queue_sections(monkeypatch):
+    """MCP add_to_queue 的 download_sections 参数必须进 options。"""
+    from types import SimpleNamespace
+    captured: list = []
+
+    class _FakePipeline:
+        async def process_url(self, url, options):
+            captured.append(options)
+            return SimpleNamespace(item_id="x", title="t", author=None, extra={})
+
+    monkeypatch.setattr(mcp_server, "build_default_pipeline", _FakePipeline)
+    mcp_server._JOBS.clear()
+    try:
+        async def _run():
+            return await mcp_server._dispatch({
+                "jsonrpc": "2.0", "id": 40, "method": "tools/call",
+                "params": {"name": "add_to_queue", "arguments": {
+                    "url": "https://x/1",
+                    "download_sections": "1:00-2:30",
+                }},
+            })
+        asyncio.run(_run())
+        assert captured, "pipeline never ran"
+        assert captured[0].download_sections == "1:00-2:30"
+    finally:
+        mcp_server._JOBS.clear()

@@ -37,11 +37,11 @@ from doubi.server.jobs import JobManager, JobStatus  # noqa: E402
 # ---------------------------------------------------------------------------
 
 
-async def _ok_executor(url: str) -> dict:
+async def _ok_executor(url: str, req_options=None) -> dict:
     return {"total": 1, "succeeded": 1, "failed": 0}
 
 
-async def _fail_executor(url: str) -> dict:
+async def _fail_executor(url: str, req_options=None) -> dict:
     raise RuntimeError("simulated failure")
 
 
@@ -176,7 +176,7 @@ def test_create_job_with_missing_url_returns_4xx(client):
 
 def test_create_job_with_unknown_url_returns_job(client):
     """Unknown URL → job submitted but the pipeline reports no platform."""
-    async def _fake_executor(url):
+    async def _fake_executor(url, req_options=None):
         return {"total": 0, "succeeded": 0, "failed": 0}
     # Replace the executor on the JobManager that build_app() created.
     # Patching the module-level _execute_download won't help because
@@ -196,7 +196,7 @@ def test_get_job_returns_404_for_unknown(client):
 
 
 def test_list_jobs_returns_submitted(client):
-    async def _ok(url):
+    async def _ok(url, req_options=None):
         return {"total": 1, "succeeded": 1, "failed": 0}
     client.app.state.job_manager._executor = _ok
 
@@ -218,7 +218,7 @@ def test_list_jobs_returns_submitted(client):
 
 
 def test_get_job_after_submit_returns_its_url(client):
-    async def _ok(url):
+    async def _ok(url, req_options=None):
         return {"total": 1, "succeeded": 1, "failed": 0}
     client.app.state.job_manager._executor = _ok
 
@@ -643,3 +643,156 @@ def test_collect_search_validates_inputs_before_calling_pipeline(
     # The pipeline must NOT have been invoked at all on invalid input.
     assert called["count"] == 0, "validation must run before the CLI call"
 
+
+
+# ---------------------------------------------------------------------------
+# 容器子项级重试（P2 收口）：failed_items 透出 + /retry-failed 端点
+# ---------------------------------------------------------------------------
+
+_CHILD = ("bilibili", "BV1zzz", "https://b23.tv/BV1zzz")
+
+
+def _poll_job(client, job_id: str, timeout: float = 5.0) -> dict:
+    import time
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        body = client.get(f"/api/v1/jobs/{job_id}").json()
+        if body["status"] in ("completed", "failed"):
+            return body
+        time.sleep(0.05)
+    return body
+
+
+def test_job_to_dict_exposes_failed_items(client):
+    """容器作业的失败子项必须出现在 GET /jobs/{id} 里——这是子项级
+    重试的数据前提；执行器算了却透不出等于没有。"""
+    async def _container_executor(url, req_options=None):
+        return {"total": 3, "succeeded": 2, "failed": 1,
+                "item_title": "合集", "item_id": "coll1",
+                "failed_items": [_CHILD]}
+    client.app.state.job_manager._executor = _container_executor
+
+    posted = client.post("/api/v1/download", json={"url": "https://x/coll"}).json()
+    body = _poll_job(client, posted["job_id"])
+
+    assert body["failed_items"] == [{
+        "platform": "bilibili", "item_id": "BV1zzz",
+        "source_url": "https://b23.tv/BV1zzz",
+    }]
+
+
+def test_retry_failed_endpoint_roundtrip(client):
+    """retry-failed 只重提失败子项的 URL，成功子项不碰。"""
+    seen_urls: list = []
+
+    async def _executor(url: str, req_options=None):
+        seen_urls.append(url)
+        if "coll" in url:
+            return {"total": 2, "succeeded": 1, "failed": 1,
+                    "item_title": "合集",
+                    "failed_items": [_CHILD]}
+        # 子项重提：单条成功
+        return {"total": 1, "succeeded": 1, "failed": 0,
+                "item_id": "BV1zzz"}
+    client.app.state.job_manager._executor = _executor
+
+    parent = client.post("/api/v1/download", json={"url": "https://x/coll"}).json()
+    body = _poll_job(client, parent["job_id"])
+    assert body["failed"] == 1
+
+    r = client.post(f"/api/v1/jobs/{parent['job_id']}/retry-failed")
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["count"] == 1
+    child = payload["retried"][0]
+    assert child["item_id"] == "BV1zzz"
+    assert child["url"] == _CHILD[2]
+    assert child["job_id"] != parent["job_id"]
+
+    # 新作业真的在跑我们的 executor，且最终完成
+    child_body = _poll_job(client, child["job_id"])
+    assert child_body["status"] == "completed"
+    assert seen_urls.count(_CHILD[2]) == 1, "子项 URL 只被重提一次"
+
+
+def test_retry_failed_without_failed_items_returns_empty(client):
+    async def _ok(url, req_options=None):
+        return {"total": 1, "succeeded": 1, "failed": 0}
+    client.app.state.job_manager._executor = _ok
+    posted = client.post("/api/v1/download", json={"url": "https://x/1"}).json()
+    _poll_job(client, posted["job_id"])
+
+    r = client.post(f"/api/v1/jobs/{posted['job_id']}/retry-failed")
+    assert r.status_code == 200
+    assert r.json()["retried"] == []
+
+
+def test_retry_failed_unknown_job_returns_404(client):
+    r = client.post("/api/v1/jobs/no-such-job/retry-failed")
+    assert r.status_code == 404
+
+
+def test_retry_failed_running_job_returns_409(client):
+    """作业还在跑时不许重试——failed_items 此刻既不完整也无意义。"""
+    import asyncio as _asyncio
+
+    async def _slow(url, req_options=None):
+        await _asyncio.sleep(0.5)
+        return {"total": 1, "succeeded": 1, "failed": 0}
+    client.app.state.job_manager._executor = _slow
+    posted = client.post("/api/v1/download", json={"url": "https://x/slow"}).json()
+
+    r = client.post(f"/api/v1/jobs/{posted['job_id']}/retry-failed")
+    assert r.status_code == 409
+    _poll_job(client, posted["job_id"])
+
+
+# ---------------------------------------------------------------------------
+# download_sections 请求级覆盖（P2 收口：章节下载 REST 透传）
+# ---------------------------------------------------------------------------
+
+
+def test_rest_download_sections_per_request(client):
+    """REST 请求级覆盖必须真的到达 executor——以 overrides dict 形式
+    传入，executor 里 dataclasses.replace 出独立副本（并发作业不能
+    共享同一份被改的 options）。"""
+    seen: list = []
+
+    async def _executor(url, req_options):
+        seen.append((url, req_options))
+        return {"total": 1, "succeeded": 1, "failed": 0}
+
+    client.app.state.job_manager._executor = _executor
+    r = client.post("/api/v1/download", json={
+        "url": "https://x/1", "download_sections": "0:10-0:20",
+    })
+    assert r.status_code == 200
+
+    import time
+    deadline = time.time() + 5.0
+    while time.time() < deadline and not seen:
+        time.sleep(0.05)
+
+    assert seen, "executor never ran"
+    url, overrides = seen[0]
+    assert url == "https://x/1"
+    assert overrides == {"download_sections": "0:10-0:20"}
+
+
+def test_rest_download_without_sections_passes_none(client):
+    """不带覆盖字段的请求 executor 收到 None——普通下载零开销路径。"""
+    seen: list = []
+
+    async def _executor(url, req_options):
+        seen.append(req_options)
+        return {"total": 1, "succeeded": 1, "failed": 0}
+
+    client.app.state.job_manager._executor = _executor
+    client.post("/api/v1/download", json={"url": "https://x/2"})
+
+    import time
+    deadline = time.time() + 5.0
+    while time.time() < deadline and not seen:
+        time.sleep(0.05)
+
+    assert seen == [None]

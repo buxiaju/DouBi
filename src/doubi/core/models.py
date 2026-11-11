@@ -216,6 +216,14 @@ class DownloadOptions:
     cookies_file: Optional[Path] = None
     user_agent: Optional[str] = None
 
+    #: 分段下载（章节）：``None`` 下载完整视频；否则是一个时间段表达式，
+    #: 如 ``"1:00-2:30"`` 或逗号分隔多段 ``"0:10-0:20,3:00-3:30"``。
+    #: 时间戳支持 ``SS`` / ``MM:SS`` / ``HH:MM:SS``。只有 yt-dlp 引擎
+    #: 支持（走 ``download_ranges``）；分段引擎（m3u8 等）遇到该字段
+    #: 记 warning 后忽略。不是 AppConfig 字段——它是每次任务的临时
+    #: 选择，只从弹窗 / REST overrides 进入 DownloadOptions。
+    download_sections: Optional[str] = None
+
     #: Resume partially downloaded files instead of restarting them
     #: (yt-dlp ``continuedl``). Also keeps ``.part`` / ``.ytdl``
     #: stragglers out of the intermediate cleanup, since deleting them

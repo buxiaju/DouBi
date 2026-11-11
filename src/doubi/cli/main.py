@@ -118,6 +118,10 @@ def _build_parser() -> argparse.ArgumentParser:
                       help="download subtitles (config: write_subtitles)")
     p_dl.add_argument("--resume", action=argparse.BooleanOptionalAction, default=None,
                       help="resume partial downloads instead of restarting (config: resume)")
+    p_dl.add_argument("--sections", default=None, metavar="SPEC",
+                      help="download only time ranges, e.g. '1:00-2:30' or "
+                           "'0:10-0:20,3:00-3:30' (yt-dlp engine only; "
+                           "timestamps: SS / MM:SS / HH:MM:SS)")
 
     # 通用嗅探（generic 兜底适配器）。未知 URL 会走 Playwright 嗅探，这两个
     # 开关控制它的时长和总开关。--no-sniff 由 BooleanOptionalAction 生成。
@@ -1633,6 +1637,9 @@ def _build_options(args: argparse.Namespace, cfg: AppConfig | None = None) -> Do
         write_danmaku=_pick(args.danmaku, cfg.write_danmaku),
         write_subtitles=_pick(args.subtitles, cfg.write_subtitles),
         resume=_pick(args.resume, cfg.resume),
+        # download_sections 不入 AppConfig——它是每次任务的临时选择，
+        # 只有命令行显式传入才生效（与 format_id 同一待遇）。
+        download_sections=getattr(args, "sections", None),
         duplicate_policy=cfg.duplicate_policy,
         rate_limit=_pick(args.rate_limit, cfg.rate_limit),
         proxy=_pick(args.proxy, cfg.proxy),
