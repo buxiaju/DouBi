@@ -9,6 +9,7 @@ wants a class, not an instance.
 from __future__ import annotations
 
 from .download import build_download_widgets
+from .favorites import build_favorites_widgets
 from .history import build_history_widgets
 from .hot import build_hot_widgets
 from .parse import build_parse_widgets
@@ -20,6 +21,7 @@ __all__ = [
     "build_download_widgets",
     "build_history_widgets",
     "build_hot_widgets",
+    "build_favorites_widgets",
     "build_search_widgets",
     "build_settings_widgets",
 ]

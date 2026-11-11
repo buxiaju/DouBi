@@ -52,6 +52,7 @@ def build_main_window():
     from .i18n import tr
     from .pages import (
         build_download_widgets,
+        build_favorites_widgets,
         build_history_widgets,
         build_hot_widgets,
         build_parse_widgets,
@@ -73,6 +74,7 @@ def build_main_window():
     HistoryPage, _ = build_history_widgets()
     SearchPage, _ = build_search_widgets()
     HotPage, _ = build_hot_widgets()
+    FavoritesPage, _ = build_favorites_widgets()
     SettingsPage, _ = build_settings_widgets()
 
     class MainWindow(MSFluentWindow):
@@ -171,6 +173,21 @@ def build_main_window():
             )
             # 0.3.6：热榜页右键「下载」/「搜索该词条并下载」同理。
             self.hot_interface.set_task_manager(self.task_manager)
+
+            # ---- 收藏 (M6.51 GUI 入口) -------------------------------
+            self.favorites_interface = FavoritesPage(self)
+            self.favorites_interface.setObjectName("favoritesInterface")
+            self.addSubInterface(
+                self.favorites_interface,
+                FluentIcon.ALBUM,
+                tr("nav.favorites"),
+                position=NavigationItemPosition.TOP,
+            )
+            self.favorites_interface.set_task_manager(self.task_manager)
+            # 未登录引导态的「去设置页登录」直接跳设置页。
+            self.favorites_interface.set_open_settings_callback(
+                lambda: self.switchTo(self.settings_interface)
+            )
 
             # ---- 设置 -----------------------------------------------
             self.settings_interface = SettingsPage(self)
@@ -608,6 +625,7 @@ def build_main_window():
             self.parse_interface._cfg = cfg
             self.search_interface._cfg = cfg
             self.hot_interface._cfg = cfg
+            self.favorites_interface._cfg = cfg
             self.history_interface._cfg = cfg
             # 剪贴板监听开关实时跟随：开了且页面可见 → 启动轮询；
             # 关了 → 停（零开销语义，不是「轮询了再忽略」）。

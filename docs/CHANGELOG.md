@@ -4,6 +4,7 @@
 >
 > | 版本 | 日期 | 一句话摘要 |
 > | --- | --- | --- |
+> | 0.3.12 | 未发版 | 安装包瘦身（Playwright 浏览器按 revision 过滤）+ GUI 收藏页 |
 > | 0.3.11 | 2026-11-11 | 功能三连（章节三端/解析历史/剪贴板开关）+ GUI 缺口收口 + 主题订阅泄漏修复 |
 > | 0.3.10 | 2026-10-12 | 工程收口 5 步：CI 防挂死 / Dependabot / osv-scanner / USER_GUIDE / 诊断包 |
 > | 0.3.9 | 2026-10-12 | ruff 全清 0 错 + 解析链回退 + UI 收尾：feedback / shortcuts / 加载空态 |
@@ -23,6 +24,47 @@
 > - **测试基线**（passed / skipped）→ 见每版段尾的「统计」表，或者直接读 [BUILD.md](BUILD.md) §6.5 / §7 的本地全量 + ci 双口径脚本。
 > - **构建产物基线**（体积 / SHA256）→ 见 [BUILD.md](BUILD.md) §6.5 的「实测基线速查表」。
 > - **检索**：编辑器用 `Ctrl+F` 搜版本号（如 `0.3.6` 或 `M6.48`）是最快的跳转方式。
+
+## 0.3.12 (未发版) — 安装包瘦身 + GUI 收藏页
+
+### 一、安装包瘦身：Playwright 浏览器按 revision 过滤
+
+**症状**：0.3.11 安装包 382 MB，比 0.3.9（226 MB）涨了 69%。
+
+**根因**：`build_exe.py` 把整个 `ms-playwright` 目录逐项收进包，而该目录
+里躺着 Playwright 升级后没清掉的旧 revision——实测本机同时有
+`chromium-1234`（1.62.0 实际需要）和 `chromium-1254`（451 MB 纯死重）、
+`ffmpeg-1013`（需要 1011）。安装包 1/3 体积是这些永远不被执行的二进制。
+
+**修法**：`_browser_add_data` 收包前读**已装** Playwright 自带的
+`driver/package/browsers.json`，按各二进制（chromium / ffmpeg / winldd）
+的目标 revision 过滤同名目录；browsers.json 读不到时**不过滤**——宁可
+退回旧行为多收，也不冒少收运行时必需二进制的险。
+
+**判据**：onedir 产物 1.2 GB → **727 MB**（省 ~470 MB）；收包清单复核
+只剩 `.links / chromium-1234 / ffmpeg-1011 / winldd-1007`。
+
+### 二、GUI 收藏页（抖音收藏全家族）
+
+M6.51 的收藏 5 类此前只有 CLI 入口（`doubi favorites`），GUI 缺位。
+新增「收藏」页（`ui/pages/favorites.py`），交互严格对应 API 的真实能力：
+
+- **收藏夹**行右键「查看收藏夹视频」→ 下钻 `iter_collects_videos(collects_id)`
+- **收藏合集**行右键「下载整个合集」→ 展开 `iter_mix_awemes(mix_id)` →
+  解析出真实条数 → 复用 `container` 语义确认框 → 整包入队
+- **收藏夹视频**行右键 下载 / 复制链接 / 浏览器打开（与搜索热榜同款）
+- **收藏音乐 / 收藏短剧**仅列表——M6.51 明确把这两类的展开划出范围，
+  API 层没有端点，GUI 不假装能下载
+- 全家族 gate 在抖音登录态：本机没有 cookie 文件时直接给「去设置页
+  登录」引导态（主窗口接 `switchTo` 回调），不发无效请求
+
+数据源与 CLI 同源：`_cmd_favorites` 的采集核心抽出为
+`collect_favorites_async`（`error_sink` 语义与 `collect_search_async`
+一致），CLI 行为零变化（20 例既有测试原样通过）。
+
+**判据**：`tests/test_favorites_page.py` 14 例（工厂 / 常量 / i18n /
+main_window 接线 / kind 路由 / 缺 ID 短路 / 未登录引导 / 五类行渲染 /
+下钻填 ID / 菜单分叉表）；受影响面 92 例 + shell 037/039 全绿。
 
 ## 0.3.11 (2026-11-11) — 功能三连 + GUI 缺口收口 + 主题订阅泄漏修复
 

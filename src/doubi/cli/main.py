@@ -967,6 +967,51 @@ _FAVORITES_DISPATCH: dict[str, str] = {
 }
 
 
+async def collect_favorites_async(
+    *,
+    kind: str,
+    collect_id: Optional[str] = None,
+    count: int = 10,
+    max_count: int = 50,
+    cookies_file: Optional[Path] = None,
+    proxy: Optional[str] = None,
+    timeout: float = 15.0,
+    error_sink: Optional[dict[str, Any]] = None,
+) -> list[dict[str, Any]]:
+    """``doubi favorites`` core. Returns raw favorite rows for *kind*.
+
+    The 5 kinds map 1:1 onto :data:`_FAVORITES_DISPATCH`; all endpoints
+    gate on a logged-in douyin session — without cookies the platform
+    returns 401 / empty lists and ``error_sink`` carries
+    ``hint == "need_login"`` (same machinery as
+    :func:`collect_search_async`).
+
+    :param collect_id: required for ``kind="videos"`` (the collects_id
+        from a ``favorites`` listing). Missing → :class:`ValueError`
+        (loud, before any network I/O).
+    :param error_sink: optional caller-owned mutable mapping receiving
+        ``{reason, status_code, hint}`` on failure — the GUI shows the
+        hint (need_login → 引导登录); CLI keeps a private sink.
+    """
+    if kind == "videos" and not collect_id:
+        raise ValueError(
+            'kind="videos" requires collect_id (run a "favorites" listing first)'
+        )
+    if kind not in _FAVORITES_DISPATCH:
+        raise ValueError(f"unknown favorites kind: {kind!r}")
+
+    from doubi.platforms.douyin.webapi import DouyinWebAPI
+
+    api = DouyinWebAPI(cookies_file=cookies_file, proxy=proxy, timeout=timeout)
+    method = getattr(api, _FAVORITES_DISPATCH[kind])
+    sink: dict[str, Any] = error_sink if error_sink is not None else {}
+    if kind == "videos":
+        return await method(
+            collect_id, count=count, max_count=max_count, error_sink=sink,
+        )
+    return await method(count=count, max_count=max_count, error_sink=sink)
+
+
 def _cmd_favorites_sync(args: argparse.Namespace) -> int:
     """Sync wrapper around the async ``_cmd_favorites``."""
     return asyncio.run(_cmd_favorites(args))
@@ -992,8 +1037,6 @@ async def _cmd_favorites(args: argparse.Namespace) -> int:
             2  missing positional arg for ``--kind=videos``
             3  fetch failed (network, 401, ...)
     """
-    from doubi.platforms.douyin.webapi import DouyinWebAPI
-
     kind = args.kind
     collect_id = getattr(args, "collect_id", None)
 
@@ -1005,30 +1048,18 @@ async def _cmd_favorites(args: argparse.Namespace) -> int:
         )
         return 2
 
-    api = DouyinWebAPI(
-        cookies_file=args.cookies_file,
-        proxy=args.proxy,
-        timeout=15.0,
-    )
-
-    method_name = _FAVORITES_DISPATCH[kind]
-    iter_method = getattr(api, method_name)
-
     error_sink: dict[str, Any] = {}
     try:
-        if kind == "videos":
-            rows = await iter_method(
-                collect_id,
-                count=args.count,
-                max_count=args.max,
-                error_sink=error_sink,
-            )
-        else:
-            rows = await iter_method(
-                count=args.count,
-                max_count=args.max,
-                error_sink=error_sink,
-            )
+        rows = await collect_favorites_async(
+            kind=kind,
+            collect_id=collect_id,
+            count=args.count,
+            max_count=args.max,
+            cookies_file=args.cookies_file,
+            proxy=args.proxy,
+            timeout=15.0,
+            error_sink=error_sink,
+        )
     except Exception as exc:  # noqa: BLE001
         print(
             f"Error: favorites fetch failed for kind={kind}: {exc}",
