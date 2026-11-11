@@ -743,6 +743,7 @@ multidict / yarl / propcache / frozenlist 各 1 个），这是 https 分片下�
 | 0.3.3 | 237,007,016 B / 226.03 MB | `ef4723f6…` | — | — | 静默卡模态框（0.3.5 修，见下条） |
 | 0.3.9 | 见 Releases 页面 | 见 Releases 页面 | — | — | 当前版本 |
 | 0.3.11 | 400,655,011 B / 382.1 MB | `938da446…` | 45.8s | 3.3s | 装后 1413 文件 / 1177.7 MB（Playwright chromium-1254 进包 + 压缩率 32.4%）；CI 已移除，手工打包 |
+| 0.3.12 | 242,112,099 B / 230.9 MB | `c43e73b2…` | — | — | 瘦身版：ms-playwright 按 browsers.json 过滤 revision（跳过 chromium-1254/ffmpeg-1013），onedir 1.2GB→727MB / 1101 文件，压缩率 31.8%，CRC `0x48AD8ABA` |
 
 > **基线共识**：所有版本实测都达成：CRC footer 写入正确、`*headless_shell*` 与 `*webengine*` 真实文件残留 0；安装包体积跳变先按文件排查（多半是浏览器目录版本漂移），不要急着改打包配置。
 

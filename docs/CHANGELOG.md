@@ -4,7 +4,7 @@
 >
 > | 版本 | 日期 | 一句话摘要 |
 > | --- | --- | --- |
-> | 0.3.12 | 未发版 | 安装包瘦身 + GUI 收藏页 + 暂停续传进度条修复 + 通用引擎 HLS 稳定性 |
+> | 0.3.12 | 2026-11-11 | 安装包瘦身 + GUI 收藏页 + 暂停续传进度条修复 + 通用引擎 HLS 稳定性 |
 > | 0.3.11 | 2026-11-11 | 功能三连（章节三端/解析历史/剪贴板开关）+ GUI 缺口收口 + 主题订阅泄漏修复 |
 > | 0.3.10 | 2026-10-12 | 工程收口 5 步：CI 防挂死 / Dependabot / osv-scanner / USER_GUIDE / 诊断包 |
 > | 0.3.9 | 2026-10-12 | ruff 全清 0 错 + 解析链回退 + UI 收尾：feedback / shortcuts / 加载空态 |
@@ -25,7 +25,7 @@
 > - **构建产物基线**（体积 / SHA256）→ 见 [BUILD.md](BUILD.md) §6.5 的「实测基线速查表」。
 > - **检索**：编辑器用 `Ctrl+F` 搜版本号（如 `0.3.6` 或 `M6.48`）是最快的跳转方式。
 
-## 0.3.12 (未发版) — 安装包瘦身 + GUI 收藏页
+## 0.3.12 (2026-11-11) — 安装包瘦身 + GUI 收藏页 + 暂停续传修复 + 通用引擎 HLS 稳定性
 
 ### 一、安装包瘦身：Playwright 浏览器按 revision 过滤
 
@@ -43,6 +43,58 @@
 
 **判据**：onedir 产物 1.2 GB → **727 MB**（省 ~470 MB）；收包清单复核
 只剩 `.links / chromium-1234 / ffmpeg-1011 / winldd-1007`。
+
+### 二、GUI 收藏页（抖音收藏全家族）
+
+M6.51 的收藏 5 类此前只有 CLI 入口（`doubi favorites`），GUI 缺位。
+新增「收藏」页（`ui/pages/favorites.py`），交互严格对应 API 的真实能力：
+
+- **收藏夹**行右键「查看收藏夹视频」→ 下钻 `iter_collects_videos(collects_id)`
+- **收藏合集**行右键「下载整个合集」→ 展开 `iter_mix_awemes(mix_id)` →
+  解析出真实条数 → 复用 `container` 语义确认框 → 整包入队
+- **收藏夹视频**行右键 下载 / 复制链接 / 浏览器打开（与搜索热榜同款）
+- **收藏音乐 / 收藏短剧**仅列表——M6.51 明确把这两类的展开划出范围，
+  API 层没有端点，GUI 不假装能下载
+- 全家族 gate 在抖音登录态：本机没有 cookie 文件时直接给「去设置页
+  登录」引导态（主窗口接 `switchTo` 回调），不发无效请求
+
+数据源与 CLI 同源：`_cmd_favorites` 的采集核心抽出为
+`collect_favorites_async`（`error_sink` 语义与 `collect_search_async`
+一致），CLI 行为零变化（20 例既有测试原样通过）。
+
+**判据**：`tests/test_favorites_page.py` 14 例（工厂 / 常量 / i18n /
+main_window 接线 / kind 路由 / 缺 ID 短路 / 未登录引导 / 五类行渲染 /
+下钻填 ID / 菜单分叉表）；受影响面 92 例 + shell 037/039 全绿。
+
+### 三、修复：暂停 → 续传的进度条「归零假象」
+
+**用户报告**：暂停下载后点继续，是重头下载，不是接着断点继续。
+
+**排查结论（端到端实测）**：**字节级续传一直是好的**——真实 B 站视频
+限速下载 8s 后暂停，`.part` 落盘 2.9MB；立即点继续，首个引擎 tick 直接
+从 2.9MB（18.2%）续起，3.3s 下完，产物完好。问题纯在**进度显示层**，
+有三个把进度条打回零的事件源：
+
+1. **引擎 cancel 事件固定发 `fraction=0.0`**：暂停后引擎线程要在下一个
+   progress tick 才注意到停止标志，随后发出「已取消」通告——晚到约 1s，
+   且 fraction 恒 0.0。任务行照单全收，暂停瞬间 80% 的条归零。
+2. **pipeline `Starting` 事件 `fraction=0.0`**：续传尝试开局就把行上
+   挂着的真实进度打回零，要等 ~1s 后首个引擎 tick 才恢复到断点值。
+3. 两者叠加的观感：暂停 → 0% → 继续 → 0% → 从零爬 = 「重头下载」。
+
+**修法（双保险）**：
+
+- 引擎 cancel 事件改带**最后真实进度**（`last_fraction`，尚无 tick 才
+  用 0.0）——「传输到此为止」的通告不该谎报进度；
+- pipeline `Starting` 事件加 `extra={"starting": True}` 标记；
+- `task_manager._on_progress` 对 `cancelled` 事件整条忽略（暂停状态机
+  自管行状态），对 `starting` 事件只换文案不动数字——与既有 `retry`
+  豁免同一套「通告 vs 测量值」契约。
+
+**判据**：`test_cancelled_event_carries_last_real_fraction`（引擎层）、
+`test_pause_keeps_fraction_against_late_cancel_event` /
+`test_resume_starting_notice_does_not_rewind_fraction`（任务行层）；
+探针实测暂停 @15.7% → 继续 → 首个 emit 即 15.7% → 断点续传完成。
 
 ### 四、通用引擎：HLS 下载稳定性（silidm.com 案例）
 
@@ -79,57 +131,14 @@
 `test_frag_corruption_selfheal_disabled_when_resume_off`（自愈恰好一次、
 sidecar 不误伤、resume 关闭时旧语义保持）；真实脏现场续传全片完成。
 
-### 三、修复：暂停 → 续传的进度条「归零假象」
+### 统计
 
-**用户报告**：暂停下载后点继续，是重头下载，不是接着断点继续。
+| 口径 | 0.3.11 | 0.3.12 | 差值 |
+| --- | --- | --- | --- |
+| local 全量 | 1567 passed / 8 skipped / 13m18s | **1588 passed / 8 skipped / 11m41s** | +21 passed（收藏页 14 + 引擎/任务行 7） |
+| ruff | 0 | **0** | 0 |
 
-**排查结论（端到端实测）**：**字节级续传一直是好的**——真实 B 站视频
-限速下载 8s 后暂停，`.part` 落盘 2.9MB；立即点继续，首个引擎 tick 直接
-从 2.9MB（18.2%）续起，3.3s 下完，产物完好。问题纯在**进度显示层**，
-有三个把进度条打回零的事件源：
-
-1. **引擎 cancel 事件固定发 `fraction=0.0`**：暂停后引擎线程要在下一个
-   progress tick 才注意到停止标志，随后发出「已取消」通告——晚到约 1s，
-   且 fraction 恒 0.0。任务行照单全收，暂停瞬间 80% 的条归零。
-2. **pipeline `Starting` 事件 `fraction=0.0`**：续传尝试开局就把行上
-   挂着的真实进度打回零，要等 ~1s 后首个引擎 tick 才恢复到断点值。
-3. 两者叠加的观感：暂停 → 0% → 继续 → 0% → 从零爬 = 「重头下载」。
-
-**修法（双保险）**：
-
-- 引擎 cancel 事件改带**最后真实进度**（`last_fraction`，尚无 tick 才
-  用 0.0）——「传输到此为止」的通告不该谎报进度；
-- pipeline `Starting` 事件加 `extra={"starting": True}` 标记；
-- `task_manager._on_progress` 对 `cancelled` 事件整条忽略（暂停状态机
-  自管行状态），对 `starting` 事件只换文案不动数字——与既有 `retry`
-  豁免同一套「通告 vs 测量值」契约。
-
-**判据**：`test_cancelled_event_carries_last_real_fraction`（引擎层）、
-`test_pause_keeps_fraction_against_late_cancel_event` /
-`test_resume_starting_notice_does_not_rewind_fraction`（任务行层）；
-探针实测暂停 @15.7% → 继续 → 首个 emit 即 15.7% → 断点续传完成。
-
-### 二、GUI 收藏页（抖音收藏全家族）
-
-M6.51 的收藏 5 类此前只有 CLI 入口（`doubi favorites`），GUI 缺位。
-新增「收藏」页（`ui/pages/favorites.py`），交互严格对应 API 的真实能力：
-
-- **收藏夹**行右键「查看收藏夹视频」→ 下钻 `iter_collects_videos(collects_id)`
-- **收藏合集**行右键「下载整个合集」→ 展开 `iter_mix_awemes(mix_id)` →
-  解析出真实条数 → 复用 `container` 语义确认框 → 整包入队
-- **收藏夹视频**行右键 下载 / 复制链接 / 浏览器打开（与搜索热榜同款）
-- **收藏音乐 / 收藏短剧**仅列表——M6.51 明确把这两类的展开划出范围，
-  API 层没有端点，GUI 不假装能下载
-- 全家族 gate 在抖音登录态：本机没有 cookie 文件时直接给「去设置页
-  登录」引导态（主窗口接 `switchTo` 回调），不发无效请求
-
-数据源与 CLI 同源：`_cmd_favorites` 的采集核心抽出为
-`collect_favorites_async`（`error_sink` 语义与 `collect_search_async`
-一致），CLI 行为零变化（20 例既有测试原样通过）。
-
-**判据**：`tests/test_favorites_page.py` 14 例（工厂 / 常量 / i18n /
-main_window 接线 / kind 路由 / 缺 ID 短路 / 未登录引导 / 五类行渲染 /
-下钻填 ID / 菜单分叉表）；受影响面 92 例 + shell 037/039 全绿。
+版本号单一真源 `src/doubi/__init__.py` 由 0.3.11 升至 0.3.12。
 
 ## 0.3.11 (2026-11-11) — 功能三连 + GUI 缺口收口 + 主题订阅泄漏修复
 
