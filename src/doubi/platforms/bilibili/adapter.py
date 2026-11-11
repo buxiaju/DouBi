@@ -265,6 +265,11 @@ class BilibiliAdapter(PlatformAdapter):
     async def _parse_single(self, url: str, classified) -> Optional[MediaItem]:
         media_type = _classify_single_type(classified.type)
 
+        # 直播间走专用路径：yt-dlp BiliLive 拿得到流但没有主播名，也
+        # 区分不了「未开播」和「房间不存在」——官方 live API 一次补齐。
+        if media_type is MediaType.LIVE:
+            return await self._parse_live(url, classified)
+
         # allow_playlist=True: 探测是否为分P（multi-page）视频，
         # yt-dlp 会返回 playlist dict 带 entries 列表
         info = await self.api.fetch(url, allow_playlist=True)
@@ -343,6 +348,70 @@ class BilibiliAdapter(PlatformAdapter):
         item = self.api.to_media_item(info, url)
         if media_type is not None:
             item.media_type = media_type
+        return item
+
+    # ------------------------------------------------------------------
+    # live room
+    # ------------------------------------------------------------------
+
+    async def _parse_live(self, url: str, classified) -> Optional[MediaItem]:
+        """解析直播间：官方 live API 补主播名与开播状态，yt-dlp 补流。
+
+        语义约定：
+
+        * **房间不存在**（live API 返回 None 且 yt-dlp 也失败）→
+          ``None``，让上层报「解析失败」——与视频 URL 行为一致。
+        * **未开播 / 轮播**（live_status != 1）→ 仍返回 item，标题带
+          状态后缀。录制是用户显式动作：有人就要挂机等开播（引擎的
+          ``live_from_start`` 对 HLS 点播化流会等），我们不在 parse 层
+          替用户做决定，但标题必须让用户看得出「现在没在播」。
+        * **开播中** → 标题用 live API 的（比 yt-dlp 的干净，无时间戳
+          后缀），作者名从 yt-dlp 侧透传（有就用）。
+        """
+        room_id = classified.item_id
+        live = await self.api.fetch_live_info(room_id)
+
+        info = await self.api.fetch(url)
+        if info is None and live is None:
+            # 两边都拿不到：网络故障或房间真的不存在。yt-dlp 的报错
+            # （若房间不存在）已在 api.fetch 里记日志，这里静默 None。
+            logger.error("live room %s: neither yt-dlp nor live API responded", room_id)
+            return None
+
+        title = ""
+        if live:
+            status = int(live.get("live_status") or 0)
+            base_title = str(live.get("title") or "").strip()
+            if status == 1:
+                title = base_title
+            elif status == 2:
+                title = f"{base_title}（轮播中）" if base_title else "轮播中"
+            else:
+                title = f"{base_title}（未开播）" if base_title else "未开播"
+
+        item = self.api.to_media_item(info, url) if info else MediaItem(
+            platform=self.platform,
+            item_id=room_id,
+            title="",
+            author=Author(),
+            media_type=MediaType.LIVE,
+            source_url=url,
+        )
+        item.media_type = MediaType.LIVE
+        if title:
+            item.title = title
+        # B 站直播是 HLS 实时流，没有 DVR 回看能力——引擎层据此决定是否
+        # 传 --live-from-start（默认 True 是给 YouTube 这类有 DVR 的直播
+        # 的；对 B 站传了会被 yt-dlp 硬报错「no formats that can be
+        # downloaded from the start」，录制直接失败，2026-11 端到端实测）。
+        # 平台知识留在 adapter，引擎只认 extra 标记。
+        item.extra = dict(item.extra or {})
+        item.extra["live_dvr"] = False
+        # 主播名：yt-dlp 的 BiliLive 不带 uploader（实测为空），
+        # live API 的 uid 只给数字——有真名用真名（未来接 anchor API），
+        # 没有就用房间号占位，保证 UI 上有可读的作者列。
+        if not item.author.name:
+            item.author.name = f"主播 {room_id}"
         return item
 
     # ------------------------------------------------------------------

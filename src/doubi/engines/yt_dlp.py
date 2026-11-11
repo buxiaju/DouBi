@@ -82,6 +82,52 @@ def _try_import_yt_dlp() -> Any:
         ) from e
 
 
+def _parse_timestamp(text: str) -> float:
+    """``SS`` / ``MM:SS`` / ``HH:MM:SS`` → 秒。
+
+    Raises:
+        ValueError: 空串或任何一段不是纯数字。
+    """
+    parts = text.strip().split(":")
+    if not parts or not all(p.strip().isdigit() for p in parts):
+        raise ValueError(f"invalid timestamp: {text!r}")
+    seconds = 0.0
+    for part in parts:
+        seconds = seconds * 60 + int(part)
+    return seconds
+
+
+def _parse_sections(spec: str) -> list[tuple[float, float]]:
+    """把 ``DownloadOptions.download_sections`` 表达式解析成秒区间列表。
+
+    支持逗号分隔多段：``"1:00-2:30"``、``"0:10-0:20,3:00-3:30"``。
+    起点晚于终点的段直接报错——静默交换顺序会下载出用户完全没预料
+    的内容，宁可在任务层面失败。
+
+    Raises:
+        ValueError: 表达式为空、段不含 ``-``、或起终点非法。
+    """
+    ranges: list[tuple[float, float]] = []
+    for raw in spec.split(","):
+        chunk = raw.strip()
+        if not chunk:
+            continue
+        if "-" not in chunk:
+            raise ValueError(
+                f"invalid section {chunk!r}: expected ``start-end``"
+            )
+        start_s, end_s = chunk.split("-", 1)
+        start, end = _parse_timestamp(start_s), _parse_timestamp(end_s)
+        if start >= end:
+            raise ValueError(
+                f"invalid section {chunk!r}: start must be before end"
+            )
+        ranges.append((start, end))
+    if not ranges:
+        raise ValueError(f"empty sections spec: {spec!r}")
+    return ranges
+
+
 class YtDlpEngine(Engine):
     """Engine that delegates to yt-dlp."""
 
@@ -103,9 +149,15 @@ class YtDlpEngine(Engine):
         """Find an ffmpeg binary, or ``None``.
 
         Priority:
-          1. the ffmpeg shipped with DouBi (``tools/nm3u8dl/ffmpeg.exe``,
+          1. ffmpeg on PATH
+          2. the ffmpeg shipped with DouBi (``tools/nm3u8dl/ffmpeg.exe``,
              also present inside the frozen bundle)
-          2. ffmpeg on PATH
+
+        **PATH 优先于 bundled**（2026-11 翻转）：bundled 是 2019 年的
+        N_m3u8DL-CLI 定制版，处理不了 B 站直播的 fMP4 流（remux 报
+        「ffmpeg exited with code 1」，端到端实测；系统 ffmpeg 9.x 无此
+        问题）。用户自己装的 ffmpeg 通常更新；发布版没装 ffmpeg 的用户
+        依然回落到 bundled，行为不变。
 
         yt-dlp needs ffmpeg to merge bestvideo+bestaudio into a single
         file; B 站 (and most sites) only offer DASH split streams, so
@@ -113,12 +165,12 @@ class YtDlpEngine(Engine):
         carries its own copy instead of relying on the user having
         installed ffmpeg system-wide.
         """
-        bundled = find_bundled_ffmpeg()
-        if bundled:
-            return bundled
         on_path = shutil.which("ffmpeg")
         if on_path:
             return on_path
+        bundled = find_bundled_ffmpeg()
+        if bundled:
+            return bundled
         return None
 
     def supports(self, item: MediaItem) -> bool:
@@ -161,7 +213,6 @@ class YtDlpEngine(Engine):
     def _build_opts(self, item: MediaItem, options: DownloadOptions) -> dict:
         # M4: resolve the per-item directory under output_root
         out_dir = resolve_item_dir(item, options)
-
         # 直播流是 HLS，与点播有几个本质区别：
         # * 没有片尾，merge_output_format 在直播录制中途没意义，
         #   强行设 mp4 会在结束时做一次 remux，可能失败。
@@ -190,8 +241,26 @@ class YtDlpEngine(Engine):
         if is_live:
             # 直播流不 merge：HLS 分片是 ts，合并 mp4 需要完整流，
             # 直播中途 remux 会因流未结束而失败。
-            opts["live_from_start"] = True
+            # live_from_start 只对有 DVR 回看的直播（YouTube 等）有意义；
+            # B 站 HLS 直播没有回看，传了会被 yt-dlp 硬报错。平台差异由
+            # adapter 写进 item.extra["live_dvr"]（默认 True）。
+            opts["live_from_start"] = bool((item.extra or {}).get("live_dvr", True))
             opts["fragment_retries"] = 10
+            # B 站直播的 HLS 分片是 fMP4——yt-dlp 拒绝把 'fmp4' 当最终
+            # 扩展名（_UnsafeExtensionError，安全检查）。remux 到 mp4 让
+            # 目标文件名合法，录制照常落盘；直播被中断时 remux 不会跑，
+            # 残留 .part（fMP4 裸流）即停止时刻的数据。
+            # ⚠️ final_ext 必须显式给：remux_video → final_ext 的推导只在
+            # yt-dlp 的 CLI 层（__init__._real_main）做，Python API 不做；
+            # 缺了它 existing_video_file 用原始 ext='fmp4' 算目标文件名，
+            # 直接被安全检查拒掉（2026-11 端到端实测踩中）。
+            opts["remux_video"] = "mp4"
+            opts["final_ext"] = "mp4"
+            # 同时放弃 bestvideo*+bestaudio 的合并路径：两路 fMP4 合并后
+            # 扩展名仍是 fmp4，照样被安全检查拒掉。直播 HLS 的格式本身
+            # 就是音视频muxed 的单路流，'best' 直接选中它（2026-11 端到端
+            # 实测：room 6 该路径真实落盘录制）。
+            opts["format"] = "best/bestvideo*+bestaudio/best"
         else:
             opts["merge_output_format"] = options.container
         # Point yt-dlp at an ffmpeg binary (PATH or the bundled static
@@ -217,6 +286,22 @@ class YtDlpEngine(Engine):
             opts["proxy"] = options.proxy
         if options.rate_limit:
             opts["ratelimit"] = options.rate_limit
+        # 分段下载（章节）：``download_ranges`` 是 yt-dlp CLI
+        # ``--download-sections`` 的 API 形态。``force_keyframes_at_cuts``
+        # 强制切点重编关键帧——不设的话非关键帧切点处画面会花。直播流
+        # 没有可用的章节表，分段对它无意义，直接忽略。
+        if options.download_sections and not is_live:
+            ranges = _parse_sections(options.download_sections)
+            utils = getattr(self.ytdlp, "utils", None)
+            range_func = getattr(utils, "download_range_func", None)
+            if range_func is not None:
+                opts["download_ranges"] = range_func(None, ranges)
+                opts["force_keyframes_at_cuts"] = True
+            else:  # pragma: no cover - 极老版本 yt-dlp 才会缺
+                logger.warning(
+                    "yt-dlp too old for download_ranges; ignoring sections %r",
+                    options.download_sections,
+                )
         # UA：显式传了就用显式的，否则用 DEFAULT_USER_AGENT（Chrome UA）。
         # 不能留空让 yt-dlp 决定——它的默认 UA 是 ``yt-dlp/<版本号>``，
         # YouTube 会对这个 UA 直接 403。于是出现「解析能拿到标题/作者
@@ -352,10 +437,19 @@ class YtDlpEngine(Engine):
                             frac = last_fraction["v"] if last_fraction["v"] >= 0 else 0.0
                     if frac - last_fraction["v"] >= 0.005 or frac >= 1.0:
                         last_fraction["v"] = frac
+                        # P1-4: bytes ride along in ``extra`` so the GUI can
+                        # show speed / ETA / downloaded size. ``total`` may
+                        # be None (streams that only expose a percent) —
+                        # consumers must tolerate that.
                         on_progress(EngineProgress(
                             fraction=frac,
                             message=f"downloading {d.get('_percent_str', '').strip()}",
-                            extra={"speed": d.get("speed"), "eta": d.get("eta")},
+                            extra={
+                                "speed": d.get("speed"),
+                                "eta": d.get("eta"),
+                                "downloaded_bytes": done,
+                                "total_bytes": total,
+                            },
                         ))
                 elif status == "finished":
                     on_progress(EngineProgress(

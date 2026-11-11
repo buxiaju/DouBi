@@ -14,6 +14,8 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
@@ -318,3 +320,139 @@ def test_part_file_removed_when_resume_disabled(tmp_path):
     assert not part_file.exists(), (
         "with resume off, .part files should still be swept away"
     )
+
+
+# ---------------------------------------------------------------------------
+# 分段下载（章节）：download_sections → download_ranges / force_keyframes
+#
+# 校验三层：表达式解析（含报错口径）、opts 接线、直播流忽略。
+# ---------------------------------------------------------------------------
+
+
+def test_parse_timestamp_units():
+    from doubi.engines.yt_dlp import _parse_timestamp
+    assert _parse_timestamp("45") == 45.0
+    assert _parse_timestamp("1:30") == 90.0
+    assert _parse_timestamp("1:00:00") == 3600.0
+
+
+def test_parse_timestamp_rejects_garbage():
+    from doubi.engines.yt_dlp import _parse_timestamp
+    for bad in ("", "abc", "1:x0", "1.5", "-10"):
+        with pytest.raises(ValueError):
+            _parse_timestamp(bad)
+
+
+def test_parse_sections_single_and_multi():
+    from doubi.engines.yt_dlp import _parse_sections
+    assert _parse_sections("1:00-2:30") == [(60.0, 150.0)]
+    assert _parse_sections("0:10-0:20,3:00-3:30") == [
+        (10.0, 20.0), (180.0, 210.0),
+    ]
+
+
+def test_parse_sections_rejects_bad_shapes():
+    from doubi.engines.yt_dlp import _parse_sections
+    # 不含 '-'、起终点相等 / 倒序、纯逗号
+    for bad in ("1:00", "2:00-1:00", "1:00-1:00", ",,", "1:00-2:00,x"):
+        with pytest.raises(ValueError):
+            _parse_sections(bad)
+
+
+def test_download_sections_wired_into_ydl_opts(tmp_path):
+    """sections 表达式 → download_ranges + force_keyframes_at_cuts。"""
+    opts = _make_options(tmp_path)
+    opts.download_sections = "1:00-2:30"
+    captured = _capture_opts(_make_item(), opts)
+    assert "download_ranges" in captured
+    assert captured["force_keyframes_at_cuts"] is True
+
+
+def test_download_sections_absent_by_default(tmp_path):
+    captured = _capture_opts(_make_item(), _make_options(tmp_path))
+    assert "download_ranges" not in captured
+    assert "force_keyframes_at_cuts" not in captured
+
+
+def test_download_sections_invalid_spec_fails_loudly(tmp_path):
+    """坏表达式必须炸任务而不是静默全量下载——静默降级是本仓红线。
+
+    ``_build_opts`` 在引擎的兜底 try 块之前调用，所以 ValueError 直接
+    外抛给 pipeline，由任务层报失败——这正是「响亮失败」的口径。
+    """
+    opts = _make_options(tmp_path)
+    opts.download_sections = "2:00-1:00"
+    with pytest.raises(ValueError, match="invalid section"):
+        _capture_opts(_make_item(), opts)
+
+
+def test_download_sections_ignored_for_live(tmp_path):
+    """直播流没有章节表，分段无意义——不接线也不报错。"""
+    opts = _make_options(tmp_path)
+    opts.download_sections = "1:00-2:30"
+    live = MediaItem(
+        platform=Platform.BILIBILI,
+        item_id="live1",
+        title="直播",
+        author=Author(name="UP"),
+        media_type=MediaType.LIVE,
+        source_url="https://live.bilibili.com/1",
+    )
+    captured = _capture_opts(live, opts)
+    assert "download_ranges" not in captured
+
+
+# ---------------------------------------------------------------------------
+# 直播录制（0.3.11）：live_from_start / remux_video / final_ext
+#
+# 三个连环坑（2026-11 端到端实测抓到）：
+# 1. --live-from-start 对无 DVR 的直播（B 站 HLS）是硬报错 →
+#    item.extra["live_dvr"] 标记（adapter 层写，默认 True）
+# 2. B 站直播分片 ext='fmp4'，yt-dlp 安全检查拒绝它当文件扩展名 →
+#    remux_video=mp4；而 remux_video → final_ext 的推导只在 yt-dlp CLI
+#    层做，Python API 必须显式传 final_ext
+# 3. 格式选择不能走 bestvideo+bestaudio 合并路径（合并后 ext 仍是 fmp4）
+# ---------------------------------------------------------------------------
+
+def _make_live_item(extra=None):
+    return MediaItem(
+        platform=Platform.BILIBILI,
+        item_id="6",
+        title="日常直播",
+        author=Author(name="主播 6"),
+        media_type=MediaType.LIVE,
+        source_url="https://live.bilibili.com/6",
+        extra=dict(extra or {}),
+    )
+
+
+def test_live_bilibili_disables_live_from_start(tmp_path):
+    """B 站直播（extra 无 live_dvr → adapter 会写 False）：不传 live_from_start。"""
+    captured = _capture_opts(_make_live_item({"live_dvr": False}), _make_options(tmp_path))
+    assert captured["live_from_start"] is False
+    assert captured["remux_video"] == "mp4"
+    assert captured["final_ext"] == "mp4"
+
+
+def test_live_default_dvr_keeps_live_from_start(tmp_path):
+    """没有 live_dvr 标记的直播（YouTube 等）保持默认 True——不丢老能力。"""
+    captured = _capture_opts(_make_live_item(), _make_options(tmp_path))
+    assert captured["live_from_start"] is True
+    assert captured["remux_video"] == "mp4"
+    assert captured["final_ext"] == "mp4"
+
+
+def test_live_uses_premuxed_format(tmp_path):
+    """live 不走 bestvideo+bestaudio 合并路径（合并后 ext 仍是 fmp4）。"""
+    captured = _capture_opts(_make_live_item({"live_dvr": False}), _make_options(tmp_path))
+    fmt = captured["format"]
+    assert fmt.startswith("best/"), fmt
+    assert "bestvideo*+bestaudio" in fmt
+
+
+def test_video_download_has_no_live_keys(tmp_path):
+    """普通视频不受 live 分支影响：无 remux/final_ext/live_from_start。"""
+    captured = _capture_opts(_make_item(), _make_options(tmp_path))
+    for key in ("remux_video", "final_ext", "live_from_start"):
+        assert key not in captured, f"{key} 不该出现在非直播下载里"
+

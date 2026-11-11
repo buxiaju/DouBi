@@ -251,6 +251,63 @@ class BilibiliAPI:
         data = payload.get("data") or {}
         return data or None
 
+    async def fetch_live_info(self, room_id: str) -> Optional[dict]:
+        """Fetch the ``data`` object from the live-room API.
+
+        yt-dlp 的 BiliLive extractor 能拿到标题与流，但**不带主播名**，
+        也无法区分「未开播」和「房间不存在」（两者都抛 DownloadError）。
+        官方 ``/room/v1/Room/get_info`` 一次补齐三件事：
+
+        * ``uid``          → 主播 uid（再查一张卡就有人名，暂不查，够用）
+        * ``live_status``  → 0 未开播 / 1 开播中 / 2 轮播
+        * ``title``        → 直播间标题（比 yt-dlp 的稳，含未开播时的预告）
+
+        Returns ``None`` on any failure, same policy as
+        :meth:`fetch_view_data` — callers must tolerate absence.
+        """
+        if not room_id or not room_id.isdigit():
+            return None
+        import httpx
+        cookie_header = self.build_cookie_header()
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/126.0.0.0 Safari/537.36"
+            ),
+            "Referer": f"https://live.bilibili.com/{room_id}",
+        }
+        if cookie_header:
+            headers["Cookie"] = cookie_header
+        try:
+            async with httpx.AsyncClient(headers=headers, timeout=self.timeout) as client:
+                resp = await client.get(
+                    "https://api.live.bilibili.com/room/v1/Room/get_info",
+                    params={"room_id": room_id},
+                )
+                if resp.status_code != 200:
+                    logger.debug("BilibiliAPI: live API HTTP %s for room %s",
+                                 resp.status_code, room_id)
+                    return None
+                try:
+                    payload = resp.json()
+                except ValueError:
+                    logger.debug("BilibiliAPI: live API non-JSON for room %s", room_id)
+                    return None
+        except Exception as exc:   # noqa: BLE001
+            logger.debug("BilibiliAPI: live API httpx error for room %s: %s",
+                         room_id, exc)
+            return None
+
+        if payload.get("code") != 0:
+            # 房间不存在：code=190015 之类。与网络失败同归 None，
+            # adapter 用 live_status 缺失来统一处理。
+            logger.debug("BilibiliAPI: live API code=%s msg=%s for room %s",
+                         payload.get("code"), payload.get("message"), room_id)
+            return None
+        data = payload.get("data") or {}
+        return data or None
+
     async def fetch_ugc_season(self, bvid: str) -> Optional[dict]:
         """Fetch the 合集 (``ugc_season``) structure a BV belongs to.
 

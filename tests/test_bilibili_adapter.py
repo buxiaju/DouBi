@@ -1166,3 +1166,93 @@ def test_pipeline_renders_bilibili_output_template(monkeypatch, tmp_path):
     assert "测试BV视频" in tpl
     assert "测试UP主" in tpl
     assert "BV1xx411c7mD" in tpl
+
+
+# ---------------------------------------------------------------------------
+# B 站直播录制（P2-3）：_parse_live 语义
+#
+# mock 两个数据源（不联网）：api.fetch_live_info（官方 live API）与
+# api.fetch（yt-dlp 元数据）。校验四条语义：开播 / 未开播 / 房间不存在 /
+# 主播名占位。
+# ---------------------------------------------------------------------------
+
+
+def _make_live_adapter(monkeypatch, *, live_data, ytdlp_info):
+    """构造一个 live 数据被 mock 掉的 adapter。"""
+    adapter = BilibiliAdapter()
+    adapter._parsed_items = []
+    monkeypatch.setattr(adapter.api, "fetch_live_info",
+                        AsyncMock(return_value=live_data))
+    monkeypatch.setattr(adapter.api, "fetch",
+                        AsyncMock(return_value=ytdlp_info))
+    return adapter
+
+
+def test_parse_live_streaming_room(monkeypatch):
+    """开播中（live_status=1）：用 live API 的干净标题，media_type=live。"""
+    adapter = _make_live_adapter(
+        monkeypatch,
+        live_data={"live_status": 1, "title": "日常直播", "uid": 50329118},
+        ytdlp_info={"id": "6", "title": "日常直播 2026-11-11", "is_live": True},
+    )
+    item = asyncio.run(adapter.parse("https://live.bilibili.com/6"))
+    assert item is not None
+    assert item.media_type is MediaType.LIVE
+    assert item.title == "日常直播"
+    assert item.item_id == "6"
+
+
+def test_parse_live_offline_room_gets_status_suffix(monkeypatch):
+    """未开播（live_status=0）：仍返回 item，标题带状态后缀——录制是
+    用户显式动作，parse 层不替用户决定，但必须看得出现状。"""
+    adapter = _make_live_adapter(
+        monkeypatch,
+        live_data={"live_status": 0, "title": "明天见"},
+        ytdlp_info=None,   # 未开播时 yt-dlp 会失败
+    )
+    item = asyncio.run(adapter.parse("https://live.bilibili.com/6"))
+    assert item is not None
+    assert item.media_type is MediaType.LIVE
+    assert item.title == "明天见（未开播）"
+
+
+def test_parse_live_round_play_room(monkeypatch):
+    """轮播（live_status=2）同样标注。"""
+    adapter = _make_live_adapter(
+        monkeypatch,
+        live_data={"live_status": 2, "title": "精选合集"},
+        ytdlp_info=None,
+    )
+    item = asyncio.run(adapter.parse("https://live.bilibili.com/6"))
+    assert item.title == "精选合集（轮播中）"
+
+
+def test_parse_live_nonexistent_room_returns_none(monkeypatch):
+    """房间不存在：两个数据源都拿不到 → None（与视频 URL 失败行为一致）。"""
+    adapter = _make_live_adapter(
+        monkeypatch, live_data=None, ytdlp_info=None,
+    )
+    item = asyncio.run(adapter.parse("https://live.bilibili.com/19999999999"))
+    assert item is None
+
+
+def test_parse_live_author_placeholder(monkeypatch):
+    """yt-dlp 不带主播名（实测空），作者列用「主播 <房间号>」占位。"""
+    adapter = _make_live_adapter(
+        monkeypatch,
+        live_data={"live_status": 1, "title": "t"},
+        ytdlp_info={"id": "6", "title": "t", "is_live": True},
+    )
+    item = asyncio.run(adapter.parse("https://live.bilibili.com/6"))
+    assert item.author.name == "主播 6"
+
+
+def test_parse_live_keeps_ytdlp_author_when_present(monkeypatch):
+    """yt-dlp 若哪天带上了主播名，不要覆盖它。"""
+    adapter = _make_live_adapter(
+        monkeypatch,
+        live_data={"live_status": 1, "title": "t"},
+        ytdlp_info={"id": "6", "title": "t", "uploader": "真实主播"},
+    )
+    item = asyncio.run(adapter.parse("https://live.bilibili.com/6"))
+    assert item.author.name == "真实主播"
