@@ -138,21 +138,6 @@ async def _rows(db_path: Path) -> list:
         return await db.list_unfinished()
 
 
-async def _wait_rows(db_path: Path, count: int, timeout: float = 2.0) -> list:
-    """轮询到表里剩 *count* 行为止。
-
-    ``discard_restorable`` 走的是 ``_run_db`` 那条「发射后不管」的路，
-    没有句柄可 await，只能看结果。
-    """
-    import time
-    deadline = time.monotonic() + timeout
-    while True:
-        rows = await _rows(db_path)
-        if len(rows) == count or time.monotonic() > deadline:
-            return rows
-        await asyncio.sleep(0.01)
-
-
 def _patch_dialog(monkeypatch, answer: int) -> list:
     """让恢复弹窗立刻返回 *answer*，并把弹出的对话框收集起来。
 
@@ -330,7 +315,10 @@ async def test_no_wipes_the_rows_so_the_question_is_asked_only_once(window, monk
     assert window.task_manager.active_tasks() == [], "说了不恢复就不能有任务"
     assert window.stackedWidget.currentWidget() is window.parse_interface
 
-    assert await _wait_rows(db_path, 0) == [], "「不恢复」没有落库，下次启动还会问"
+    # _settle 确定性等落库写（flush_pending_writes），不要用超时轮询——
+    # 全量跑负载高时 2s 轮询会偶发超时误报「没有落库」。
+    await _settle(window)
+    assert await _rows(db_path) == [], "「不恢复」没有落库，下次启动还会问"
 
     # 同一个进程里再问一次，验证记录真的没了（这就是下一次启动看到的）。
     await window._restore_flow()
@@ -353,7 +341,7 @@ async def test_no_keeps_the_files_and_only_forgets_the_bookkeeping(window, monke
     fragment.write_bytes(b"already downloaded")
 
     await window._restore_flow()
-    await _wait_rows(db_path, 0)
+    await _settle(window)
 
     assert fragment.exists(), "「不恢复」不该动已下载的文件片段"
     assert fragment.read_bytes() == b"already downloaded"
@@ -375,7 +363,7 @@ async def test_prompt_lists_the_titles_it_found(window, monkeypatch):
     await _seed(db_path, 3, title_prefix="想要的片子")
 
     await window._restore_flow()
-    await _wait_rows(db_path, 0)
+    await _settle(window)
 
     body = boxes[0].content
     assert "3 个任务" in body
@@ -394,7 +382,7 @@ async def test_prompt_truncates_a_long_list_but_says_how_many_are_hidden(window,
     await _seed(db_path, 7)
 
     await window._restore_flow()
-    await _wait_rows(db_path, 0)
+    await _settle(window)
 
     body = boxes[0].content
     assert "7 个任务" in body
@@ -420,7 +408,7 @@ async def test_prompt_falls_back_to_the_id_when_a_row_has_no_title(window, monke
         ))
 
     await window._restore_flow()
-    await _wait_rows(db_path, 0)
+    await _settle(window)
 
     assert "BV_noname" in boxes[0].content
 

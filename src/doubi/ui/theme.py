@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import logging
+import weakref
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -572,7 +573,10 @@ def get_theme(name: Optional[str]) -> ThemePack:
 # --------------------------------------------------------------------------
 
 _current: str = DEFAULT_THEME
-_callbacks: list[Callable[[], None]] = []
+# 混合条目：正常订阅是 weakref.ref(_ThemeRelay)（弱引用，见 subscribe_theme
+# 的泄漏链说明）；widget=None 的合成用例路径退化为裸 callable（强引用，
+# 由测试 clear() 清理）。_notify 按类型分派并顺手清墓。
+_callbacks: list[Any] = []
 
 
 def current_theme() -> ThemePack:
@@ -1311,12 +1315,28 @@ def set_theme(name: Optional[str]) -> ThemePack:
 
 
 def _notify() -> None:
-    """逐个调用订阅者，任何一个抛异常都不许影响其余订阅者。"""
-    for cb in list(_callbacks):
-        try:
-            cb()
-        except Exception:  # pragma: no cover - 防御性
-            logger.exception("主题回调执行失败")
+    """逐个调用订阅者，任何一个抛异常都不许影响其余订阅者。
+
+    顺手清墓：weakref 条目若已失效（widget 被回收）直接跳过并剔除。
+    """
+    alive: list[Any] = []
+    for entry in list(_callbacks):
+        if isinstance(entry, weakref.ref):
+            relay = entry()
+            if relay is None:
+                continue   # 死条目——不调用、不保留
+            alive.append(entry)
+            try:
+                relay.invoke()
+            except Exception:  # pragma: no cover - 防御性
+                logger.exception("主题回调执行失败")
+        else:
+            alive.append(entry)
+            try:
+                entry()
+            except Exception:  # pragma: no cover - 防御性
+                logger.exception("主题回调执行失败")
+    _callbacks[:] = alive
 
 
 def subscribe_theme(widget: Any, callback: Callable[[], None]) -> None:
@@ -1327,21 +1347,47 @@ def subscribe_theme(widget: Any, callback: Callable[[], None]) -> None:
 
     旧代码只有 download.py 订阅了 ``themeChanged``，其余三个带色文件切主题后
     残留旧色；统一走本函数后四处行为一致。
+
+    **两条泄漏链都断掉**（2026-11 修复，根因是全量回归跑到 ~91% 的二次方
+    劣化卡死；实测 ~9ms/注册控件）：
+
+    1. ``_callbacks`` 强引用 bound method → 整个 widget 被模块级列表钉死，
+       widget 永不销毁 → ``destroyed`` 永不触发 → 条目永不清理——鸡生蛋
+       死锁。改成 relay 对象 + weakref 注册表：widget 死 → relay（子对象）
+       死 → 弱引用失效 → 下次 _notify 顺手清墓。
+    2. ``qconfig.themeChanged.connect(lambda: ...)`` 裸 lambda 无接收者
+       上下文，连接归 qconfig（模块级单例、永不死）所有，同样把 widget
+       钉死。改成 relay 的 bound method 连接——PySide6 对 bound method
+       提取接收者，接收者销毁自动断连、且不钉住接收者（已实测验证）。
+
+    relay 以 widget 为父级，所以它的生命周期就是 widget 的生命周期；
+    callback 强引用存在 relay 身上，注册表只持弱引用，不构成引用环。
     """
-    _callbacks.append(callback)
-
-    def _unsubscribe() -> None:
-        try:
-            _callbacks.remove(callback)
-        except ValueError:  # pragma: no cover
-            pass
-
-    destroyed = getattr(widget, "destroyed", None)
-    if destroyed is not None:
-        destroyed.connect(_unsubscribe)
+    if widget is None:
+        # 无宿主可挂 relay（test_config_theme 的合成用例路径，真实代码
+        # 不会走这条）——退回强引用条目，由调用方 _callbacks.clear() 清理。
+        _callbacks.append(callback)
+        return
 
     try:
+        from PySide6.QtCore import QObject
         from qfluentwidgets import qconfig
     except ImportError:  # pragma: no cover - 无 GUI 环境
         return
-    qconfig.themeChanged.connect(lambda *_: callback())
+
+    class _ThemeRelay(QObject):
+        """连接中转：生命周期 = widget（父级），死则连接自动断。"""
+
+        def __init__(self, cb: Callable[[], None]) -> None:
+            super().__init__(widget)
+            self._cb = cb
+
+        def invoke(self) -> None:
+            self._cb()
+
+        def _on_theme_changed(self, *_args) -> None:
+            self.invoke()
+
+    relay = _ThemeRelay(callback)
+    _callbacks.append(weakref.ref(relay))
+    qconfig.themeChanged.connect(relay._on_theme_changed)

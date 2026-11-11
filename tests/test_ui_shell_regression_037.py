@@ -41,6 +41,34 @@ def _require_qt():
         pytest.skip(f"GUI stack unavailable: {exc}")
 
 
+@pytest.fixture(autouse=True)
+def _destroy_shell_windows(qapp):
+    """测试建的全屏主窗用完即销毁（C++ 层，不依赖 Python gc）。
+
+    本文件每个用例 ``_build_window`` 建一个完整主窗、从不关闭。PySide6
+    的 QObject 引用环让 gc 收不走它们——每个窗口约 137 个 fluent 控件
+    留在 qfluentwidgets styleSheetManager 的注册表里，而 ``set_theme``
+    每次全量重刷所有注册控件（实测 ~9ms/控件），窗口越积越多的同进程
+    后续用例就被拖进分钟级（2026-11 全量回归 ~91% 「卡死」的根因，
+    py-spy 抓栈定位在 StyleSheetCompose 递归）。
+
+    C++ 层显式销毁（deleteLater + 补发 DeferredDelete）会触发
+    styleSheetManager 注册时挂的 ``destroyed`` 注销回调，注册表随之变短，
+    与 Python gc 能不能看穿 wrapper 环无关。qapp fixture 保证函数级，
+    本文件的顶层控件都是用例自建的，销毁无跨用例副作用。
+    """
+    yield
+    import gc as _gc
+
+    from PySide6.QtCore import QEvent
+    from PySide6.QtWidgets import QApplication, QWidget
+    for w in QApplication.topLevelWidgets():
+        if isinstance(w, QWidget) and w.parent() is None:
+            w.deleteLater()
+    QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    _gc.collect()
+
+
 @pytest.fixture(scope="module")
 def qapp():
     _require_qt()
