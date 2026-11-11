@@ -21,7 +21,7 @@
 12. [四端入口（CLI / GUI / REST / MCP）](#12-四端入口)
 13. [GUI 内部结构](#13-gui-内部结构)
 14. [平台风控专题（B 站 + 抖音，最重要的实战知识）](#14-平台风控专题b-站--抖音最重要的实战知识)
-15. [测试体系](#15-测试体系)（§15.1 可选依赖与 CI 口径差异）
+15. [测试体系](#15-测试体系)（§15.1 可选依赖与 `importorskip` 纪律）
 16. [代码约定与常见坑](#16-代码约定与常见坑)
 17. [如何安全地修改项目（改动检查单）](#17-如何安全地修改项目)
 18. [已知限制与路线图](#18-已知限制与路线图)
@@ -711,7 +711,7 @@ increment_checkpoint  (platform, user_id, mode) 主键 · last_item_id/last_chec
 （`navigator.webdriver` / 鼠标行为 / canvas 指纹）。如果 headless
 模式下扫码不识别 / 出滑块,用户可在对话框内勾「显示浏览器」
 一键 fallback 到 headed 模式（会弹独立 Chromium 窗口）。**这条
-降级路径在我们环境里没法 CI 验证,需要你实测**。
+降级路径没法自动化验证,需要你实测**。
 
 ---
 
@@ -1105,9 +1105,8 @@ header.add_action(my_button)       # 右侧动作槽
   还在直接用，共享组件是「需要统一表达力」时用。强行包一层会让我们失去
   fluent 控件的样式跟随能力。
 - **延迟 import Qt**。`class _PageHeader(QWidget)` 写在工厂里，
-  `from doubi.ui.widgets import build_page_header` 在无 PySide6 的 CI 环境
-  也能跑（headless 装 PySide6 的 tox task 之外，配置 / 解析单元测试都是
-  这样的）。
+  `from doubi.ui.widgets import build_page_header` 在无 PySide6 的最小环境
+  也能跑（配置 / 解析单元测试不依赖 GUI 依赖就能收集运行）。
 - **构造函数接 parent**：遵循 Qt 父子关系约定，主题广播时通过
   `subscribe_theme` 跟 `parent.destroyed` 信号自动解绑。
 - **StatChip 的 `set_kind` 是枚举式的字符串**（`"running"` /
@@ -1629,8 +1628,8 @@ python -m pytest --collect-only -q 2>&1 | Select-Object -Last 3
 | `optional-dependencies.gui` | PySide6 / PySide6-Fluent-Widgets / psutil / qasync | 不行 |
 | `optional-dependencies.server` | **fastapi / uvicorn / pydantic** | 不行 |
 
-CI（`.github/workflows/build.yml`）只装 `pip install .` + `pytest pytest-asyncio
-ruff`，**不带任何 extras**。所以：
+任何**最小安装**（只有基础依赖，不带 extras）的环境——别的机器、别人的
+环境、未来的精简 runner——跑测试时都会踩同一个坑，所以纪律是：
 
 - 任何会走到 gui / server 档依赖的测试，**入口处必须**
   `pytest.importorskip("pydantic")` 之类的守卫。既有范例：
@@ -1641,39 +1640,13 @@ ruff`，**不带任何 extras**。所以：
   只用 stdlib，其中一条还是纯源码文本断言，不该被 REST 的可选依赖连坐。
 - **懒导入不能替代 `importorskip`**。`server/__init__.py` 是 PEP 562 懒导入模块
   （见 §12.3），那只挡住「`import doubi.server.security` 被 pydantic 连坐」，
-  挡不住 `from doubi.server import app`——后者要的就是重型链本身。
-  0.3.0 发版 CI 就是这么红的：`app.py → schemas.py → from pydantic import ...`，
-  而 `schemas.py` 的模型**必须**定义在模块顶层（Pydantic v2 要把注解解析成真类型）。
+  挡不住 `from doubi.server import app`——后者要的就是重型链本身：
+  `app.py → schemas.py → from pydantic import ...`，而 `schemas.py` 的模型
+  **必须**定义在模块顶层（Pydantic v2 要把注解解析成真类型）。
+  0.3.0 发版时就因漏了守卫翻过车（M6.21，详见 CHANGELOG）。
 
-**本地跑绿 ≠ CI 会绿**，两边测试集互不包含：
-
-| | 本地惯用 | CI |
-|---|---|---|
-| 命令 | `pytest -m "not slow"` | `pytest -q --maxfail=5`（**无 mark 过滤**） |
-| 依赖 | 装齐 extras | 只有基础依赖 |
-| `test_theme_apply_gui.py` | 真起 Qt 事件循环，**极慢甚至挂住** | 无 PySide6 → skip |
-| 耗时参考 | 10 分钟+ | 45.82s |
-
-发版前把关要用**模拟 CI 依赖集**的跑法。0.3.1 起它固化成了正式脚本，
-不用再写临时脚本：
-
-```powershell
-python scripts/run_full_tests.py --mode ci
-```
-
-内部做的事没变：往 `sys.meta_path` 插一个 Blocker（`find_spec` 对 9 个可选依赖
-直接抛 `ModuleNotFoundError`，并先清掉 `sys.modules` 里已导入的同名模块），
-再跑 `pytest -q --maxfail=5`。
-
-基线：M6.21 实测 **629 passed / 146 skipped / 104.79s**，与当时 CI 的
-`628 passed + 1 failed + 146 skipped` 逐项对齐；**0.3.1 实测 670 passed /
-175 skipped / 0 failed / 102.06s**。判绿要求 **passed+failed 相等且 skipped
-相等**两个条件同时成立，才能说环境等价且没有测试被多跳过（只看前者，可能是
-「少收集了用例而变绿」；只看后者，可能是「把报错掩盖成 skip」）。
-
-> 屏蔽依赖后的报告总数会**小于**装齐 extras 的口径（0.3.1：845 vs 920）。
-> 这不是丢用例——模块级 `pytest.importorskip` 失败会把整份测试文件折叠成
-> **1 条 skip**。所以别拿两个口径的总数互相校对，只在同口径内跟 CI 对齐。
+> 模块级 `pytest.importorskip` 失败会把整份测试文件折叠成 **1 条 skip**——
+> 这是「报告总数比预期少一截」时首先要排查的地方。
 
 ### 15.2 一次跑完全量：`scripts/run_full_tests.py`（0.3.1 新增）
 
@@ -1682,7 +1655,6 @@ python scripts/run_full_tests.py --mode ci
 | 命令 | 做什么 | 0.3.2 基线 |
 | --- | --- | --- |
 | `python scripts/run_full_tests.py` | 默认 `local` 口径：装齐 extras，排除 `test_theme_apply_gui.py` | **946 passed / 7 skipped**，263.73s（0.3.2 实测） |
-| `python scripts/run_full_tests.py --mode ci` | 屏蔽 9 个可选依赖，复刻 CI 的 `pytest -q --maxfail=5` | 待 0.3.2 发版前实测 |
 | `python scripts/run_full_tests.py --mode gui-slow` | 只跑 `test_theme_apply_gui.py` | 已知会挂住，只在动过 `ui/theme.py` 时手工付代价 |
 
 未识别的参数原样透传给 pytest，所以 `python scripts/run_full_tests.py -k tray`
@@ -1694,10 +1666,7 @@ python scripts/run_full_tests.py --mode ci
 - 日常改动 → 按 §15 表格挑相关文件，或用 `-k` 过滤
 - 动了 `pipeline.py` / `engine_loader.py` / `models.py` 这类四端共享的文件
   → `--mode local`
-- **发版前 → 先 `--mode local` 拿回归数字写进 CHANGELOG / Release 正文，
-  再 `--mode ci` 确认 CI 依赖集下同样 0 failed**（对应 BUILD §7 前两条）
-- **CI 红了 → 先跑 `--mode ci`**。本地这一口径 0 failed 就说明红的是环境不是
-  代码（0.3.1 正是如此，见 BUILD §8.6），别急着动代码
+- **发版前 → `--mode local` 拿回归数字写进 CHANGELOG / Release 正文**
 
 > 想边跑边看输出：`2>&1 | Tee-Object .scratch\run.log`——`Select-Object -Last N`
 > 会缓冲到进程退出，长任务时屏幕一直空白，看着像挂了（同 §15 末尾那条坑）。
@@ -1760,7 +1729,7 @@ python scripts/run_full_tests.py --mode ci
 
 Qt 的 `tr()` 绑死 `QObject` 子类——模块级函数（CLI、REST、日志）用不了，
 翻译覆盖面被「有没有继承 QObject」切一刀；`lupdate` / `lrelease` 两步构建
-依赖工具链，CI 上多一层麻烦。
+依赖工具链，多一层构建依赖。
 
 改用 **JSON 词表 + 模块级 `tr()`**：
 
@@ -1931,50 +1900,61 @@ return YtDlpEngine()
 
 1. **B 站匿名风控**：UP 主页 / 合集枚举在无登录时受限（412 / -799），登录后稳定。已用官方 API + WBI 签名缓解，但 IP 级限流仍需等待窗口（几分钟）。
 2. **抖音 user/info/self 404**：该端点被风控（无签名调用必 404），`validate_cookies` 已降级为「session cookie 存在性」判定（sessionid / sessionid_ss / sid_guard 任一存在即已登录）——只能判"有登录痕迹"，无法确认 cookie 是否仍有效（下载本身走 yt-dlp 不受影响）。同类问题：抖音合集标题是 best-effort（`/mix/detail/` 被风控 403，合集名从列举第一页的 `mix_info.mix_name` 探测，失败时退化为 `抖音合集 {mix_id}`）。
-3. **GUI 尚未实现**：已完成列表排序、章节下载。
-   （M6.2 已补上：全部/单任务暂停恢复、弹幕、字幕、NFO；**M6.10 已补上跨进程恢复**，见 §13.2.1）
-4. **REST/MCP 的容器支持**：容器统计已修正（读 pipeline 写的 `child_count` / `downloaded_count` / `failed_count`），但仍是「整个容器一个 job」，无法单独重试其中某一子项。
+3. ~~**GUI 尚未实现**：已完成列表排序、章节下载~~ **均已补上（2026-11）**：
+   历史页表头点击排序（时间列按时间戳数值排，记录挂在单元格上，
+   排序后右键菜单映射不错位，见 `tests/test_history_sort.py`）；
+   分段下载（章节）全栈落地——`DownloadOptions.download_sections`
+   → yt-dlp `download_ranges`（弹窗「只下载部分片段」勾选生效，
+   直播流忽略）。其余如全部/单任务暂停恢复、弹幕、字幕、NFO 为
+   M6.2 所补，跨进程恢复见 §13.2.1。
+4. ~~**REST/MCP 的容器支持：无法单独重试某一子项**~~ **已收口（2026-11）**：
+   `GET /jobs/{id}` 现在透出 `failed_items`（platform / item_id /
+   source_url 三元组），新增 `POST /api/v1/jobs/{id}/retry-failed`
+   只把失败子项逐个重新入队；MCP 侧 `get_status` 同样带
+   `failed_items`，新工具 `retry_failed` 语义对齐。
 5. ~~**没有 i18n**~~ **M6.14 已做**（见 §16.5）：自研 JSON 词典 + `tr()`，
    内置 `zh_CN` / `en`，设置页可切换。新增字符串仍需手工补两份词典，
    漏补时回退到 key 本身（打包期漏收 locales 会让全 UI 显示 key，
    见 CHANGELOG G7）。
-6. **配置只读一次**：GUI 保存后需重启才生效的部分（代理等）没有提示重启。
-7. **CI 自动化但本地打包仍需手动**：「手动 dispatch 跑 build.yml」可发现
-   「现在的 master 分支能不能成功打包」，但日常 dev 迭代还是要本地跑
-   ``scripts/build_installer.py``——CI 不是 dev loop 的替代品，只是不
-   再依赖人记得跑。**0.3.1 核对到的实况比这更糟：这条 workflow 从 0.2.0 起
-   5 次运行全部 failed，从未跑到过打包段**，仓库里每个 Release 都是手工发的。
-   红的原因是 runner 只装基础依赖（见 §15.1），不是代码回归；而且测试段一红，
-   建 Release 那步（条件里没有 `if: always()`）会被整段跳过——所以**推了 tag
-   也不会有 draft Release**，手工发版是「新建」而不是「编辑草稿」（BUILD §8.6）。
+6. ~~**配置只读一次**：GUI 保存后需重启才生效的部分（代理等）没有提示重启~~
+   **已修（2026-11）**：设置页写盘后经 `configSaved` 信号广播整份重载的
+   AppConfig，主窗口转发给 parse / search / hot / history 四个持有快照的
+   页面——所有设置改动即时生效或下次下载生效，不再需要重启。唯一例外是
+   语言（已渲染控件不会重译），改动时自动保存会弹「重启后生效」轻提示。
+   注意：**每页构造时 `load_config(None)` 的独立快照模式仍在**——新增页面
+   时若持有 `_cfg`，必须接上这个广播（见 `main_window._on_config_saved`）。
+7. ~~**CI 自动化但本地打包仍需手动**~~ **CI 已于 2026-11 整体移除**
+   （`.github/workflows/` 与 Dependabot 配置已删）。历史结论：那条 workflow
+   从 0.2.0 起 5 次运行全部 failed，从未跑到过打包段，仓库里每个 Release
+   都是手工发的。红的原因是 runner 只装基础依赖（见 §15.1），不是代码回归。
+   删除依据与经验沉淀见 BUILD §8 开头提示框与 §8.6。
 8. **发布流程仍是手工序列**：推 commit → 打 tag → 填 Release 正文 → 传资产
    全靠人按顺序执行，没有守卫。0.3.0 因此踩了两个坑（tag 建在 release
    commit 之前导致源码包错版本；Release 正文粘贴截断丢了 SHA256 校验段）。
    补救靠 `docs/BUILD.md` §8.3 的固定顺序和 §7 的「发布后线上核对」清单，
-   **不是代码层面的保证**。另外强推 `v*` tag 会触发 CI 重建并可能覆盖
-   已验证的安装包资产（§8.4）。
-9. **数据库和清单默认落在 cwd，不在 `~/.doubi`**：`core/config.py:45-46` 的
-   `database_path` / `manifest_path` 默认值是相对路径 `"doubi.db"` /
-   `"download_manifest.jsonl"`。配置和 Cookie 都规规矩矩在 `~/.doubi`，只有
-   这两个跟着当前工作目录跑——从安装目录启动 GUI 就写在安装目录里，卸载时
-   NSIS 删不掉（运行期生成的文件不在卸载清单里）。后果是「卸载零残留」的准确
-   说法变成「除 `doubi.db`（约 57 KB）外零残留」，0.3.1 是知情发布的
-   （BUILD §6.5）。修法是默认值改成 `~/.doubi/doubi.db`，但**不能直接改**：
-   老用户的库还在旧位置，一改就等于「历史记录全消失」，需要配合启动时探测
-   旧路径或走 `storage/migrate.py` 那套迁移。
+   **不是代码层面的保证**。CI 删除后强推 tag 不再有任何自动动作，但
+   Release 资产也不会自动重传，重打标签后仍须按 §8.4 手工核对。
+9. ~~**数据库和清单默认落在 cwd，不在 `~/.doubi`**~~ **已修（0.3.3）**：
+   默认值已改为 `~/.doubi/doubi.db` / `~/.doubi/download_manifest.jsonl`
+   （`core/config.py:DEFAULTS` → `storage/paths.py`），且启动时
+   `migrate_legacy_relpath()` 做一次性静默迁移——0.3.2 及更早版本落在
+   cwd 的旧文件被搬进 canonical home，**已有 canonical 文件绝不覆盖**
+   （迁移失败只记日志不阻塞启动）。判定「legacy」的口径见
+   `paths.py:_is_relative_basename`：仅裸文件名 / `.` 父目录算旧布局，
+   用户刻意选的 `./var/doubi.db` 这类相对路径不动。
 
 ### 对齐 Bili23 的路线图（已识别未做）
 
 按 ROI 排序：
-1. ~~**下载选项弹窗**~~ **M6.11 已做**（见 §13.10）：开关默认关，开关后下载前弹 4 字段（画质/容器/缩略图/JSON）；右键菜单与「直接 add()」路径不接弹窗。
+1. ~~**下载选项弹窗**~~ **M6.11 已做**（见 §13.10）：开关默认关，开关后下载前弹 4 字段（画质/容器/缩略图/JSON）；右键菜单与「直接 add()」路径不接弹窗。2026-11 起弹窗扩到 6 字段（+分段下载 / 标题模板）。
 2. ~~**YouTube 适配器**~~ **M6.12 已做**（见 §13.8）：最低成本扩张样板，不到 200 行 adapter + 31 例测试，URL 全形态覆盖。
-3. **解析历史**（记录近期解析过的链接，一键重解析）。
-4. **剪贴板监听**（复制链接自动弹"是否解析"）。
-5. **头像/账号入口**（左下角显示登录态，一键登出）。
-6. **附加内容下载**（弹幕 XML/ASS、字幕、封面、章节、NFO 刮削给 Jellyfin/Plex）。
-7. **收藏页**（收藏夹/追番/稍后再看/历史记录，点击跳解析）。
-8. **纯编号解析**（直接输入 av/BV/ep/ss/md 号）。
-8. **重复下载 / 文件重名策略**、**画质音质编码优先级**、**CDN 切换**、**更新检查**。
+3. ~~**解析历史**~~ **已做（2026-11）**：解析页输入框下方「最近解析」链接行，config `extra["recent_parse_urls"]` 持久化，去重 / 新者居前 / 上限 8 条，点击回填输入框。
+4. ~~**剪贴板监听**~~ **早已存在**（parse 页 `_poll_clipboard`，1.5s 轮询、只认具体平台、防打断）；**2026-11 补了开关**：`config.clipboard_watch`（默认关，关 = 轮询定时器完全不启动），设置页「剪贴板自动识别链接」可开。清单把它列为未做是文档滞后——评估前先 grep 现状。
+5. ~~**头像/账号入口**~~ **已达成（2026-11）**：登录态展示与一键登出落在设置页「账号与登录」卡（未做左下角常驻头像，信息架构上设置页更顺）。`auth_actions.logout(platform)` 删本地 cookie 文件即登出（幂等，远端无操作），设置页双平台「登出」按钮带确认框 + toast + 状态刷新。
+6. **附加内容下载**：引擎与搬运链全通（`write_nfo` / `write_danmaku` / `write_subtitles`，CLI `--nfo/--danmaku/--subtitles`）；**2026-11 补齐设置页开关**（下载卡三枚 SwitchButton，进 `_wire_auto_save` 自动保存），GUI 缺入口的「静默失效开关」就此清零。封面随「缩略图」开关已在弹窗与 config。剩：ASS 弹幕转换。
+7. **收藏页**（CLI 已支持 `--container favlist`，登录后可用；GUI 专属页未做）。
+8. ~~**纯编号解析**~~ **早已实现**：`BilibiliAdapter._bare_id_pattern` 覆盖 BV / av / ep / ss / ml 裸编号，历史页「重新解析」即依赖此路径。
+9. ~~**重复下载 / 文件重名策略**~~ **已做**（`config.duplicate_policy`，skip / redownload / ask）；剩：画质音质编码优先级、CDN 切换、更新检查。
 
 ### 建议的新功能（核心之外）
 

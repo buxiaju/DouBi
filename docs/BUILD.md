@@ -772,6 +772,11 @@ multidict / yarl / propcache / frozenlist 各 1 个），这是 https 分片下�
 >
 > 也就是说，§7 清单里「卸载后零残留」这一条从 0.3.1 起的准确判据是
 > **「除 `doubi.db` 外零残留」**。
+>
+> **已修（0.3.3）**：默认值改成 `~/.doubi/doubi.db`，启动时
+> `migrate_legacy_relpath()` 会把旧版落在 cwd 的文件静默搬进 canonical home。
+> 从 0.3.3 起新装 / 升级用户跑过一次应用后，安装目录不再产生 `doubi.db`，
+> 卸载恢复**真正零残留**——0.3.2 时代的遗留文件也会在首次启动时被迁移走。
 
 </details>
 
@@ -922,28 +927,6 @@ if ($p) {
 
 发版前手动检查（不在单元测试里）：
 
-- [ ] **模拟 CI 依赖集跑一遍全量测试**（0.3.0 CI 红了才补的一条，见
-      CHANGELOG M6.21 / DEVELOPMENT §15.1）。本地装齐 extras + 惯用
-      `-m "not slow"`，比 CI 的「只有基础依赖 + 无 mark 过滤」**小一圈**，
-      所以「测试里裸导入可选依赖」这类失效模式在本地必然漏过去。
-      **0.3.1 起有正式脚本，不用再写临时脚本**：
-      `python scripts/run_full_tests.py --mode ci`——它往 `sys.meta_path`
-      插 Blocker 屏蔽 9 个可选依赖（`pydantic` / `fastapi` / `uvicorn` /
-      `PySide6` / `qfluentwidgets` / `qasync` / `psutil` / `qrcode` / `mcp`）
-      再跑 `pytest -q --maxfail=5`。判绿标准不是「没红」，而是
-      **passed+failed 与 CI 相等、skipped 也相等**。
-      耗时只是参考：同一台机器复跑秒数会浮动，**passed / skipped 必须逐项相等**，
-      秒数对不上不算回归。各版本基线见 [CHANGELOG.md](CHANGELOG.md) 的版本段尾部。
-- [ ] **新测试文件别让「纯函数用例」跟着 GUI 一起被跳过**（0.3.6 教训）：
-      `ci` 口径下 PySide6 被 Blocker 屏蔽，凡 `_require_gui()` 的用例都变
-      skip。如果新文件的 `qapp` fixture 写成 `autouse=True`，**整份文件**
-      （含不需要 Qt 的纯逻辑用例）会一起折叠成 skip——0.3.6 的
-      `test_row_download_actions.py` 一开始就是这样：ci 下 34 例**全 skip**，
-      加进去 0 条真实保护。
-      改成「`qapp` 显式传参 + 构造函数走 `_page(qapp, factory)` 包装」后，
-      同一份文件在 ci 下变成 `19 passed / 15 skipped`——**19 条真的在跑**。
-      判据：`python scripts/run_full_tests.py --mode ci -- <新文件>`，
-      若输出只有 `N skipped` 一行、`passed` 为 0，就是这个毛病。
 - [ ] **本地全量回归拿准确数字**（0.3.1 新增，CHANGELOG 和 Release 正文里的
       回归数必须来自这一步）：`python scripts/run_full_tests.py`（默认 local
       口径）。它带真依赖跑，只排除 `tests/test_theme_apply_gui.py`——那 28 例
@@ -1013,7 +996,9 @@ if ($p) {
 - [ ] 控制面板「应用和功能」里能看到「豆比下载 <version>」，大小正确
 - [ ] 开始菜单 + 桌面快捷方式可用
 - [ ] 程序开着时卸载 → 提示并自动结束进程，卸载成功
-- [ ] 卸载后目录 / 注册表 / 快捷方式**除 `doubi.db` 外**零残留，`~/.doubi` 仍在（残留成因见 §6.5）
+- [ ] 卸载后目录 / 注册表 / 快捷方式零残留，`~/.doubi` 仍在（0.3.3 起数据库落
+      `~/.doubi`，安装目录不再产生 `doubi.db`；升级用户 0.3.2 时代的遗留文件
+      首次启动时被静默迁移，成因与修复见 §6.5 提示框）
 
 发布后线上核对（0.3.0 事故后新增，见 §8.3 / §8.5）：
 
@@ -1023,74 +1008,21 @@ if ($p) {
 - [ ] **远端分支已同步**：`git rev-list --left-right --count Github/master...HEAD`
       输出 `0	0`
 - [ ] **线上资产哈希 == 本地**：Release 资产的 `digest`（`sha256:...`）与本地
-      `Get-FileHash` 一致——不一致说明被 CI 重建的产物覆盖过
+      `Get-FileHash` 一致——不一致说明资产被别的构建覆盖过
 - [ ] **Release 正文完整**：亮点 / 安装 / **校验 SHA256** / 已知限制 四段都在
       （0.3.0 粘贴时被截断，后三段全丢）
 
-## 8. CI / 自动发布
+## 8. 发布流程
 
-CI 已就位——见 `.github/workflows/build.yml`（`build-installer`）。
-工作流在 `windows-latest` runner 上跑，分两段：
+> **CI 已移除（2026-11）**：曾经的 `.github/workflows/build.yml`（测试 +
+> 打包 + 自动建 Release）与 Dependabot 配置已从仓库删除，CI 从 0.2.0 到
+> 0.3.10 期间 5 次运行全部 failed、从未成功产出过安装包，发版实际一直
+> 全程手工。删除后请忘记一切「推 tag 会自动构建」的假设——**强推 / 重打
+> 标签不会再触发任何东西**，所有构建与上传动作见下文各节。
 
-> **先看清现实（0.3.1 核对结果）**：这条 workflow 从 0.2.0 到 0.3.1
-> **5 次运行全部 failed，没有一次跑到过打包段**，本仓库至今每一个 Release
-> 都是手工发的。所以「CI 已就位」的准确含义是**配置就位**，不是「发版可以
-> 依赖它」。0.3.1 索性放弃 CI 打包、全程手工——为什么可以这么判、以及
-> 「推了 tag 却找不到 draft Release」是怎么回事，见 §8.6。
-
-**测试段**——`pip install .` + `pytest --maxfail=5`，`QT_QPA_PLATFORM=offscreen`
-让无头环境也能跑 GUI 类测试（PySide6 缺失时自动 skip）。超 5 个失败
-直接终止，避免花 25 分钟跑完一整轮注定红的测试。
-
-> **CI 不装任何 extras**，只有 `pip install .` 的基础依赖 + `pytest
-> pytest-asyncio ruff`。也就是说 `fastapi` / `pydantic` / `uvicorn` /
-> `PySide6` 在 runner 上**都不存在**，测试里凡是会走到这些包的地方必须有
-> `pytest.importorskip` 守卫，否则**报错**而不是跳过。0.3.0 就因为
-> `test_config_forwarding.py` 漏了这个守卫，让 `v0.3.0` 标签上留了一次红色
-> CI（详见 CHANGELOG M6.21、约定见 DEVELOPMENT §15.1）。
->
-> 另外 CI 的 pytest **不带 `-m "not slow"`**，测试集与本地惯用口径不等价：
-> `test_theme_apply_gui.py`（`gui` + `slow`）在 CI 因缺 PySide6 被 skip，
-> 在本地却会真起 Qt 事件循环并长时间挂住——所以 CI 45s 跑完，本地 10 分钟+。
-> 想不动测试就闭掉这个缺口，只有两条路：给 CI 装齐 extras（变慢），或者把
-> §7 那条「模拟 CI 依赖集」检查当成发版前必做项。
-
-**打包段**——`python scripts/build_installer.py`，链路就是 §6.1 的
-`build_installer.py → build_exe.py --onedir → makensis`，与本地完全一致。
-产物定位用 `Get-ChildItem` 而不是硬编码文件名（版本号单一真源在
-`src/doubi/__init__.py:__version__`，`pyproject.toml` 用
-`dynamic = ["version"]` + `attr:` 静态读取它，workflow 里不抄版本号）。
-
-**SHA256**——`Get-FileHash -Algorithm SHA256` 生成
-`DouBi-Setup-<version>.exe.sha256`，与安装包一起作为 artifact 上传
-（保留 90 天）。下载者用 `certutil -hashfile ... SHA256` 或
-`Get-FileHash` 自行核验。
-
-> **格式分歧（待统一）**：CI 写的是 `<exe>.sha256  <hash>`（`Out-File
-> -Encoding ascii -NoNewline`），本地 `build_installer.py` 写的是标准
-> `sha256sum` 格式 `<hash> *<filename>` + LF。两种格式混进同一个 Release
-> 会让校验方困惑（`sha256sum -c` 只认后者）。§7 清单里那段 `$e -eq $a`
-> 校验脚本是按**本地**格式写的（`.Split(' ')[0]` 取第一段当哈希），直接拿去
-> 校验 CI 产物会失败——CI 格式的第一段是文件名，不是哈希。
-
-**触发**：
-
-| 触发方式 | 行为 |
-| --- | --- |
-| 推送 `v*` 形式的 tag（如 `v0.1.0`） | 测试 + 打包 + 上传 artifact + **创建 GitHub Release**（draft，发版动作由人触发） |
-| `workflow_dispatch` 手动 dispatch | 测试 + 打包 + 上传 artifact，**不**创建 release——用来验证「现在的 master 分支能不能成功打包」 |
-
-**Release notes**用 `generate_release_notes: true`，让 GitHub 根据
-commit 历史自动生成；仓库里有手写的 `docs/CHANGELOG.md`，PR description
-也够用，不再硬编码进 workflow。
-
-**为什么不换 linux runner**：NSIS 用 `tools/nsis/makensis.exe`（Windows
-二进制），PySide6 wheel 也是 Windows 风格。换 runner 会让打包工具链
-不通用，触发非 Windows 特有的 flakiness，得不偿失。
-
-**dev / nightly 渠道**（`--onedir` 裸目录打 zip）尚未接入 workflow——
-本地可手动 `python scripts/build_exe.py --onedir` 跑一份，跳过 10 分钟
-的 LZMA 压缩。
+本节剩下的内容是纯手工发布流程：仓库拓扑（§8.1）、SSH 推送配置（§8.2）、
+发布顺序（§8.3）、标签补正（§8.4）、Release 正文与资产核对（§8.5）、
+以及 0.3.1 的核对结论（§8.6）。
 
 ### 8.1 仓库拓扑：两个远端，名字都不是默认的
 
@@ -1178,28 +1110,19 @@ git cat-file -t vX.Y.Z                   # 期望 tag（annotated）而非 commi
 用 `-a`（annotated）而非轻量标签：轻量标签没有创建者、时间、说明，
 `git cat-file -t` 返回 `commit`，事后无法区分"谁在什么时候发的版"。
 
-### 8.4 标签打错了怎么补：先掐掉 CI 触发器
+### 8.4 标签打错了怎么补
 
-改标签只能 `git tag -f` + 强推，但 **`.github/workflows/build.yml` 的
-触发条件是 `on: push: tags: ["v*"]`**。强推标签会重跑整条 CI，最后
-`softprops/action-gh-release@v2` 会对已存在的 Release 执行 update，
-**把 CI 现场构建的 exe 覆盖上去**。
-
-NSIS 打包不是可复现构建，新 exe 的 SHA256 必然不等于你已经手工验证并
-写进 release notes 的那个哈希。于是「已发布且校验过的安装包被一个未经
-验证的构建替换，而正文里的哈希值对不上」——这是最坏情况。
-
-所以安全路径是**先让触发器失效，再动标签**：
+改标签只能 `git tag -f` + 强推。仓库曾有 CI（`on: push: tags: ["v*"]`）
+会在强推后自动重建并**覆盖已验证的 Release 资产**，那时必须先掐触发器再动
+标签；**CI 已于 2026-11 移除，这个风险不复存在**，但强推后仍要手工核对
+Release 资产——资产不会因为标签移动而自动重传，旧的 exe 和新标签可能对不上：
 
 ```powershell
-# 1. 临时改 build.yml：注释掉 on.push.tags，或给 release 步骤加 if: false
-#    提交并推送这个改动
-
-# 2. 移动标签
+# 1. 移动标签
 git tag -f -a v0.3.0 13f3393 -m "DouBi 0.3.0"
 git push Github v0.3.0 --force
 
-# 3. 确认 CI 没被触发、Release 资产哈希未变，再把 build.yml 改回来
+# 2. 核对 Release 资产哈希与本地重打包产物一致（见 §7 发布后线上核对）
 ```
 
 只想核对而不想动手时，可以先查线上真实状态（资产 `digest` 字段就是
@@ -1272,49 +1195,32 @@ SHA256SUMS.txt                 88 bytes
 > 上一版这里是「如果超限额就只传两个侧签」的退路写法。0.3.2 改成明确分工，
 > 免得下次又要在「传还是不传」上重新做一次判断。
 
-### 8.6 CI 红了就不会有 draft Release（0.3.1 才搞明白）
+### 8.6 历史：CI 时代为什么每个 Release 都是手工发的（0.3.1 核对结论）
 
-推了 `v*` tag、CI 跑完是红的，然后去 Releases 页面找那个 draft——**找不到**。
-不是权限问题，也不是 draft 被藏起来了，而是**根本没建**。
+> 本节记录的是**已移除**的 CI（`.github/workflows/build.yml`，2026-11 删除）
+> 的核对结论，保留作决策依据：**为什么这个仓库不搞自动发版**。推 tag 不会再
+> 触发任何东西，但下面的教训对「将来要不要重建 CI」仍然成立。
 
-`build.yml` 用的是默认的步骤依赖（前一步失败则后续全部跳过），而
-`Create GitHub Release`（`softprops/action-gh-release@v2`）的条件只有一行：
+当年推了 `v*` tag、CI 跑完是红的，然后去 Releases 页面找那个 draft——**找不到**。
+不是权限问题，也不是 draft 被藏起来了，而是**根本没建**：建 Release 那步
+（`softprops/action-gh-release@v2`）的条件只有
+`if: startsWith(github.ref, 'refs/tags/v')`，**没有 `if: always()`**——
+测试段一红，后面 Build → Upload → Create Release 全部跳过。
 
-```yaml
-if: startsWith(github.ref, 'refs/tags/v')
-```
+0.3.1 实况（Run #5）：**Failure，总时长 1m32s**——打包段光 LZMA 压缩就得
+10 分钟以上（§6.6），所以它必然死在测试段。红的原因是 runner 只装基础依赖、
+九个可选包全缺失（当时靠 `run_full_tests.py --mode ci` 本地复刻依赖集证实
+**代码没有回归，红的是环境**）。从 0.2.0 到 0.3.10 共 5 次运行全部 failed，
+从未产出过一个安装包。
 
-**没有 `if: always()`**。整条 workflow 里带 `always()` 的只有「上传
-pytest.log」那一步。于是测试段一红，后面的 Build installer → Locate
-artifact → Compute SHA256 → Upload artifacts → Create Release **全部跳过**。
+**沉淀下来的两条经验**（CI 已删，仍适用）：
 
-0.3.1 实况（Run #5，tag `v0.3.1` / commit `9eb4d0d`）：**Failure，总时长
-1m32s，唯一产物是 290 字节的 `pytest-log`**。1m32s 这个数字本身就是证据——
-打包段光 LZMA 压缩就得 10 分钟以上（§6.6），所以它必然死在测试段。
-
-**两条实用推论**：
-
-1. **CI 红了之后手工发版，是「新建 Release」而不是「编辑 draft」**。线上
-   不存在该 tag 的 Release，也就不存在同名冲突，直接开
-   `https://github.com/buxiaju/DouBi/releases/new?tag=vX.Y.Z` 填即可。
-2. **CI 红反而让手工发版更安全**。§8.4 那个「CI 重建产物覆盖已验证安装包」的
-   最坏情况，前提是 CI 能跑到打包段；测试段红着的时候它连 exe 都生成不出来，
-   覆盖不了任何东西。但这是巧合不是保障——tag 该不重推还是不重推。
-
-**这次为什么红**：CI 只跑 `pip install .`，不带任何 extras，`PySide6` /
-`qfluentwidgets` / `qasync` / `psutil` / `qrcode` / `pydantic` / `fastapi` /
-`uvicorn` / `mcp` 九个包在 runner 上全部缺失（见 §8 开头的提示框、
-DEVELOPMENT §15.1）。用 `python scripts/run_full_tests.py --mode ci` 在本地
-复刻同一依赖集跑全量，得到 **670 passed / 175 skipped / 0 failed（102s）**
-——**代码没有回归，红的是环境**。这就是 0.3.1 判定「CI 失败不阻塞发版」的依据；
-换句话说，遇到 CI 红先跑这条命令，别急着改代码。
-
-想真正修绿它有两条路（0.3.1 都没做，留作待办）：
-
-- 给 CI 装 extras（`pip install .[gui,server,mcp]`）——代价是 runner 变慢、
-  PySide6 wheel 要下几百 MB，而且 `test_theme_apply_gui.py` 会在 CI 上真跑起来
-  （见 §7 第二条：它是本地全量挂死的根因）；
-- 给建 Release 那步加 `if: always()`——**不推荐**，等于把未经验证的产物发出去。
+1. **手工发版是「新建 Release」而不是「编辑 draft」**——线上不存在该 tag 的
+   Release，直接开 `https://github.com/buxiaju/DouBi/releases/new?tag=vX.Y.Z` 填即可。
+2. **发版正确性靠 §7 清单的人肉把关，不靠机器**。想要「自动构建 + 自动
+   Release」就得先解决两个老问题：runner 装齐 extras 变慢（PySide6 wheel
+   几百 MB，`test_theme_apply_gui.py` 还会真跑起来挂住），以及建 Release 步骤
+   与测试结果的条件耦合——解不掉之前，手工发布（§8.3）是最安全的路径。
 
 ## 9. 跨平台
 

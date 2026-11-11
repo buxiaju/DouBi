@@ -18,7 +18,7 @@
 3. **不取代 qfluentwidgets**——`PushButton` / `LineEdit` / `ComboBox` 等
    仍在直接用，共享组件是「需要统一表达力」时用。
 4. **不依赖 PySide6 也能 import**——共享组件的 class 体在工厂函数内部，
-   模块顶层只暴露 `build_*` 函数，CI 无头环境跑测试不卡 PySide6 安装。
+   模块顶层只暴露 `build_*` 函数，无 PySide6 的环境跑测试不卡安装。
 5. **辅助 QSS 替代字面量**——`setStyleSheet("color: gray;")` 一律
    改 `muted_qss()`，让次级说明跟着主题走。
 
@@ -413,4 +413,4 @@ mgr.register(
 | `test_pages_must_not_import_infobarposition` | 页面决定 toast 位置（应是 feedback.py 单点决策） |
 | `test_no_bare_qshortcut_in_pages` | 裸 `QShortcut(...)`（未过 manager = 没安全包装 / 没去重） |
 
-6 条全在 CI 离线可跑（不需要 QApplication 也不需要网络）。
+6 条全在离线环境可跑（不需要 QApplication 也不需要网络）。

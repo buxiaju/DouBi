@@ -22,7 +22,7 @@
 | 平台适配器 | `src/doubi/platforms/{douyin,bilibili}/` |
 | 抖音签名 | `src/doubi/platforms/douyin/sign/{abogus,xbogus}.py`（外部移植：JohnserfSeed/f2 + Evil0ctal） |
 | 文档 | `docs/{QUICKSTART,USER_GUIDE,ARCHITECTURE,BUILD,DEVELOPMENT,CHANGELOG,ICONS,UI_DESIGN,ROADMAP}.md` |
-| 全量测试 | `scripts/run_full_tests.py`（`--mode local/ci/gui-slow`） |
+| 全量测试 | `scripts/run_full_tests.py`（`--mode local/gui-slow`） |
 | 构建产物 | `scripts/build_installer.py` + `installer/doubi.nsi`（PyInstaller + NSIS） |
 | 临时探针 | `.scratch/`（gitignore，不入版本） |
 
@@ -30,26 +30,32 @@
 
 - **Python ≥ 3.10**（pyproject requires-python）
 - **测试**：pytest + PySide6 offscreen（用 `QT_QPA_PLATFORM=offscreen`）
-- **GUI**：PySide6 + qfluentwidgets（可选依赖，CI 不装）
+- **GUI**：PySide6 + qfluentwidgets（可选依赖；测试须对缺失环境容错，用 `pytest.importorskip` 守卫）
 - **打包**：PyInstaller onedir + NSIS 3.x
 - **lint**：ruff（`pyproject.toml` 配置；`--fix` 优先 + `--unsafe-fixes` 谨慎）
 
 ## 测试基线
 
-**发版前必跑两个口径**（基线数字进 CHANGELOG / Release 正文）：
+**发版前必跑**（基线数字进 CHANGELOG / Release 正文）：
 
 ```powershell
 # local：装齐 extras，排除会挂的 test_theme_apply_gui.py
 python scripts/run_full_tests.py --mode local
 
-# ci：sys.meta_path 屏蔽 9 个可选依赖，复刻 CI 的 `pip install .` 环境
-python scripts/run_full_tests.py --mode ci
+# gui-slow：只跑 test_theme_apply_gui.py，仅当动过 ui/theme.py 时手工付代价
+python scripts/run_full_tests.py --mode gui-slow
 ```
 
 **已知全量跑会挂的边界**：
 
 - `tests/test_theme_apply_gui.py`（28 例，`gui` + `slow`）→ local 模式默认排除
-- 6 个 PySide6 offscreen 跨文件 UI 测试（`test_ui_{feedback,shortcuts,loading_and_empty,shortcuts_and_loading_e2e,shell_regression_037,shell_regression_039}.py`）合集跑会在 87%-88% 位置挂起，单跑都过。发版前先 `git stash` 跑一遍，或用 `pytest --ignore` 跑非 UI shell 文件，UI shell 单独跑。
+- ~~6 个跨文件 UI 测试合集跑会挂起~~ **0.3.11 已修**（2026-11）：根因是三条
+  主题订阅/路由泄漏链把测试窗口钉死，qfluentwidgets `set_theme` 对累积注册
+  控件二次方劣化（py-spy 定位）。修法见 CHANGELOG 0.3.11 §五——
+  `theme.subscribe_theme` relay 重写 + `tests/conftest.py` 清墓 +
+  shell regression 文件显式销毁窗口。037+039 同进程 >10min → 10.3s。
+  若未来再出现「合集慢/挂」，先怀疑又有人裸 `connect(lambda:)` 到全局单例，
+  用 py-spy dump 抓栈定位。
 
 **断网口径探针**（防「测试静默真联网」）：`.scratch/nonet_hits.log`，
 判据是 `^HIT` 行数（不是总行数——nonet.py v3 写 4 行/命中，v6 写 1 行/命中）。
@@ -58,7 +64,7 @@ python scripts/run_full_tests.py --mode ci
 
 按顺序，不跳步：
 
-1. **基线**：local + ci 两口径测试，记录 passed/skipped 数字
+1. **基线**：`--mode local` 全量测试，记录 passed/skipped 数字
 2. **CHANGELOG 补段落**：用「症状 / 根因 / 修法 / 判据」四段式写；速查表加行；删速查表里的「暂未收录」提示
 3. **打 tag**：`annotated`，单行 `X.Y.Z — <卖点>`，**不要**长 commit message 格式
 4. **推远端**：`git push origin vX.Y.Z`（Gitee）+ `git push Github vX.Y.Z`（GitHub），两个都要显式推
@@ -67,6 +73,11 @@ python scripts/run_full_tests.py --mode ci
 7. **手工建 Release**：Gitee + GitHub 两个平台都要建
 
 **`origin` = Gitee（主仓，含历史附件）**，`Github` = GitHub（镜像 + Release 分发）。
+
+> **CI 已于 2026-11 整体移除**（`.github/workflows/` + Dependabot 已删）：
+> 历史 5 次运行全部 failed、从未产出过安装包，发版一直全程手工。推 tag
+> 不会触发任何自动动作；强推 / 重打标签后须手工核对 Release 资产哈希
+> （见 `docs/BUILD.md` §8）。
 
 ## Commit 格式
 

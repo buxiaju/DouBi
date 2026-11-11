@@ -4,6 +4,7 @@
 >
 > | 版本 | 日期 | 一句话摘要 |
 > | --- | --- | --- |
+> | 0.3.11 | 未发版 | 功能三连（章节三端/解析历史/剪贴板开关）+ GUI 缺口收口 + 主题订阅泄漏修复 |
 > | 0.3.10 | 2026-10-12 | 工程收口 5 步：CI 防挂死 / Dependabot / osv-scanner / USER_GUIDE / 诊断包 |
 > | 0.3.9 | 2026-10-12 | ruff 全清 0 错 + 解析链回退 + UI 收尾：feedback / shortcuts / 加载空态 |
 > | 0.3.6 | 2026-10-04 | 搜索 / 热榜「没有结果」：五个独立缺陷 |
@@ -22,6 +23,137 @@
 > - **测试基线**（passed / skipped）→ 见每版段尾的「统计」表，或者直接读 [BUILD.md](BUILD.md) §6.5 / §7 的本地全量 + ci 双口径脚本。
 > - **构建产物基线**（体积 / SHA256）→ 见 [BUILD.md](BUILD.md) §6.5 的「实测基线速查表」。
 > - **检索**：编辑器用 `Ctrl+F` 搜版本号（如 `0.3.6` 或 `M6.48`）是最快的跳转方式。
+
+## 0.3.11 (未发版) — 功能三连 + GUI 缺口收口 + 主题订阅泄漏修复
+
+> 本版 = 一个功能版本（章节三端对齐 / 解析历史 / 剪贴板开关）+ 一轮 Bili23
+> 对齐清单收口（过时账清三条、GUI 缺口补齐）+ 一次全量回归「卡死」的根因
+> 治理。改动全部落在 GUI / 三端透传 / 测试基建，内核下载逻辑零变化。
+
+### 一、章节下载（分段下载）三端对齐
+
+GUI 的「只下载部分片段」弹窗（M6.59）之后，CLI / REST / MCP 三端补齐同一能力：
+
+- **CLI**：`doubi download -u <url> --sections "1:00-2:30"`（多段逗号分隔）
+- **REST**：`POST /api/v1/download` 新增 `download_sections` 字段——per-request
+  覆盖经 `JobManager.submit` 第二参传给 executor，用 `dataclasses.replace`
+  造独立副本（并发作业不共享同一份被改的 options）；`ExecutorFn` 签名从
+  单参改双参 `(url, req_options)`
+- **MCP**：`add_to_queue` 新增 `download_sections` 参数
+- 判据：三端 sections 测试 4 例；改动面组合回归 218 passed
+
+### 二、解析历史 + 剪贴板监听开关
+
+- **解析历史**：解析页输入框下方「最近解析」链接行——去重、新者居前、上限
+  8 条，点击回填输入框；持久化进 `config.extra["recent_parse_urls"]`（不新增
+  AppConfig 字段，UI 便利记忆不是下载语义）；坏数据静默当空。
+- **剪贴板监听开关**：parse 页 `_poll_clipboard` 早已完整存在（1.5s 轮询、
+  只认具体平台、防打断），真正缺的只是开关——`AppConfig.clipboard_watch`
+  **默认关**，关 = 轮询定时器完全不启动（零开销，不是「轮询了再忽略」）；
+  设置页开关经 `configSaved` 广播实时联动定时器启停。
+
+### 三、Bili23 对齐清单收口（过时账 ×3 + GUI 缺口 ×2）
+
+评估前先 grep 现状，清出三条「清单说没做、实际早做了」：
+
+- **纯编号解析**：`BilibiliAdapter._bare_id_pattern` 早已覆盖 BV/av/ep/ss/ml
+- **重复下载策略**：`config.duplicate_policy`（skip/redownload/ask）早已实现
+- **剪贴板监听**：见上节
+
+真正缺的两块补齐：
+
+- **设置页 NFO/弹幕/字幕开关**：`write_nfo` / `write_danmaku` / `write_subtitles`
+  在 config、CLI、GUI 搬运链上早已全通，唯独 GUI 没有入口（用户只能手改
+  config.yml 的「静默失效开关」变体）。补下载卡三枚 SwitchButton，接
+  `_load_from_cfg` / `_write_config` / `_wire_auto_save` 三处。
+- **登出按钮**：`auth_actions.logout(platform)` 删本地 cookie 文件即登出
+  （幂等——文件不存在也算成功；远端无操作，B 站/抖音无可编程单点登出
+  API；unlink 失败如实报错不假成功）。设置页双平台「登出」按钮带确认框
+  + toast + 状态刷新。
+
+### 四、B 站直播录制（parse 层语义补全）
+
+实测 yt-dlp 的 `BiliLive` extractor 原生支持 B 站直播，classify / fetch /
+`media_type=live` 标注全现成，真缺口只有两个：
+
+- `BilibiliAPI.fetch_live_info()`：走官方 live API（`/room/v1/Room/get_info`，
+  带 UA + Referer）拿干净标题与开播状态（yt-dlp 的 BiliLive 不带主播名）
+- `BilibiliAdapter._parse_live` 专用分支：开播中给干净标题；**未开播/轮播
+  仍返回 item 但标题带「（未开播）」/「（轮播中）」后缀**——录制是用户
+  显式动作，parse 层不替用户决定挂机等开播；双源全失败 → None 报解析
+  失败，与视频 URL 行为一致。主播名列用「主播 <房间号>」占位。
+
+判据：6 例 mock 测试（开播/未开播/轮播/不存在/占位/不覆盖真名）。
+**端到端实测已通过**：room 6 真实开播流经 engine.download 录制 35 秒落盘
+3.4MB `.part`（被外部 SIGTERM 停止属预期——直播录制没有自然终点）。
+
+端到端验证抓出并修掉**三个连环坑**（只看 parse 层永远发现不了）：
+
+1. `--live-from-start` 对无 DVR 回看的直播（B 站 HLS）是 yt-dlp 硬报错
+   （「no formats that can be downloaded from the start」）。平台知识留在
+   adapter：B 站 live item 写 `extra["live_dvr"]=False`，引擎据此关闭该
+   选项（默认 True 保住 YouTube 等 DVR 直播的老能力）。
+2. B 站直播分片 ext=`fmp4`，被 yt-dlp 安全检查拒绝当文件扩展名
+   （`_UnsafeExtensionError`）。修法 `remux_video=mp4`——但 **remux_video →
+   final_ext 的推导只存在于 yt-dlp 的 CLI 层**（`__init__._real_main`），
+   Python API 必须显式传 `final_ext="mp4"`，否则 `existing_video_file`
+   仍按 fmp4 算目标名被拒。合并路径（bestvideo+bestaudio）合并后 ext 依然
+   是 fmp4，live 一律改用预合并格式 `best/bestvideo*+bestaudio/best`。
+3. 捆绑的 ffmpeg 是 2019 年 N_m3u8DL-CLI 定制版，处理 fMP4 直播流报
+   「ffmpeg exited with code 1」（CLI 换系统 ffmpeg 9.x 立即通过）。
+   `_resolve_ffmpeg_location` 优先级翻转为 **PATH 优先、bundled 兜底**——
+   发布版没装 ffmpeg 的用户回落 bundled 行为不变。
+
+### 五、全量回归「卡死」根因治理（主题订阅泄漏 ×3）
+
+**症状**：全量单进程回归跑到 ~91% 停滞，100% CPU 自旋；最小复现
+`test_ui_shell_regression_037 + 039` 同进程，>10 分钟跑不完（039 单文件
+本应 ~57s）。
+
+**根因**（py-spy 抓栈定位在 qfluentwidgets `StyleSheetCompose.content`
+递归）：三条引用链把每个测试建的主窗永久钉在内存里——
+
+1. `theme._callbacks` 强引用 bound method → 窗口被模块级列表钉死 →
+   `destroyed` 永不触发 → 条目永不清理（鸡生蛋死锁）
+2. `qconfig.themeChanged.connect(lambda: ...)` 裸 lambda 无接收者上下文，
+   连接归 qconfig（模块级单例、永不死）所有，同样钉死窗口
+3. qfluentwidgets 全局 `qrouter.stackHistories` 普通强引用 dict 锁住每个
+   导航过的 StackedWidget，且无注销 API
+
+窗口不销毁 → `styleSheetManager` 注册控件只增不减（每窗 ~137 个）→
+`set_theme` 每次全量重刷所有注册控件（实测 ~9ms/控件）→ 同进程用例越多
+越慢，二次方劣化。
+
+**修法**（三层）：
+
+- `subscribe_theme` 重写：relay QObject 以订阅者 widget 为父级承接
+  `qconfig.themeChanged` 连接（widget 死 → relay 死 → 连接自动断，已实测
+  PySide6 bound-method 连接不钉住接收者）；`_callbacks` 改 weakref 注册表，
+  `_notify` 顺手清墓
+- 新增 `tests/conftest.py` autouse fixture：每测后 gc.collect() + 清空
+  qrouter 强引用表
+- 037/039 加 per-file 销毁 fixture：`deleteLater` + 补发 `DeferredDelete`
+  显式销毁 C++ 层窗口（PySide6 QObject 引用环孤岛 Python gc 收不走，
+  C++ 销毁必触发 styleSheetManager 的 destroyed 注销）
+
+**判据**：037+039 同进程从 >10 分钟 → **10.3s**；**全量单进程回归（排除
+test_theme_apply_gui.py）从 22 分钟卡死跑不完 → 1567 passed / 8 skipped,
+13m18s 完整通过**（2026-11-11 发版基线）；探针实测单窗 137 控件、set_theme 随注册控件数线性增长
+（90ms/窗）。前人已在 `test_ui_restore.py` 注释里观察到「建 3 窗后
+theme._callbacks 是 57，deleteLater 后还是 57」，当时只做了本文件
+workaround，未追根因。
+
+### 六、其余
+
+- **AGENTS.md 过期引用修正**：`--mode ci` 已随 CI 移除不再存在
+- **`pip install -e .`**：`doubi-gui` / `doubi` / `doubi-serve` / `doubi-mcp`
+  四命令全局可用
+- **`test_ui_restore` 偶发 flaky 修复**：`_wait_rows` 靠 2s 超时轮询等
+  fire-and-forget 的落库删除，全量跑高负载下会偶发超时误报「没有落库」。
+  全部 5 处改用同文件既有的 `_settle`（`flush_pending_writes` 确定性等待，
+  等 `_db_tasks` 里的写真正落地），轮询助手删除。
+- **ROADMAP 收口**：P2-3 B 站直播录制落地后从路线图删除（见 §四），
+  `__version__` 0.3.10 → 0.3.11
 
 ## 0.3.9 (2026-10-12) — ruff 全清 0 错 + 解析链回退 + UI 收尾：feedback / shortcuts / 加载空态
 
