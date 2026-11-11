@@ -1065,3 +1065,138 @@ async def test_retry_resets_metrics(qapp, tmp_path):
     assert info.downloaded_bytes is None
     assert info.total_bytes is None
     await _drain()
+
+
+class _LateCancelPipeline:
+    """First attempt: real progress, pause, then the late cancel event.
+
+    Reproduces the real stack's emission order: the engine thread emits
+    ``fraction=0.0 / "cancelled"`` on the hook tick AFTER the flag is set
+    — i.e. AFTER pause() and _finish_stopped already flipped the row to
+    ``已暂停`` with the real fraction. The old _on_progress adopted it
+    literally and zeroed the bar, so resume looked like a fresh download.
+    The second attempt (resume) completes.
+    """
+
+    def __init__(self):
+        self.attempts = 0
+
+    async def download_item(self, item, options, *, on_progress=None):
+        from doubi.core.pipeline import ProgressEvent, _is_cancelled
+
+        self.attempts += 1
+        if self.attempts > 1:
+            on_progress(ProgressEvent(
+                job_id="j", item=item, phase="downloading",
+                fraction=1.0, message="ok",
+            ))
+            return True
+        on_progress(ProgressEvent(
+            job_id="j", item=item, phase="downloading",
+            fraction=0.4, message="downloading 40%",
+        ))
+        while not _is_cancelled(options):
+            await asyncio.sleep(0.01)
+        on_progress(ProgressEvent(
+            job_id="j", item=item, phase="downloading",
+            fraction=0.0, message="cancelled",
+            extra={"cancelled": True},
+        ))
+        return False
+
+
+async def test_pause_keeps_fraction_against_late_cancel_event(qapp, tmp_path):
+    """迟到的引擎 cancel 事件不得把暂停行的进度打回零。
+
+    序列（真实栈）：pause() 同步置「已暂停」→ _finish_stopped 收尾 →
+    ~1 个 progress tick 后引擎线程才发出 cancel 事件。旧代码把它当
+    测量值采纳，行归零，续传后看起来像重头下载（2026-11 用户报告）。
+    """
+    from doubi.ui.task_manager import TaskManager
+
+    mgr = TaskManager(_LateCancelPipeline())
+    task_id = mgr.add(_make_item("BV10"), _make_options(tmp_path))
+    await _started()
+    for _ in range(200):
+        if mgr.get(task_id).fraction == 0.4:
+            break
+        await asyncio.sleep(0.01)
+    assert mgr.get(task_id).fraction == 0.4
+
+    assert mgr.pause(task_id) is True
+    await _drain()  # 旧尝试带着迟到的 cancelled 事件退场
+
+    info = mgr.get(task_id)
+    assert info.status == "paused"
+    assert info.fraction == 0.4, "cancel 事件是状态通告，不是测量值"
+    assert info.message == "已暂停", "cancel 事件不得覆盖暂停文案"
+
+    assert mgr.resume(task_id) is True
+    await _drain()
+    assert mgr.get(task_id).status == "completed"
+    assert mgr.get(task_id).fraction == 1.0
+
+
+class _StartingNoticePipeline:
+    """Attempt 1: progress then pause. Attempt 2: Starting notice → progress.
+
+    The pipeline's ``Starting`` event carries ``fraction=0.0`` with the
+    ``starting`` marker; adopting it on a resumed task would rewind the
+    bar to zero until the engine's first real tick (~1s later).
+    """
+
+    def __init__(self):
+        self.attempts = 0
+
+    async def download_item(self, item, options, *, on_progress=None):
+        from doubi.core.pipeline import ProgressEvent, _is_cancelled
+
+        self.attempts += 1
+        if self.attempts == 1:
+            on_progress(ProgressEvent(
+                job_id="j", item=item, phase="downloading",
+                fraction=0.5, message="downloading 50%",
+            ))
+            while not _is_cancelled(options):
+                await asyncio.sleep(0.01)
+            return False
+        on_progress(ProgressEvent(
+            job_id="j", item=item, phase="downloading",
+            fraction=0.0, message="Starting https://example.com/v",
+            extra={"starting": True},
+        ))
+        await asyncio.sleep(0.05)  # 让 starting 事件先被行消化
+        on_progress(ProgressEvent(
+            job_id="j", item=item, phase="downloading",
+            fraction=0.6, message="downloading 60%",
+        ))
+        return True
+
+
+async def test_resume_starting_notice_does_not_rewind_fraction(qapp, tmp_path):
+    """resume 后的 Starting 通告（fraction=0.0）不得把进度条打回零。"""
+    from doubi.ui.task_manager import TaskManager
+
+    seen: list = []
+    mgr = TaskManager(_StartingNoticePipeline())
+    mgr.task_progress.connect(lambda tid, f, m: seen.append((f, m)))
+    task_id = mgr.add(_make_item("BV11"), _make_options(tmp_path))
+    await _started()
+    for _ in range(200):
+        if mgr.get(task_id).fraction == 0.5:
+            break
+        await asyncio.sleep(0.01)
+
+    assert mgr.pause(task_id) is True
+    await _drain()
+    seen.clear()
+
+    assert mgr.resume(task_id) is True
+    await _drain()
+    assert mgr.get(task_id).status == "completed"
+
+    rewound = [f for f, _msg in seen if f == 0.0]
+    assert not rewound, f"resume 路径出现 fraction=0.0: {seen}"
+    # Starting 通告只换文案不动数字
+    assert any(msg == "Starting https://example.com/v" and f == 0.5
+               for f, msg in seen), seen

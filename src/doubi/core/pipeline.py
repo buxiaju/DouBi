@@ -511,6 +511,12 @@ class DownloadPipeline:
         self._emit(on_progress, ProgressEvent(
             job_id=job_id, item=item, phase="downloading",
             fraction=0.0, message=f"Starting {item.source_url}",
+            # 状态通告不是测量值：fresh 任务 fraction 本就是 0 无所谓，
+            # 但 resume 的续传任务行上还挂着上次的真实进度，消费者若
+            # 照单全收会把进度条先打回零、等 1s 后首个引擎 tick 才恢复，
+            # 观感就是「重头下载」。``starting`` 标记供消费者豁免
+            # （ui/task_manager._on_progress 对 retry/cancelled 同款处理）。
+            extra={"starting": True},
         ))
 
         # Per-item cookie injection: if the caller did not pin a cookie

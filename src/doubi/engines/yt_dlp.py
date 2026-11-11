@@ -493,8 +493,15 @@ class YtDlpEngine(Engine):
             # ``.part`` file is what makes resuming possible.
             logger.info("yt-dlp cancelled for %s: %s", item.source_url, exc)
             if on_progress is not None:
+                # fraction 带最后真实进度，而不是 0.0：这是「传输到此为
+                # 止」的状态通告。0.0 会被任何信任 fraction 的消费者
+                # （GUI 任务行）当成测量值，把已到 80% 的进度条打回零，
+                # 暂停→继续 看起来就像重头下载。``last_fraction`` 在
+                # 上方 ``if on_progress is not None`` 块里定义，此处
+                # 守卫条件相同，必然已初始化；尚无 tick（-1）时才用 0.0。
+                last = last_fraction["v"]
                 on_progress(EngineProgress(
-                    fraction=0.0, message="cancelled",
+                    fraction=max(last, 0.0), message="cancelled",
                     extra={"cancelled": True},
                 ))
             return False

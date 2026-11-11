@@ -456,3 +456,54 @@ def test_video_download_has_no_live_keys(tmp_path):
     for key in ("remux_video", "final_ext", "live_from_start"):
         assert key not in captured, f"{key} 不该出现在非直播下载里"
 
+
+
+def test_cancelled_event_carries_last_real_fraction(tmp_path):
+    """取消事件是「传输到此为止」的通告，fraction 必须带最后真实进度。
+
+    曾固定发 0.0：GUI 任务行信任 fraction，暂停瞬间把已到 80% 的
+    进度条打回零，续传后看起来像重头下载（2026-11 用户报告）。
+    """
+    from doubi.engines.yt_dlp import YtDlpEngine
+    from doubi.core.storage.file_layout import resolve_item_dir
+
+    item = _make_item()
+    opts = _make_options(tmp_path)
+    opts.resume = True
+
+    calls = {"n": 0}
+
+    def _cancel_check() -> bool:
+        calls["n"] += 1
+        return calls["n"] > 1  # 第一个 tick 放行，第二个 tick 取消
+
+    opts.cancel_check = _cancel_check
+
+    item_dir = resolve_item_dir(item, opts)
+    part_file = item_dir / "video.mp4.part"
+
+    class _TwoTickYDL(_FakeYDL):
+        def download(self, urls):
+            part_file.parent.mkdir(parents=True, exist_ok=True)
+            part_file.write_bytes(b"partial")
+            for hook in self.opts.get("progress_hooks", []):
+                # tick 1：真实进度 frac=0.1；tick 2：触发取消
+                hook({"status": "downloading",
+                      "total_bytes": 100, "downloaded_bytes": 10})
+                hook({"status": "downloading",
+                      "total_bytes": 100, "downloaded_bytes": 20})
+
+    fake_mod = MagicMock()
+    fake_mod.YoutubeDL = _TwoTickYDL
+    engine = YtDlpEngine(yt_dlp_module=fake_mod)
+
+    events: list = []
+    ok = asyncio.run(engine.download(item, opts, on_progress=events.append))
+
+    assert ok is False
+    cancelled = [e for e in events if (e.extra or {}).get("cancelled")]
+    assert cancelled, "cancelled 标记必须存在"
+    # 取消前最后真实 tick 是 done=10/total=100 → frac=0.1
+    assert cancelled[-1].fraction == pytest.approx(0.1), (
+        "取消事件的 fraction 应为最后真实进度，而非 0.0"
+    )

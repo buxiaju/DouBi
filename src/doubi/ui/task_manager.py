@@ -785,7 +785,16 @@ class TaskManager(QObject):
             # argument. Every other emit site in this file already passes
             # ``info.fraction``.
             try:
-                if not (ev.extra or {}).get("retry"):
+                extra = ev.extra or {}
+                if extra.get("cancelled"):
+                    # 旧尝试的取消确认（引擎线程发出，可能晚到 ~1 个
+                    # progress tick）。它携带 fraction=0.0 / "cancelled"，
+                    # 是状态通告不是测量值；暂停后的行状态（已暂停 +
+                    # 真实 fraction）由 pause() 和 _finish_stopped 负责，
+                    # 这里照单全收会把 80% 的条打成 0%，续传后看起来
+                    # 就像「重头下载」。整个事件跳过。
+                    return
+                if not extra.get("retry") and not extra.get("starting"):
                     info.fraction = ev.fraction
                 info.message = ev.message or ""
                 self._absorb_metrics(task_id, info, ev)
