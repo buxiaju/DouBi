@@ -33,7 +33,7 @@ import shutil
 from pathlib import Path
 from typing import Any, Optional
 
-from ..core.models import DownloadOptions, MediaItem, MediaType
+from ..core.models import DownloadOptions, MediaItem, MediaType, Platform
 from ..core.storage.file_layout import resolve_item_dir
 from ._subproc import find_bundled_ffmpeg
 from .base import Engine, EngineProgress, EngineProgressCallback
@@ -238,6 +238,22 @@ class YtDlpEngine(Engine):
             # is contractual rather than inherited.
             "continuedl": options.resume,
         }
+        # 通用嗅探的 HLS（海量小分片 + 质量参差的第三方 CDN）实测会把
+        # yt-dlp 的并发分片下载器打进不稳定状态：silidm.com 播放页
+        # （2136 个 ~700KB 分片）concurrent=4 一次跑挂死在 75%（20 分钟
+        # 零写入），另一次中途 ENOENT on ``.part-Frag930``；CLI 同参数
+        # 短跑（37%）虽无事，但该下载器的线程池死锁/竞态只在长传输
+        # 后段暴露。降为单线程分片下载——该 CDN 单线程速度与 4 并发
+        # 几乎相同（~4.7MB/s，瓶颈在链路），稳定性收益远大于速度损失。
+        # B 站 DASH 分片大、CDN 稳，保持并发不受影响。
+        if (
+            item.platform == Platform.GENERIC
+            and (item.extra or {}).get("is_hls")
+            and not is_live
+        ):
+            opts["concurrent_fragment_downloads"] = 1
+            # 慢 CDN 的瞬时失败远比大站频繁，3 次不够看。
+            opts["fragment_retries"] = 10
         if is_live:
             # 直播流不 merge：HLS 分片是 ts，合并 mp4 需要完整流，
             # 直播中途 remux 会因流未结束而失败。
@@ -401,6 +417,8 @@ class YtDlpEngine(Engine):
         item: MediaItem,
         options: DownloadOptions,
         on_progress: Optional[EngineProgressCallback],
+        *,
+        _allow_frag_selfheal: bool = True,
     ) -> bool:
         if not shutil.which("ffmpeg") and not options.format_id:
             logger.debug("ffmpeg not on PATH; yt-dlp will fall back to progressive streams")
@@ -506,9 +524,65 @@ class YtDlpEngine(Engine):
                 ))
             return False
         except Exception as exc:
+            msg = str(exc)
+            # ---- HLS journal 自愈 ------------------------------------
+            # 并发分片下载器异常退出会留下「journal 说某 ``.part-FragN``
+            # 已下载未合并、文件实际已不在」的脏状态；此后每次续传都在
+            # 打开该分片时 ENOENT，重试多少次都撞同一堵墙——用户看到
+            # 的就是「总是下载失败」（2026-11 silidm.com 实测）。检测到
+            # 这种错误且 resume 开启时，清掉全部分片残留（journal +
+            # .part + .part-Frag*，HLS 的 .part 离开 journal 没有意义），
+            # 从头重下一次——能下完永远好过永远失败。只自愈一次。
+            if (
+                _allow_frag_selfheal
+                and options.resume
+                and ".part-Frag" in msg
+                and "No such file or directory" in msg
+            ):
+                logger.warning(
+                    "yt-dlp frag journal corruption for %s; sweeping "
+                    "partial state and retrying once: %s",
+                    item.source_url, msg[:200],
+                )
+                if on_progress is not None:
+                    on_progress(EngineProgress(
+                        fraction=0.0,
+                        message="HLS 分片状态损坏，清理残留后重新下载",
+                        extra={"retry": 1, "max_retries": 1,
+                               "delay": 0, "reason": "frag journal corruption"},
+                    ))
+                self._sweep_hls_partials(item, options)
+                return self._download_sync(
+                    item, options, on_progress, _allow_frag_selfheal=False,
+                )
             logger.exception("yt-dlp failed for %s: %s", item.source_url, exc)
             if on_progress is not None:
                 on_progress(EngineProgress(
                     fraction=0.0, message=f"yt-dlp error: {exc}",
                 ))
             return False
+
+    @staticmethod
+    def _sweep_hls_partials(item: MediaItem, options: DownloadOptions) -> None:
+        """Delete every HLS resume artifact of *item* (journal + parts).
+
+        Only ``.part*`` / ``.ytdl`` files inside the item directory are
+        touched — sidecars (thumbnails / info.json / subtitles) are not
+        matched by these suffixes.
+        """
+        try:
+            item_dir = resolve_item_dir(item, options)
+        except Exception:   # noqa: BLE001
+            logger.debug("sweep skipped: cannot resolve item dir", exc_info=True)
+            return
+        for path in item_dir.iterdir():
+            name = path.name
+            if not path.is_file():
+                continue
+            if not (name.endswith(".ytdl") or name.endswith(".part")
+                    or ".part-Frag" in name):
+                continue
+            try:
+                path.unlink()
+            except OSError:
+                logger.debug("could not sweep %s", name, exc_info=True)

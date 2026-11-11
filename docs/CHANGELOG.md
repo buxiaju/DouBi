@@ -4,7 +4,7 @@
 >
 > | 版本 | 日期 | 一句话摘要 |
 > | --- | --- | --- |
-> | 0.3.12 | 未发版 | 安装包瘦身 + GUI 收藏页 + 暂停续传进度条归零修复 |
+> | 0.3.12 | 未发版 | 安装包瘦身 + GUI 收藏页 + 暂停续传进度条修复 + 通用引擎 HLS 稳定性 |
 > | 0.3.11 | 2026-11-11 | 功能三连（章节三端/解析历史/剪贴板开关）+ GUI 缺口收口 + 主题订阅泄漏修复 |
 > | 0.3.10 | 2026-10-12 | 工程收口 5 步：CI 防挂死 / Dependabot / osv-scanner / USER_GUIDE / 诊断包 |
 > | 0.3.9 | 2026-10-12 | ruff 全清 0 错 + 解析链回退 + UI 收尾：feedback / shortcuts / 加载空态 |
@@ -43,6 +43,41 @@
 
 **判据**：onedir 产物 1.2 GB → **727 MB**（省 ~470 MB）；收包清单复核
 只剩 `.links / chromium-1234 / ffmpeg-1011 / winldd-1007`。
+
+### 四、通用引擎：HLS 下载稳定性（silidm.com 案例）
+
+**用户报告**：通用引擎对 https://silidm.com/play/41090-1-1.html 总是下载失败。
+
+**端到端排查**（真实站点实测）：
+
+- 嗅探正常：解析出 `fengbao13.com/.../index.m3u8`，2136 个分片的标准 VOD，
+  分片全部可达（200）、无时效 token、无防盗链——**站点本身没有问题**；
+- 引擎 `concurrent_fragment_downloads=4` 两种故障模式都被实测复现：
+  1. **长传输后段挂死**——fresh 下载到 75%（1614/2136 分片，1.44GB 落盘）
+     后 20 分钟零写入，连取消探测（progress hook）都不再触发；
+  2. **中断后续传必撞墙**——一次异常退出留下「journal 说 `.part-Frag930`
+     已下载未合并、文件实际已不在」的脏状态，之后每次续传都在该分片
+     上 ENOENT，管道层 3 次重试全撞同一堵墙 → 用户看到「总是下载失败」。
+
+**修法**（`engines/yt_dlp.py`）：
+
+1. **通用嗅探的 HLS 降为单线程分片下载**（`concurrent_fragment_downloads=1`
+   + `fragment_retries` 3→10）。并发分片下载器的线程池死锁/竞态只在长
+   传输后段暴露；单线程走普通 HTTP 重试路径天然可靠，且对脏 journal
+   容错（缺失分片警告重下而非崩溃）——实测同一脏现场，单线程 120s
+   正常续传 470MB，并发模式则永远 ENOENT。该 CDN 单线程速度与 4 并发
+   几乎相同（~4.7MB/s，瓶颈在链路），稳定性收益远大于速度损失。
+   B 站 DASH 分片大、CDN 稳，保持并发不受影响；
+2. **frag journal 自愈**（全引擎兜底）：续传报 ``.part-FragN`` ENOENT
+   且 resume 开启时，清掉 journal + ``.part`` + ``.part-Frag*`` 残留
+   （HLS 的 .part 离开 journal 没有意义）自动重下一次，只自愈一次。
+   通告走 `retry` 语义（消费者只换文案不动进度条）。
+
+**判据**：`test_generic_hls_disables_concurrent_fragments` /
+`test_bilibili_keeps_concurrent_fragments`（特判只打 generic+hls）、
+`test_frag_journal_corruption_selfheals_once` /
+`test_frag_corruption_selfheal_disabled_when_resume_off`（自愈恰好一次、
+sidecar 不误伤、resume 关闭时旧语义保持）；真实脏现场续传全片完成。
 
 ### 三、修复：暂停 → 续传的进度条「归零假象」
 

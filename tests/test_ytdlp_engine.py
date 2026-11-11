@@ -507,3 +507,122 @@ def test_cancelled_event_carries_last_real_fraction(tmp_path):
     assert cancelled[-1].fraction == pytest.approx(0.1), (
         "取消事件的 fraction 应为最后真实进度，而非 0.0"
     )
+
+
+# ---- 通用嗅探 HLS 的稳定性特判（2026-11 silidm.com 案例） ------------
+
+
+def _make_generic_hls_item() -> MediaItem:
+    return MediaItem(
+        platform=Platform.GENERIC,
+        item_id="sniffed001",
+        title="嗅探视频",
+        author=Author(),
+        media_type=MediaType.VIDEO,
+        source_url="https://cdn.example.com/video/index.m3u8",
+        extra={"is_hls": True},
+    )
+
+
+def test_generic_hls_disables_concurrent_fragments(tmp_path):
+    """通用嗅探的 HLS 降为单线程分片下载 + 提高分片重试。
+
+    实测 concurrent=4 在「2136 个小分片 × 不稳 CDN」的长传输后段
+    挂死（20 分钟零写入）或 ENOENT on .part-FragN；单线程分片下载
+    走普通 HTTP 重试路径，可靠得多。
+    """
+    captured = _capture_opts(_make_generic_hls_item(), _make_options(tmp_path))
+    assert captured["concurrent_fragment_downloads"] == 1
+    assert captured["fragment_retries"] == 10
+
+
+def test_bilibili_keeps_concurrent_fragments(tmp_path):
+    """B 站 DASH 分片大、CDN 稳，保持并发不受特判影响。"""
+    captured = _capture_opts(_make_item(), _make_options(tmp_path))
+    assert captured["concurrent_fragment_downloads"] == 4
+    assert captured["fragment_retries"] == 3
+
+
+def test_frag_journal_corruption_selfheals_once(tmp_path):
+    """续传撞上脏 journal（.part-FragN ENOENT）时清残留自动重下一次。
+
+    这是「总是下载失败」的直接解药：并发分片下载器异常退出留下
+    journal 与实际文件不一致的状态后，每次续传都在同一分片上 ENOENT，
+    管道层重试永远撞墙。自愈把残留清掉从头下，只做一次。
+    """
+    from doubi.engines.yt_dlp import YtDlpEngine
+    from doubi.core.storage.file_layout import resolve_item_dir
+
+    item = _make_generic_hls_item()
+    opts = _make_options(tmp_path)
+    opts.resume = True
+    opts.write_thumbnail = True  # 防 success 路径的中间清理清掉 sidecar
+
+    item_dir = resolve_item_dir(item, opts)
+    part_file = item_dir / "video.mp4.part"
+    frag_file = item_dir / "video.mp4.part-Frag930"
+    ytdl_file = item_dir / "video.mp4.ytdl"
+    sidecar = item_dir / "video.jpg"  # 自愈不得误伤 sidecar
+    for p in (part_file, frag_file, ytdl_file, sidecar):
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"x")
+
+    calls = {"n": 0}
+
+    class _CorruptThenOKYDL(_FakeYDL):
+        def download(self, urls):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # 第一次：模拟续传撞脏 journal
+                raise ValueError(
+                    "Unable to download video: [Errno 2] No such file or "
+                    f"directory: '{frag_file}'"
+                )
+            return None
+
+    fake_mod = MagicMock()
+    fake_mod.YoutubeDL = _CorruptThenOKYDL
+    engine = YtDlpEngine(yt_dlp_module=fake_mod)
+
+    events: list = []
+    ok = asyncio.run(engine.download(item, opts, on_progress=events.append))
+
+    assert ok is True
+    assert calls["n"] == 2, "自愈重试恰好一次"
+    # 全部分片残留被清掉（HLS 的 .part 离开 journal 没有意义）
+    assert not part_file.exists()
+    assert not frag_file.exists()
+    assert not ytdl_file.exists()
+    assert sidecar.exists(), "sidecar 不得误伤"
+    # 通告走 retry 语义（消费者只换文案不动进度数字）
+    notices = [e for e in events if (e.extra or {}).get("reason") == "frag journal corruption"]
+    assert notices
+
+
+def test_frag_corruption_selfheal_disabled_when_resume_off(tmp_path):
+    """resume 关闭时不自愈——旧语义（报错返回 False）保持。"""
+    from doubi.engines.yt_dlp import YtDlpEngine
+
+    item = _make_generic_hls_item()
+    opts = _make_options(tmp_path)
+    opts.resume = False
+
+    calls = {"n": 0}
+
+    class _CorruptYDL(_FakeYDL):
+        def download(self, urls):
+            calls["n"] += 1
+            raise ValueError(
+                "Unable to download video: [Errno 2] No such file or "
+                "directory: 'x.mp4.part-Frag930'"
+            )
+
+    fake_mod = MagicMock()
+    fake_mod.YoutubeDL = _CorruptYDL
+    engine = YtDlpEngine(yt_dlp_module=fake_mod)
+
+    ok = asyncio.run(engine.download(item, opts, on_progress=None))
+    assert ok is False
+    assert calls["n"] == 1, "resume 关闭时不重试"
+
+
