@@ -184,3 +184,9 @@ cython_debug/
 # 临时抓屏，文档没引用，体积还大
 /screenshots/screen_now.png
 /screenshots/real_run.png
+
+# 探针/本地测试残留（不入版本）
+/.probe_home3_trash/
+/_test_silidm_0312/
+/_test_live/
+/_test_silidm_0311/

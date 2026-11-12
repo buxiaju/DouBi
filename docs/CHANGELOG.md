@@ -4,7 +4,7 @@
 >
 > | 版本 | 日期 | 一句话摘要 |
 > | --- | --- | --- |
-> | 0.3.12 | 2026-11-11 | 安装包瘦身 + GUI 收藏页 + 暂停续传进度条修复 + 通用引擎 HLS 稳定性 |
+> | 0.3.12 | 2026-11-11 | 安装包瘦身 + GUI 收藏页 + 暂停续传进度条修复 + 通用引擎 HLS 稳定性 + 嗅探层代理 |
 > | 0.3.11 | 2026-11-11 | 功能三连（章节三端/解析历史/剪贴板开关）+ GUI 缺口收口 + 主题订阅泄漏修复 |
 > | 0.3.10 | 2026-10-12 | 工程收口 5 步：CI 防挂死 / Dependabot / osv-scanner / USER_GUIDE / 诊断包 |
 > | 0.3.9 | 2026-10-12 | ruff 全清 0 错 + 解析链回退 + UI 收尾：feedback / shortcuts / 加载空态 |
@@ -25,7 +25,7 @@
 > - **构建产物基线**（体积 / SHA256）→ 见 [BUILD.md](BUILD.md) §6.5 的「实测基线速查表」。
 > - **检索**：编辑器用 `Ctrl+F` 搜版本号（如 `0.3.6` 或 `M6.48`）是最快的跳转方式。
 
-## 0.3.12 (2026-11-11) — 安装包瘦身 + GUI 收藏页 + 暂停续传修复 + 通用引擎 HLS 稳定性
+## 0.3.12 (2026-11-11) — 安装包瘦身 + GUI 收藏页 + 暂停续传修复 + 通用引擎稳定性 + 嗅探层代理
 
 ### 一、安装包瘦身：Playwright 浏览器按 revision 过滤
 
@@ -130,6 +130,44 @@ main_window 接线 / kind 路由 / 缺 ID 短路 / 未登录引导 / 五类行�
 `test_frag_journal_corruption_selfheals_once` /
 `test_frag_corruption_selfheal_disabled_when_resume_off`（自愈恰好一次、
 sidecar 不误伤、resume 关闭时旧语义保持）；真实脏现场续传全片完成。
+
+### 五、嗅探层接通代理：Cloudflare 站点直连被限速的「下载失败」（silidm.com 复盘）
+
+**用户报告**：0.3.12 后 silidm.com 仍然下载失败。
+
+**端到端复盘**：0.3.12 §四修的是**下载层**（并发分片挂死 / journal
+自愈），这次卡死在**更上游的嗅探层**——全链路探针实测：
+
+- silidm.com 走 Cloudflare（104.21.x / 2606:4700::），当前网络**直连被
+  严重限速**：页面 HTML（96KB）15-25s 才吐完，Playwright 20s
+  `domcontentloaded` 超时 → 嗅探 0 结果 → 用户看到「[嗅探失败] 嗅探到
+  0 个视频 URL」→「下载失败」；
+- 而视频分片 CDN（fengbao13.com）**直连畅通**（0.9s / 200，下载实测
+  ~3MB/s 稳定推进）——下载层早在 M6 就支持 proxy，但解析阶段被卡死时
+  它帮不上忙；
+- 经代理访问主站正常（2.5s 完整响应）。带代理嗅探同一 URL → 立刻拿到
+  `index.m3u8`；无代理对照 → 0 结果。缺陷复现与修复判据同框。
+
+**修法**（最小改动面）：`AppConfig.proxy`（设置页「代理」输入框，下载
+引擎已在读）接通到嗅探层——
+
+- `SniffOptions` 新增 `proxy` 字段（默认 None = 直连）；
+- `sniff_options_from_config` 唯一搬运点补 `proxy=cfg.proxy`（per 硬
+  约束 #4，结构性守卫测试同步补字段）；
+- `Sniffer.sniff` 把 proxy 以 `{"server": ...}` 形态传给 Playwright
+  `browser.new_context()`（context 级而非 launch 级——官方推荐形态，
+  未来可同浏览器实例差异化代理）。
+
+**为什么用户什么都不用改**：设置页本来就有的「代理」框填上代理地址即
+同时作用于嗅探 + 下载 + ytdlp_generic 三层；无代理时行为与旧版完全
+一致（直连）。
+
+**判据**：`test_sniff_options_forwarded_to_sniffer` 补 proxy 断言 +
+`test_sniff_options_proxy_none_when_config_unset`（无代理必须直连）+
+`test_proxy_reaches_playwright_context` /
+`test_no_proxy_means_direct_context`（mock Playwright 验证 proxy dict
+真的出现在 `new_context` kwargs）；真实端到端：带代理嗅探 silidm.com
+拿到 m3u8 → 引擎下载 2.3%→3.4% 平稳推进（~3MB/s）。
 
 ### 统计
 

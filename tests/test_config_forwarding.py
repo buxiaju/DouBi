@@ -84,6 +84,7 @@ async def test_sniff_options_forwarded_to_sniffer(monkeypatch):
             sniff_user_agent="probe-agent",
             sniff_auto_play=False,
             sniff_capture_types=("video/mp4",),
+            proxy="http://127.0.0.1:7897",
         )
     )
 
@@ -96,6 +97,24 @@ async def test_sniff_options_forwarded_to_sniffer(monkeypatch):
     assert opts.user_agent == "probe-agent", "sniff_user_agent 没抵达 Sniffer"
     assert opts.auto_play is False, "sniff_auto_play 没抵达 Sniffer"
     assert opts.capture_types == ("video/mp4",), "sniff_capture_types 没抵达 Sniffer"
+    assert opts.proxy == "http://127.0.0.1:7897", (
+        "AppConfig.proxy 没抵达 Sniffer——嗅探层断代理时，Cloudflare 托管站点"
+        "在直连被限速的网络下页面加载不出，嗅探 0 结果（silidm.com 案例）"
+    )
+
+
+async def test_sniff_options_proxy_none_when_config_unset(monkeypatch):
+    """proxy 留空时 SniffOptions.proxy 必须是 None（直连），不能是空串。"""
+    monkeypatch.setattr(
+        "doubi.platforms.generic.adapter.Sniffer", _CapturingSniffer
+    )
+    GenericAdapter.set_config(AppConfig())
+
+    await GenericAdapter().parse("https://example.com/whatever")
+
+    opts = _CapturingSniffer.last_options
+    assert opts is not None
+    assert opts.proxy is None, "config 无代理时嗅探必须直连"
 
 
 async def test_sniff_disabled_short_circuits_before_launching_browser(monkeypatch):

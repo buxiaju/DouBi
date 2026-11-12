@@ -63,6 +63,13 @@ class SniffOptions:
     user_agent: str = ""
     auto_play: bool = True
     capture_types: tuple[str, ...] = ()
+    # HTTP(S) 代理（如 http://127.0.0.1:7897），透传给 Playwright
+    # ``browser.new_context(proxy=...)``。为什么必须在嗅探层而不是只在
+    # 下载层：Cloudflare 托管的站点（如 silidm.com）在某些网络下直连被
+    # 严重限速，页面 20s 加载不出 → 嗅探 0 结果 → 用户看到「下载失败」，
+    # 而分片 CDN 直连畅通——下载层 proxy 帮不上解析阶段的忙。
+    # None = 不使用（Playwright 缺省直连）。
+    proxy: Optional[str] = None
 
 
 @dataclass
@@ -408,6 +415,11 @@ class Sniffer:
                     context_kwargs: dict[str, Any] = {}
                     if self.options.user_agent:
                         context_kwargs["user_agent"] = self.options.user_agent
+                    # 代理在 context 层而非 launch 层：launch(proxy=) 是
+                    # 浏览器进程级全局，context 级允许未来同一浏览器实例
+                    # 差异化代理（Playwright 官方推荐形态）。
+                    if self.options.proxy:
+                        context_kwargs["proxy"] = {"server": self.options.proxy}
                     context = await browser.new_context(**context_kwargs)
                     await context.add_init_script(js)
                     page = await context.new_page()
@@ -804,6 +816,7 @@ def sniff_options_from_config(cfg: AppConfig) -> SniffOptions:
         user_agent=cfg.sniff_user_agent,
         auto_play=cfg.sniff_auto_play,
         capture_types=cfg.sniff_capture_types,
+        proxy=cfg.proxy,
     )
 
 

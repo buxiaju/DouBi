@@ -363,6 +363,96 @@ class TestMimeFilter:
 # 3. Sniffer 不可用降级
 # ===========================================================================
 
+class TestSnifferProxyPlumbing:
+    """SniffOptions.proxy 必须真的传到 Playwright 的 browser.new_context。
+
+    silidm.com 案例（0.3.12 后仍失败）：站点走 Cloudflare，用户网络直连
+    被限速 → 页面 20s 加载不出 → 嗅探 0 结果 → 「下载失败」。修法是把
+    AppConfig.proxy 接通到嗅探层——下载层早就有 proxy，但解析阶段被
+    卡死时下载层帮不上忙。这里 mock 掉 async_playwright，断言 proxy
+    dict 真的出现在 new_context 的 kwargs 里。
+    """
+
+    def _run_sniff_with_fake_pw(self, proxy):
+        import doubi.core.sniffer as sniffer_mod
+
+        captured: dict = {}
+
+        class _FakeContext:
+            def __init__(self, **kwargs):
+                captured["context_kwargs"] = kwargs
+
+            def add_init_script(self, js):
+                pass
+
+            def new_page(self):
+                return _FakePage()
+
+        class _FakePage:
+            def on(self, *a, **k):
+                pass
+
+            async def evaluate(self, *a, **k):
+                return {"media": [], "ready": False, "pageUrl": "x", "pageTitle": ""}
+
+            async def goto(self, *a, **k):
+                raise sniffer_mod.PWTimeout("timeout")
+
+        class _FakeBrowser:
+            async def new_context(self, **kwargs):
+                return _FakeContext(**kwargs)
+
+            async def close(self):
+                pass
+
+        class _FakeChromium:
+            async def launch(self, **kwargs):
+                captured["launch_kwargs"] = kwargs
+                return _FakeBrowser()
+
+        class _FakePW:
+            chromium = _FakeChromium()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+        class _FakeModule:
+            def async_playwright(self):
+                return _FakePW()
+
+        # Build a minimal sniffer; module attrs are patched manually below
+        # (restored in the finally block) since this helper isn't a fixture.
+        sniffer = Sniffer(SniffOptions(duration_sec=0, proxy=proxy))
+        orig_pw = sniffer_mod.async_playwright
+        orig_has = sniffer_mod._HAS_PLAYWRIGHT
+        sniffer_mod.async_playwright = lambda: _FakePW()
+        sniffer_mod._HAS_PLAYWRIGHT = True
+        # patch _load_catch_lite_js to skip file IO
+        orig_load = Sniffer._load_catch_lite_js
+        Sniffer._load_catch_lite_js = lambda self: "stub"
+        try:
+            result = asyncio.run(sniffer.sniff("https://example.com/page"))
+        finally:
+            sniffer_mod.async_playwright = orig_pw
+            sniffer_mod._HAS_PLAYWRIGHT = orig_has
+            Sniffer._load_catch_lite_js = orig_load
+        return result, captured
+
+    def test_proxy_reaches_playwright_context(self):
+        result, captured = self._run_sniff_with_fake_pw("http://127.0.0.1:7897")
+        assert captured["context_kwargs"].get("proxy") == {
+            "server": "http://127.0.0.1:7897"
+        }
+
+    def test_no_proxy_means_direct_context(self):
+        result, captured = self._run_sniff_with_fake_pw(None)
+        assert "proxy" not in captured["context_kwargs"], (
+            "无代理时不能给 Playwright 传 proxy 键（空串会被当无效代理服务器）"
+        )
+
 
 class TestSnifferUnavailable:
     """Playwright 没装时 Sniffer 必须降级返回错误，不抛异常。"""

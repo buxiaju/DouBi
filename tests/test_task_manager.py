@@ -58,22 +58,33 @@ def _make_options(tmp_path):
 class _StubPipeline:
     """Pipeline whose download_item records calls and returns success."""
 
-    def __init__(self, *, ok=True, delay=0.0):
+    def __init__(self, *, ok=True, delay=0.0, then_ok=None, then_delay=None):
         self.ok = ok
         self.delay = delay
+        # Optional behaviour for calls after the first. Used to keep a
+        # retried attempt in flight long enough for a poller to observe
+        # its pending row deterministically (0.3s windows lose the race
+        # under full-suite load -- the row write and the second failure's
+        # delete both commit between two polls).
+        self.then_ok = then_ok
+        self.then_delay = then_delay
         self.calls: list = []
 
     async def download_item(self, item, options, *, on_progress=None):
         self.calls.append((item, options))
-        if self.delay:
-            await asyncio.sleep(self.delay)
+        if len(self.calls) > 1 and self.then_ok is not None:
+            ok, delay = self.then_ok, self.then_delay
+        else:
+            ok, delay = self.ok, self.delay
+        if delay:
+            await asyncio.sleep(delay)
         if on_progress is not None:
             from doubi.core.pipeline import ProgressEvent
             on_progress(ProgressEvent(
                 job_id="j", item=item, phase="downloading",
                 fraction=0.5, message="50%",
             ))
-        return self.ok
+        return ok
 
 
 class _SwallowingPipeline:
@@ -617,8 +628,14 @@ async def test_pending_row_dropped_on_remove_and_restored_on_retry(qapp, tmp_pat
     opts = _db_options(tmp_path)
     # The delay is what makes the *retried* attempt observable: with an
     # instant pipeline the new attempt would fail again inside the same
-    # drain, deleting the row before we could look at it.
-    mgr = TaskManager(_StubPipeline(ok=False, delay=0.3))
+    # drain, deleting the row before we could look at it. The retried
+    # attempt stays in flight for 30s (never actually finished -- the
+    # test removes the task): a plain 0.3s window is a genuine race
+    # under full-suite load, where the row write and the follow-up
+    # failure's delete both land between two poll iterations (full run
+    # flaked once, 2026-11-12).
+    mgr = TaskManager(_StubPipeline(ok=False, delay=0.3,
+                                    then_ok=False, then_delay=30.0))
     task_id = mgr.add(_make_item("BV42"), opts)
     await _drain()
     # A failure is terminal, so the row is gone.
@@ -632,6 +649,8 @@ async def test_pending_row_dropped_on_remove_and_restored_on_retry(qapp, tmp_pat
     assert [r.task_id for r in rows] == [task_id]
     assert rows[0].item_snapshot is not None
 
+    # Stopping the long in-flight attempt must delete the row too, and
+    # ``remove`` cancels it cooperatively via the stop flag.
     mgr.remove(task_id)
     await _drain()
     assert await _rows(opts.database) == []
