@@ -668,8 +668,13 @@ class _FakeSegmentServer:
 
 def _run_concat(server: _FakeSegmentServer, count: int, output_path, **opt_kwargs):
     """驱动 _download_and_concat，返回 (progress 事件列表)。"""
+    from doubi.engines.m3u8 import _SegmentSpec
+
     engine = M3u8Engine(ffmpeg_path="C:\\fake\\ffmpeg.exe")
-    segments = [f"https://cdn.example.com/seg-{i}.ts" for i in range(count)]
+    specs = [
+        _SegmentSpec(url=f"https://cdn.example.com/seg-{i}.ts", media_seq=i)
+        for i in range(count)
+    ]
 
     session_ctx = MagicMock()
     session_ctx.__aenter__ = AsyncMock(return_value=server)
@@ -683,7 +688,7 @@ def _run_concat(server: _FakeSegmentServer, count: int, output_path, **opt_kwarg
     asyncio.run(
         engine._download_and_concat(
             fake_aiohttp,
-            segments,
+            specs,
             output_path,
             DownloadOptions(**opt_kwargs),
             events.append,
@@ -749,9 +754,14 @@ class TestSegmentDownloadConcurrency:
         assert after <= before
 
     def test_cancellation_stops_download(self, tmp_path):
+        from doubi.engines.m3u8 import _SegmentSpec
+
         engine = M3u8Engine(ffmpeg_path="C:\\fake\\ffmpeg.exe")
         server = _FakeSegmentServer()
-        segments = [f"https://cdn.example.com/seg-{i}.ts" for i in range(20)]
+        specs = [
+            _SegmentSpec(url=f"https://cdn.example.com/seg-{i}.ts", media_seq=i)
+            for i in range(20)
+        ]
 
         session_ctx = MagicMock()
         session_ctx.__aenter__ = AsyncMock(return_value=server)
@@ -764,7 +774,7 @@ class TestSegmentDownloadConcurrency:
         with pytest.raises(asyncio.CancelledError):
             asyncio.run(
                 engine._download_and_concat(
-                    fake_aiohttp, segments, tmp_path / "out.mp4", options, None
+                    fake_aiohttp, specs, tmp_path / "out.mp4", options, None
                 )
             )
         assert not (tmp_path / "out.mp4").exists()

@@ -276,8 +276,15 @@ class Aria2Engine(Engine):
                     except Exception:  # noqa: BLE001
                         logger.debug("aria2: remove failed", exc_info=True)
                     if on_progress is not None:
+                        # fraction 带最后真实进度而非 0.0：取消是「传输到
+                        # 此为止」的状态通告。0.0 会被信任 fraction 的消费
+                        # 者（GUI 任务行）当成测量值，把已到 80% 的进度条
+                        # 打回零，暂停→继续 看起来就像重头下载——与
+                        # yt_dlp 引擎同款修复（0.3.12 §三）。尚无轮询读到
+                        # 进度（-1）时才用 0.0。
                         on_progress(EngineProgress(
-                            fraction=0.0, message="cancelled",
+                            fraction=max(last_fraction, 0.0),
+                            message="cancelled",
                             extra={"cancelled": True},
                         ))
                     return False

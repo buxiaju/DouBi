@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
@@ -100,6 +101,147 @@ def _pick_best_variant(text: str, base_url: str) -> str:
     if not best_uri:
         raise ValueError("master playlist has no variant URI after #EXT-X-STREAM-INF")
     return urljoin(base_url, best_uri)
+
+
+# ---- 段级 spec：AES-128 解密 + EXT-X-MAP 初始化段 -----------------------
+#
+# ffmpeg 路径靠 ffmpeg 自己理解这些标签；aiohttp 降级路径必须自己解析。
+# 之前只有「非 # 行 = 分片」的朴素模型，遇到加密流（AES-128）会把
+# 密文拼成打不开的「视频」，遇到 fMP4 流（EXT-X-MAP）会漏掉初始化段
+# 产出缺 moov 不可播的文件。
+
+
+@dataclass(frozen=True)
+class _SegmentSpec:
+    """单个分片的下载说明（URL + 解密参数）。
+
+    ``key_uri`` 为 None 表示明文分片；``iv`` 为 None 表示按 HLS 规范
+    用媒体序列号派生（128-bit big-endian）。``is_init`` 标记
+    ``#EXT-X-MAP`` 初始化段（fMP4 的 moov，必须排在最前）。
+    """
+
+    url: str
+    key_uri: Optional[str] = None
+    iv: Optional[bytes] = None
+    media_seq: int = 0
+    is_init: bool = False
+
+
+def _parse_attr_list(text: str) -> dict[str, str]:
+    """HLS 属性列表解析：``KEY=VALUE`` 逗号分隔，值可带双引号。
+
+    朴素逗号切分会被 ``CODECS="avc1,mp4a"`` 这类带引号逗号的值打碎。
+    """
+    attrs: dict[str, str] = {}
+    for m in re.finditer(r'([A-Za-z0-9-]+)=("[^"]*"|[^,]*)', text):
+        key = m.group(1).strip().upper()
+        value = m.group(2).strip()
+        if value.startswith('"') and value.endswith('"'):
+            value = value[1:-1]
+        attrs[key] = value
+    return attrs
+
+
+def _parse_iv(value: str) -> bytes:
+    """``0x`` 前缀十六进制 IV → 16 字节（不足左补零）。"""
+    hex_str = value.strip().lower()
+    if hex_str.startswith("0x"):
+        hex_str = hex_str[2:]
+    try:
+        raw = bytes.fromhex(hex_str)
+    except ValueError as exc:
+        raise ValueError(f"invalid HLS IV: {value!r}") from exc
+    if len(raw) > 16:
+        raise ValueError(f"HLS IV longer than 128 bits: {value!r}")
+    return raw.rjust(16, b"\x00")
+
+
+def _parse_segment_specs(text: str, base_url: str) -> list[_SegmentSpec]:
+    """把媒体播放列表解析成分片 spec 列表（含解密参数与 init 段）。
+
+    Raises:
+        ValueError: METHOD 不是 NONE/AES-128（如 SAMPLE-AES——DRM 语义
+            超出纯下载器的范围，ffmpeg 路径可处理）。
+    """
+    specs: list[_SegmentSpec] = []
+    key_method = "NONE"
+    key_uri: Optional[str] = None
+    key_iv: Optional[bytes] = None
+    map_url: Optional[str] = None
+    map_inserted = False
+    seq = 0
+
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("#EXT-X-KEY:"):
+            attrs = _parse_attr_list(line.split(":", 1)[1])
+            key_method = attrs.get("METHOD", "NONE").strip().upper()
+            if key_method == "AES-128" and attrs.get("URI"):
+                key_uri = attrs["URI"]
+                key_iv = _parse_iv(attrs["IV"]) if attrs.get("IV") else None
+            else:
+                key_uri, key_iv = None, None
+                if key_method not in ("NONE", ""):
+                    raise ValueError(
+                        f"unsupported HLS encryption method: {key_method} "
+                        "(ffmpeg path handles DRM/sample-level encryption)"
+                    )
+            continue
+        if line.startswith("#EXT-X-MEDIA-SEQUENCE:"):
+            try:
+                seq = int(line.split(":", 1)[1])
+            except ValueError:
+                seq = 0
+            continue
+        if line.startswith("#EXT-X-MAP:"):
+            attrs = _parse_attr_list(line.split(":", 1)[1])
+            if attrs.get("URI") and not map_inserted:
+                map_url = urljoin(base_url, attrs["URI"])
+            continue
+        if line.startswith("#"):
+            continue
+
+        # 分片行（urljoin：相对/根相对/绝对 URI 混杂，见上）
+        if map_url and not map_inserted:
+            specs.append(_SegmentSpec(url=map_url, media_seq=seq, is_init=True))
+            map_inserted = True
+        if key_method == "AES-128" and key_uri:
+            specs.append(_SegmentSpec(
+                url=urljoin(base_url, line),
+                key_uri=urljoin(base_url, key_uri),
+                iv=key_iv,
+                media_seq=seq,
+            ))
+        else:
+            specs.append(_SegmentSpec(url=urljoin(base_url, line), media_seq=seq))
+        seq += 1
+    return specs
+
+
+def _decrypt_segment(data: bytes, key: bytes, iv: bytes) -> bytes:
+    """AES-128-CBC 解密一个分片（HLS 规范：PKCS7 填充）。
+
+    ``cryptography`` 是环境既有传递依赖，这里惰性导入并在缺失时给出
+    明确指引而不是 ImportError 裸奔。
+    """
+    try:
+        from cryptography.hazmat.primitives import padding
+        from cryptography.hazmat.primitives.ciphers import (
+            Cipher,
+            algorithms,
+            modes,
+        )
+    except ImportError as exc:
+        raise RuntimeError(
+            "AES-128 encrypted HLS requires the 'cryptography' package; "
+            "pip install cryptography, or let the ffmpeg path handle it"
+        ) from exc
+    decryptor = Cipher(algorithms.AES(key), modes.CBC(iv)).decryptor()
+    padded = decryptor.update(data) + decryptor.finalize()
+    unpadder = padding.PKCS7(128).unpadder()
+    return unpadder.update(padded) + unpadder.finalize()
 
 # Common ffmpeg error patterns that indicate the HLS stream is valid
 # but unplayable with current settings.
@@ -414,7 +556,7 @@ class M3u8Engine(Engine):
 
         url = item.source_url
         try:
-            segments = await self._fetch_segments(aiohttp, url, options)
+            specs = await self._fetch_segment_specs(aiohttp, url, options)
         except Exception as exc:
             logger.error("[m3u8] failed to parse playlist: %s", exc)
             if on_progress:
@@ -424,7 +566,7 @@ class M3u8Engine(Engine):
                 ))
             return False
 
-        if not segments:
+        if not specs:
             logger.error("[m3u8] no segments found in playlist")
             if on_progress:
                 on_progress(EngineProgress(
@@ -433,10 +575,10 @@ class M3u8Engine(Engine):
                 ))
             return False
 
-        logger.info("[m3u8] downloading %d segments → %s", len(segments), output_path)
+        logger.info("[m3u8] downloading %d segments → %s", len(specs), output_path)
 
         try:
-            await self._download_and_concat(aiohttp, segments, output_path, options, on_progress)
+            await self._download_and_concat(aiohttp, specs, output_path, options, on_progress)
         except Exception as exc:
             logger.error("[m3u8] download failed: %s", exc)
             if on_progress:
@@ -450,9 +592,9 @@ class M3u8Engine(Engine):
             on_progress(EngineProgress(fraction=1.0, message="m3u8 下载完成"))
         return True
 
-    async def _fetch_segments(
+    async def _fetch_segment_specs(
         self, aiohttp, url: str, options: DownloadOptions, *, _depth: int = 0,
-    ) -> list[str]:
+    ) -> list[_SegmentSpec]:
         async with aiohttp.ClientSession() as session:
             text = await self._fetch_playlist_text(session, url, options)
 
@@ -466,23 +608,19 @@ class M3u8Engine(Engine):
                 )
             variant_url = _pick_best_variant(text, url)
             logger.info("[m3u8] master playlist → variant %s", variant_url)
-            return await self._fetch_segments(
+            return await self._fetch_segment_specs(
                 aiohttp, variant_url, options, _depth=_depth + 1,
             )
 
-        segments: list[str] = []
-        for line in text.splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            # urljoin, not string concatenation: playlists mix relative
-            # ("seg-1.ts"), root-relative ("/video/adjump/x.ts", common for
-            # injected ad segments) and absolute URIs. Naive concatenation
-            # turns the root-relative form into ".../dir//video/..." — a
-            # double slash the origin answers with 404, killing the whole
-            # download mid-way.
-            segments.append(urljoin(url, line))
-        return segments
+        return _parse_segment_specs(text, url)
+
+    async def _fetch_segments(
+        self, aiohttp, url: str, options: DownloadOptions, *, _depth: int = 0,
+    ) -> list[str]:
+        specs = await self._fetch_segment_specs(
+            aiohttp, url, options, _depth=_depth,
+        )
+        return [s.url for s in specs]
 
     @staticmethod
     async def _fetch_playlist_text(session, url: str, options: DownloadOptions) -> str:
@@ -493,21 +631,21 @@ class M3u8Engine(Engine):
     async def _download_and_concat(
         self,
         aiohttp,
-        segments: list[str],
+        specs: list[_SegmentSpec],
         output_path: Path,
         options: DownloadOptions,
         on_progress: Optional[EngineProgressCallback],
     ) -> None:
         tmp_dir = Path(tempfile.mkdtemp(prefix="doubi_m3u8_"))
         cancel_flag = getattr(options, "cancel_check", None)
-        total = len(segments)
+        total = len(specs)
         # Reuse the knob yt-dlp 和 aria2 已经在用的 ``concurrent_fragments``，
         # 而不是新造一个：同一个设置在所有引擎上应当含义一致。
         limit = max(1, int(getattr(options, "concurrent_fragments", 4) or 1))
         sem = asyncio.Semaphore(limit)
         done = 0
 
-        async def fetch_one(session, idx: int, seg_url: str) -> None:
+        async def fetch_one(session, idx: int, spec: _SegmentSpec) -> None:
             nonlocal done
             seg_path = tmp_dir / f"seg_{idx:05d}.ts"
             async with sem:
@@ -515,9 +653,20 @@ class M3u8Engine(Engine):
                     if cancel_flag_polling(cancel_flag):
                         raise asyncio.CancelledError("aiohttp m3u8 download stopped")
                     try:
-                        async with session.get(seg_url, proxy=options.proxy) as resp:
+                        async with session.get(spec.url, proxy=options.proxy) as resp:
                             resp.raise_for_status()
                             seg_data = await resp.read()
+                        if spec.key_uri:
+                            # AES-128：密文必须先解密再落盘——把密文拼进
+                            # 合并文件的「视频」是打不开的。
+                            iv = (
+                                spec.iv
+                                if spec.iv is not None
+                                else spec.media_seq.to_bytes(16, "big")
+                            )
+                            seg_data = _decrypt_segment(
+                                seg_data, keys[spec.key_uri], iv,
+                            )
                         seg_path.write_bytes(seg_data)
                         break
                     except asyncio.CancelledError:
@@ -548,9 +697,18 @@ class M3u8Engine(Engine):
         try:
             timeout = aiohttp.ClientTimeout(total=None, sock_connect=15, sock_read=30)
             async with aiohttp.ClientSession(timeout=timeout) as session:
+                # AES-128 key 预取：同 URI 只拉一次（一条列表通常一个
+                # key）。密钥缺失/失败立即整体失败——半途才知道解不开
+                # 只会浪费几百个分片的流量。
+                keys: dict[str, bytes] = {}
+                for key_uri in {s.key_uri for s in specs if s.key_uri}:
+                    keys[key_uri] = await self._fetch_key(session, key_uri, options)
+                if keys:
+                    logger.info("[m3u8] prefetched %d AES key(s)", len(keys))
+
                 tasks = [
-                    asyncio.create_task(fetch_one(session, idx, seg_url))
-                    for idx, seg_url in enumerate(segments)
+                    asyncio.create_task(fetch_one(session, idx, spec))
+                    for idx, spec in enumerate(specs)
                 ]
                 try:
                     await asyncio.gather(*tasks)
@@ -569,6 +727,29 @@ class M3u8Engine(Engine):
                     out_f.write(seg_path.read_bytes())
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    @staticmethod
+    async def _fetch_key(session, key_url: str, options: DownloadOptions) -> bytes:
+        """拉取 AES-128 密钥（16 字节），带一次重试。"""
+        last_exc: Exception = RuntimeError("unreachable")
+        for attempt in range(1, _SEGMENT_MAX_ATTEMPTS + 1):
+            try:
+                async with session.get(key_url, proxy=options.proxy) as resp:
+                    resp.raise_for_status()
+                    raw = await resp.read()
+                if len(raw) != 16:
+                    raise ValueError(
+                        f"AES key at {key_url} is {len(raw)} bytes, expected 16"
+                    )
+                return raw
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if attempt >= _SEGMENT_MAX_ATTEMPTS:
+                    raise RuntimeError(
+                        f"failed to fetch AES key {key_url}: {exc}"
+                    ) from exc
+                await asyncio.sleep(_SEGMENT_RETRY_BACKOFF * attempt)
+        raise last_exc
 
     @staticmethod
     def _sanitize_output_ext(ext: str) -> str:

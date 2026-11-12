@@ -237,6 +237,39 @@ async def test_download_cancel():
 
 
 @pytest.mark.asyncio
+async def test_download_cancel_carries_last_real_fraction():
+    """取消事件带最后真实进度而非 0.0——0.0 会把 GUI 进度条打回零，
+    暂停→继续 看起来像重头下载（与 yt_dlp 引擎同款缺陷）。"""
+    statuses = [
+        {"status": "active", "completedLength": "0", "totalLength": "1000"},
+        {"status": "active", "completedLength": "500", "totalLength": "1000"},
+        {"status": "active", "completedLength": "700", "totalLength": "1000"},
+    ]
+    mock = _MockRpcClient(status_sequence=statuses)
+    engine = Aria2Engine(rpc_client=mock)
+
+    item = _make_item(direct_url="https://cdn.example.com/v.mp4")
+    # 探针在每轮 status 轮询**前**检查：n=1 放行（读到 0.0），
+    # n=2 放行（读到 0.5），n=3 取消 → last_fraction=0.5
+    call_count = {"n": 0}
+    def cancel_after_progress():
+        call_count["n"] += 1
+        return call_count["n"] >= 3
+
+    opts = _make_options()
+    opts.cancel_check = cancel_after_progress
+    progress = []
+    ok = await engine.download(item, opts, on_progress=progress.append)
+
+    assert ok is False
+    cancelled = [e for e in progress if (e.extra or {}).get("cancelled")]
+    assert cancelled, "cancelled 标记必须存在"
+    assert cancelled[-1].fraction == pytest.approx(0.5), (
+        "取消事件的 fraction 应为最后真实进度，而非 0.0"
+    )
+
+
+@pytest.mark.asyncio
 async def test_download_no_direct_url_returns_false():
     """没有 direct_url 也没有 source_url → 立即失败。"""
     engine = Aria2Engine()

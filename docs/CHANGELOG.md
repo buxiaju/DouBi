@@ -4,7 +4,7 @@
 >
 > | 版本 | 日期 | 一句话摘要 |
 > | --- | --- | --- |
-> | 0.3.12 | 2026-11-12 | 安装包瘦身 + GUI 收藏页 + 暂停续传进度条修复 + 通用引擎 HLS 稳定性 + 嗅探层代理 + 下载引擎稳定性加固 |
+> | 0.3.12 | 2026-11-12 | 安装包瘦身 + GUI 收藏页 + 暂停续传进度条修复 + 通用引擎 HLS 稳定性 + 嗅探层代理 + 下载引擎稳定性加固 ×2 |
 > | 0.3.11 | 2026-11-11 | 功能三连（章节三端/解析历史/剪贴板开关）+ GUI 缺口收口 + 主题订阅泄漏修复 |
 > | 0.3.10 | 2026-10-12 | 工程收口 5 步：CI 防挂死 / Dependabot / osv-scanner / USER_GUIDE / 诊断包 |
 > | 0.3.9 | 2026-10-12 | ruff 全清 0 错 + 解析链回退 + UI 收尾：feedback / shortcuts / 加载空态 |
@@ -25,7 +25,7 @@
 > - **构建产物基线**（体积 / SHA256）→ 见 [BUILD.md](BUILD.md) §6.5 的「实测基线速查表」。
 > - **检索**：编辑器用 `Ctrl+F` 搜版本号（如 `0.3.6` 或 `M6.48`）是最快的跳转方式。
 
-## 0.3.12 (2026-11-12) — 安装包瘦身 + GUI 收藏页 + 暂停续传修复 + 通用引擎稳定性 + 嗅探层代理 + 下载引擎稳定性加固
+## 0.3.12 (2026-11-12) — 安装包瘦身 + GUI 收藏页 + 暂停续传修复 + 通用引擎稳定性 + 嗅探层代理 + 下载引擎稳定性加固 ×2
 
 ### 一、安装包瘦身：Playwright 浏览器按 revision 过滤
 
@@ -207,11 +207,36 @@ Timer 记录心跳（任何 hook tick 喂一次），超过 `STALL_TIMEOUT`（24
 `test_m3u8_master_playlist.py` 6 例（选流 / 直通 / 乱序选带宽 /
 根相对 URI / 无变体报错 / 递归深度）；受影响面 188 passed。
 
+### 七、下载引擎稳定性加固第二批：AES-128 解密 + fMP4 初始化段 + aria2 取消进度
+
+**① m3u8 aiohttp 降级路径 AES-128 解密**——ffmpeg 路径由 ffmpeg 理解
+`#EXT-X-KEY`；降级路径此前只有「非 `#` 行 = 分片」的朴素模型，加密流
+会把**密文**拼成打不开的「视频」。修复：解析段级 spec
+（`_SegmentSpec`：URL + key URI + IV + 媒体序列号），key 预取
+（同 URI 只拉一次，长度 ≠16 字节明确失败），CBC + PKCS7 解密
+（`cryptography` 为环境既有传递依赖，惰性导入 + 缺失明确指引）。
+IV 缺省按规范用媒体序列号 128-bit BE 派生；`SAMPLE-AES`（DRM 语义）
+明确报错而非静默产出垃圾。
+
+**② EXT-X-MAP（fMP4 初始化段）**——`#EXT-X-MAP` 的 URI 此前被当注释
+跳过，fMP4 流产出**缺 moov 不可播**的文件。修复：init 段解析为首个
+spec 前置进下载与合并序列。
+
+**③ aria2 取消事件带最后真实进度**——与 0.3.12 §三 yt-dlp 同款缺陷：
+`fraction=0.0` 会把 GUI 进度条打回零，暂停→继续看起来像重头下载。
+改为带 `last_fraction`（尚无轮询读到进度时才 0.0）。
+
+**判据**：`test_m3u8_encryption_map.py` 10 例（显式 IV / 序列号派生 /
+SAMPLE-AES 报错 / METHOD=NONE 清 key / IV 补齐 / 解密往返 /
+MAP 前置 / 加密端到端合并出明文 / fMP4 init 进合并输出 / 坏 key 明确
+失败）；`test_download_cancel_carries_last_real_fraction`（aria2 取消
+带 0.5）；并发/取消/重试 8 例升级 spec 签名；受影响面 160 passed。
+
 ### 统计
 
 | 口径 | 0.3.11 | 0.3.12 | 差值 |
 | --- | --- | --- | --- |
-| local 全量 | 1567 passed / 8 skipped / 13m18s | **1601 passed / 8 skipped / 13m19s** | +34 passed（收藏页 14 + 引擎/任务行 7 + 嗅探代理 3 + 看门狗/master playlist 10） |
+| local 全量 | 1567 passed / 8 skipped / 13m18s | **1612 passed / 8 skipped** | +45 passed（收藏页 14 + 引擎/任务行 7 + 嗅探代理 3 + 看门狗/master playlist 10 + AES/MAP/aria2 11） |
 | ruff | 0 | **0** | 0 |
 
 版本号单一真源 `src/doubi/__init__.py` 由 0.3.11 升至 0.3.12。
