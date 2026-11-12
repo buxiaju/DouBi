@@ -4,7 +4,7 @@
 >
 > | 版本 | 日期 | 一句话摘要 |
 > | --- | --- | --- |
-> | 0.3.12 | 2026-11-11 | 安装包瘦身 + GUI 收藏页 + 暂停续传进度条修复 + 通用引擎 HLS 稳定性 + 嗅探层代理 |
+> | 0.3.12 | 2026-11-12 | 安装包瘦身 + GUI 收藏页 + 暂停续传进度条修复 + 通用引擎 HLS 稳定性 + 嗅探层代理 + 下载引擎稳定性加固 |
 > | 0.3.11 | 2026-11-11 | 功能三连（章节三端/解析历史/剪贴板开关）+ GUI 缺口收口 + 主题订阅泄漏修复 |
 > | 0.3.10 | 2026-10-12 | 工程收口 5 步：CI 防挂死 / Dependabot / osv-scanner / USER_GUIDE / 诊断包 |
 > | 0.3.9 | 2026-10-12 | ruff 全清 0 错 + 解析链回退 + UI 收尾：feedback / shortcuts / 加载空态 |
@@ -25,7 +25,7 @@
 > - **构建产物基线**（体积 / SHA256）→ 见 [BUILD.md](BUILD.md) §6.5 的「实测基线速查表」。
 > - **检索**：编辑器用 `Ctrl+F` 搜版本号（如 `0.3.6` 或 `M6.48`）是最快的跳转方式。
 
-## 0.3.12 (2026-11-11) — 安装包瘦身 + GUI 收藏页 + 暂停续传修复 + 通用引擎稳定性 + 嗅探层代理
+## 0.3.12 (2026-11-12) — 安装包瘦身 + GUI 收藏页 + 暂停续传修复 + 通用引擎稳定性 + 嗅探层代理 + 下载引擎稳定性加固
 
 ### 一、安装包瘦身：Playwright 浏览器按 revision 过滤
 
@@ -169,11 +169,49 @@ sidecar 不误伤、resume 关闭时旧语义保持）；真实脏现场续传�
 真的出现在 `new_context` kwargs）；真实端到端：带代理嗅探 silidm.com
 拿到 m3u8 → 引擎下载 2.3%→3.4% 平稳推进（~3MB/s）。
 
+### 六、下载引擎稳定性加固：停摆看门狗 + 显式 socket 超时 + master playlist 解析
+
+**动机**：延续 §四/§五 的 silidm.com 案例，把三处暴露出的引擎稳定性
+短板一次收口。
+
+**① yt-dlp 传输停摆看门狗**——§四实测挂死传输「20 分钟零写入、连停止
+按钮都无效」的结构性缺陷：cancel 探针挂在 progress hook 上，而挂死的
+传输恰恰**不再调用 hook**。修复改为时间驱动：`_StallMonitor` 后台
+Timer 记录心跳（任何 hook tick 喂一次），超过 `STALL_TIMEOUT`（240s，
+宽容慢 CDN 的长重试间隔 + TCP 零窗抖动）无心跳即置位；socket 超时把
+传输带回 hook 后（先查后喂——若先 `beat()` 迟到 tick 会解除标志位，
+中止永远无法落地的自打架竞态），武装的探针中止传输。中止事件带
+`stalled` 标记而非 `cancelled`（停摆 ≠ 用户取消，GUI 不显示「已取消」），
+管道层按失败重试。live 录制没有自然终点（分片永远在等下一段），看门狗
+对 live 关闭。`finally` 收 Timer，四条退出路径不留野线程。
+
+**② socket_timeout 显式 30s**——看门狗的另一半：挂死的 socket 读
+最终必须以异常形式回到 hook，武装的探针才有机会触发。显式声明契约而
+非依赖库默认值。
+
+**③ m3u8 自研引擎 master playlist 解析**——aiohttp 降级路径把所有非
+`#` 行当分片，遇到多码率 master playlist 会把**变体播放列表 URI** 当
+.ts 分片下载，产出垃圾「视频」。修复：检测 `#EXT-X-STREAM-INF`，选
+带宽最高的变体递归到媒体播放列表（深度上限 3，防套娃）；媒体列表
+行为不变。
+
+**④ 引擎错误前缀注册**——停摆中止消息「传输停摆」注册进管道
+`_ENGINE_ERROR_PREFIXES`，重试日志携带真实原因而非泛化的
+"engine returned False"。
+
+**判据**：`test_stall_watchdog_aborts_silent_transfer`（快钟替身端到端：
+挂死→迟到 tick 中止→stalled 标记→.part 保留）、
+`test_stall_monitor_unit_semantics`（beat 复位 / 超时置位 / stop 收线程）、
+`test_socket_timeout_explicit_in_opts`、
+`test_live_transfer_has_no_stall_monitor`（live 不建看门狗）；
+`test_m3u8_master_playlist.py` 6 例（选流 / 直通 / 乱序选带宽 /
+根相对 URI / 无变体报错 / 递归深度）；受影响面 188 passed。
+
 ### 统计
 
 | 口径 | 0.3.11 | 0.3.12 | 差值 |
 | --- | --- | --- | --- |
-| local 全量 | 1567 passed / 8 skipped / 13m18s | **1588 passed / 8 skipped / 11m41s** | +21 passed（收藏页 14 + 引擎/任务行 7） |
+| local 全量 | 1567 passed / 8 skipped / 13m18s | **1601 passed / 8 skipped / 13m19s** | +34 passed（收藏页 14 + 引擎/任务行 7 + 嗅探代理 3 + 看门狗/master playlist 10） |
 | ruff | 0 | **0** | 0 |
 
 版本号单一真源 `src/doubi/__init__.py` 由 0.3.11 升至 0.3.12。

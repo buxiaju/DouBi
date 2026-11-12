@@ -30,6 +30,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+import threading
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -70,6 +72,92 @@ class _LocalDownloadCancelled(Exception):
     class (e.g. a test double). See
     :meth:`YtDlpEngine._cancelled_exception`.
     """
+
+
+#: 传输停摆看门狗的默认超时（秒）。
+#:
+#: silidm.com 案例（2026-11）实测：并发分片下载器在 75% 处挂死 20 分钟，
+#: 零写入且 progress hook 完全不再触发——而 cancel 探针恰恰挂在这个
+#: hook 上，导致**连停止按钮都无效**。看门狗改用时间驱动：只要超过
+#: ``STALL_TIMEOUT`` 没有任何 hook tick（即没有任何字节流动的迹象），
+#: 就强制中止传输。240s 宽容慢 CDN 的长重试间隔 + TCP 零窗抖动；
+#: 正常传输哪怕 1MB/s 也会有 hook tick（yt-dlp 每 ~100ms 回调一次）。
+STALL_TIMEOUT = 240.0
+
+
+class _StallMonitor:
+    """Time-driven watchdog for a single yt-dlp transfer.
+
+    The progress hook is the engine's only re-entry point into a
+    transfer running in ``asyncio.to_thread`` — which is exactly why
+    the cooperative cancel probe lives there. But a stalled transfer
+    stops *calling* the hook, so the probe stops being polled and a
+    user-pressed stop button goes dead (silidm.com: 20 minutes of zero
+    writes, cancel-proof). This monitor flips the dependency: a
+    background thread records a heartbeat on every hook call and, when
+    no heartbeat arrives within ``timeout``, sets ``stalled`` — the
+    cancel probe then returns True *on the next hook call*... which
+    never comes. So the monitor additionally aborts via the hook
+    itself: yt-dlp internally calls the hook from the download loop,
+    and once stalled we raise the cancelled exception straight from the
+    heartbeat thread into the transfer by arming the probe and
+    throttling: the transfer thread is stuck in a socket read, so the
+    only reliable exit is the socket timing out. ``socket_timeout`` is
+    therefore set explicitly alongside (see ``_build_opts``) so a dead
+    connection raises within its window and the hook fires again —
+    sees the armed probe, and unwinds.
+    """
+
+    __slots__ = ("_timeout", "_last_beat", "_stalled", "_timer")
+
+    def __init__(self, timeout: float = STALL_TIMEOUT):
+        self._timeout = max(30.0, float(timeout))
+        self._last_beat = time.monotonic()
+        self._stalled = False
+        self._timer: Optional[threading.Timer] = None
+
+    def beat(self) -> None:
+        """Record progress-hook activity (called from the hook)."""
+        self._last_beat = time.monotonic()
+        if self._stalled:
+            # A late tick after the watchdog fired: the transfer resumed
+            # (socket recovered) before the abort landed. Disarm — the
+            # user can still stop via the cooperative probe.
+            self._stalled = False
+            self._arm()
+
+    @property
+    def stalled(self) -> bool:
+        return self._stalled
+
+    @property
+    def idle_seconds(self) -> float:
+        return time.monotonic() - self._last_beat
+
+    def _arm(self) -> None:
+        if self._timer is not None:
+            self._timer.cancel()
+        remaining = self._timeout - self.idle_seconds
+        if remaining <= 0:
+            remaining = 0.5
+        self._timer = threading.Timer(remaining, self._fire)
+        self._timer.daemon = True
+        self._timer.start()
+
+    def _fire(self) -> None:
+        if self.idle_seconds >= self._timeout:
+            self._stalled = True
+        else:
+            # A beat landed between the last arm and now; re-arm.
+            self._arm()
+
+    def start(self) -> None:
+        self._arm()
+
+    def stop(self) -> None:
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
 
 
 def _try_import_yt_dlp() -> Any:
@@ -237,6 +325,12 @@ class YtDlpEngine(Engine):
             # default is True, but we set it explicitly so the behaviour
             # is contractual rather than inherited.
             "continuedl": options.resume,
+            # 传输停摆看门狗的另一半：yt-dlp 缺省 socket_timeout=20s，但
+            # 那只覆盖 socket 连接/读超时。挂死的传输（CDN 零窗、代理
+            # 黑洞）需要看门狗在 240s 无 tick 时强制中止；socket 超时
+            # 保证「读卡死」最终会以异常形式回到 hook，让武装过的探针
+            # 得以触发。显式声明契约而非依赖库默认值。
+            "socket_timeout": 30,
         }
         # 通用嗅探的 HLS（海量小分片 + 质量参差的第三方 CDN）实测会把
         # yt-dlp 的并发分片下载器打进不稳定状态：silidm.com 播放页
@@ -485,6 +579,14 @@ class YtDlpEngine(Engine):
 
         cancel_check = options.cancel_check
         cancelled_exc = self._cancelled_exception()
+        # 传输停摆看门狗：silidm.com 案例实测挂死的传输连 progress hook
+        # 都不再触发，而 cancel 探针挂在 hook 上 → 停止按钮无效。看门狗
+        # 用时间驱动（threading.Timer），任何 hook tick 都喂心跳；超过
+        # STALL_TIMEOUT 没有心跳就置 stalled —— 探针下次被轮询（socket
+        # 超时把传输带回 hook 后）即中止。live 录制没有自然终点（分片
+        # 永远在等下一段），看门狗对 live 关闭。
+        is_live = item.media_type == MediaType.LIVE
+        stall = None if is_live else _StallMonitor()
 
         def _hook(d: dict) -> None:
             # Cancellation is checked *before* reporting progress so an
@@ -492,11 +594,27 @@ class YtDlpEngine(Engine):
             # hook is installed unconditionally (even without
             # ``on_progress``) because it is the only place we get
             # control back from yt-dlp mid-transfer.
+            if stall is not None:
+                # 先查后喂：stalled 在先——看门狗 fire 后到达的第一个
+                # hook 必须中止传输；若先 beat()，迟到 tick 会把旗子
+                # 解除，中止就永远不会落地（自我打架的竞态）。
+                if stall.stalled:
+                    logger.warning(
+                        "yt-dlp transfer stalled (%.0fs without progress) "
+                        "for %s; aborting so the pipeline can retry",
+                        stall.idle_seconds, item.source_url,
+                    )
+                    raise cancelled_exc(
+                        f"transfer stalled: no progress for {stall.idle_seconds:.0f}s"
+                    )
+                stall.beat()
             if cancel_check is not None and cancel_check():
                 raise cancelled_exc("cancelled by caller")
             _emit_progress(d)
 
         opts["progress_hooks"] = [_hook]
+        if stall is not None:
+            stall.start()
 
         try:
             with self.ytdlp.YoutubeDL(opts) as ydl:
@@ -504,12 +622,21 @@ class YtDlpEngine(Engine):
             self._cleanup_intermediates(item, options)
             return True
         except cancelled_exc as exc:
-            # Must be caught *before* the blanket handler below:
             # DownloadCancelled subclasses Exception, so it would
             # otherwise be logged and reported as a genuine failure.
             # Intermediates are deliberately NOT cleaned up here — the
             # ``.part`` file is what makes resuming possible.
-            logger.info("yt-dlp cancelled for %s: %s", item.source_url, exc)
+            # 停摆中止 ≠ 用户取消：停摆走失败→管道重试路径，事件带
+            # ``stalled`` 标记而非 ``cancelled``，GUI 文案也不会显示
+            # 「已取消」（那会让用户以为是自己按了停止）。
+            stalled_abort = stall is not None and stall.stalled
+            if stalled_abort:
+                logger.warning(
+                    "yt-dlp stall watchdog aborted %s; pipeline will retry",
+                    item.source_url,
+                )
+            else:
+                logger.info("yt-dlp cancelled for %s: %s", item.source_url, exc)
             if on_progress is not None:
                 # fraction 带最后真实进度，而不是 0.0：这是「传输到此为
                 # 止」的状态通告。0.0 会被任何信任 fraction 的消费者
@@ -519,8 +646,11 @@ class YtDlpEngine(Engine):
                 # 守卫条件相同，必然已初始化；尚无 tick（-1）时才用 0.0。
                 last = last_fraction["v"]
                 on_progress(EngineProgress(
-                    fraction=max(last, 0.0), message="cancelled",
-                    extra={"cancelled": True},
+                    fraction=max(last, 0.0),
+                    message=("传输停摆，自动重试" if stalled_abort
+                             else "cancelled"),
+                    extra=({"stalled": True} if stalled_abort
+                           else {"cancelled": True}),
                 ))
             return False
         except Exception as exc:
@@ -561,6 +691,11 @@ class YtDlpEngine(Engine):
                     fraction=0.0, message=f"yt-dlp error: {exc}",
                 ))
             return False
+        finally:
+            # Timer 必须收掉：成功/取消/失败/自愈递归四条路都从这里
+            # 过，不留野线程；自愈递归时外层 stop 先于内层 start，无重叠。
+            if stall is not None:
+                stall.stop()
 
     @staticmethod
     def _sweep_hls_partials(item: MediaItem, options: DownloadOptions) -> None:

@@ -626,3 +626,140 @@ def test_frag_corruption_selfheal_disabled_when_resume_off(tmp_path):
     assert calls["n"] == 1, "resume 关闭时不重试"
 
 
+
+
+# ---- 传输停摆看门狗（2026-11 silidm.com 挂死 20 分钟案例） ------------
+
+
+def _make_live_item_for_stall():
+    return MediaItem(
+        platform=Platform.BILIBILI,
+        item_id="6",
+        title="日常直播",
+        author=Author(name="主播 6"),
+        media_type=MediaType.LIVE,
+        source_url="https://live.bilibili.com/6",
+    )
+
+
+def test_stall_watchdog_aborts_silent_transfer(tmp_path, monkeypatch):
+    """传输停摆超时后，迟到的 hook 触发中止，事件带 stalled 标记。
+
+    silidm.com 实测：并发分片下载器在 75% 处挂死 20 分钟零写入，
+    progress hook 完全不再触发——cancel 探针挂在 hook 上，停止按钮
+    失效。看门狗时间驱动：无 tick 超时后武装，下一个 hook（socket
+    超时把传输带回 hook）即中止。
+    """
+    import time as _time
+
+    from doubi.engines import yt_dlp as ytdlp_mod
+    from doubi.engines.yt_dlp import YtDlpEngine
+    from doubi.core.storage.file_layout import resolve_item_dir
+
+    class _FastMonitor(ytdlp_mod._StallMonitor):
+        def __init__(self, timeout=ytdlp_mod.STALL_TIMEOUT):
+            super().__init__(timeout)
+            self._timeout = 0.15  # 绕过 30s 下限，测试用
+
+    monkeypatch.setattr(ytdlp_mod, "_StallMonitor", _FastMonitor)
+
+    item = _make_item()
+    opts = _make_options(tmp_path)
+    item_dir = resolve_item_dir(item, opts)
+    part_file = item_dir / "video.mp4.part"
+
+    class _FrozenYDL(_FakeYDL):
+        def download(self, urls):
+            part_file.parent.mkdir(parents=True, exist_ok=True)
+            part_file.write_bytes(b"partial")
+            hook = self.opts["progress_hooks"][0]
+            # tick 1：真实进度后传输冻结（不再有任何 hook 调用）
+            hook({"status": "downloading",
+                  "total_bytes": 100, "downloaded_bytes": 40})
+            _time.sleep(0.3)  # 远超 0.15s 看门狗超时
+            # socket 超时把传输带回 hook → 看门狗已武装 → 中止
+            hook({"status": "downloading",
+                  "total_bytes": 100, "downloaded_bytes": 40})
+
+    fake_mod = MagicMock()
+    fake_mod.YoutubeDL = _FrozenYDL
+    engine = YtDlpEngine(yt_dlp_module=fake_mod)
+
+    events: list = []
+    ok = asyncio.run(engine.download(item, opts, on_progress=events.append))
+
+    assert ok is False, "停摆传输必须被看门狗中止"
+    stalled = [e for e in events if (e.extra or {}).get("stalled")]
+    assert stalled, "停摆事件必须带 stalled 标记（区别于用户取消）"
+    assert not [e for e in events if (e.extra or {}).get("cancelled")]
+    assert stalled[-1].fraction == pytest.approx(0.4), (
+        "停摆事件的 fraction 应为最后真实进度"
+    )
+    assert part_file.exists(), "停摆中止不清 .part（保住续传能力）"
+
+
+def test_stall_monitor_unit_semantics():
+    """beat 复位计时器；超时 fire 置位；stop 收线程不留野。"""
+    import time as _time
+
+    from doubi.engines.yt_dlp import _StallMonitor
+
+    mon = _StallMonitor()
+    mon._timeout = 0.05  # 白盒：绕过 30s 生产下限
+    mon.start()
+    _time.sleep(0.12)
+    assert mon.stalled is True, "超时无心跳必须置位"
+
+    mon.beat()
+    assert mon.stalled is False, "迟到心跳复位看门狗"
+    _time.sleep(0.02)
+    assert mon.stalled is False, "心跳后短时间内不再置位"
+
+    mon.stop()
+    _time.sleep(0.12)
+    assert mon.stalled is False, "stop 后计时器不再 fire"
+
+
+def test_socket_timeout_explicit_in_opts(tmp_path):
+    """socket_timeout 显式 30s：挂死读最终以异常回到 hook，武装探针才有机会触发。"""
+    captured = _capture_opts(_make_item(), _make_options(tmp_path))
+    assert captured["socket_timeout"] == 30
+
+
+def test_live_transfer_has_no_stall_monitor(tmp_path, monkeypatch):
+    """直播录制没有自然终点（分片永远在等下一段），看门狗必须关闭。"""
+    from doubi.engines import yt_dlp as ytdlp_mod
+    from doubi.engines.yt_dlp import YtDlpEngine
+
+    created: list = []
+
+    class _CountingMonitor(ytdlp_mod._StallMonitor):
+        def __init__(self, timeout=ytdlp_mod.STALL_TIMEOUT):
+            super().__init__(timeout)
+            created.append(self)
+
+    monkeypatch.setattr(ytdlp_mod, "_StallMonitor", _CountingMonitor)
+
+    item = _make_live_item_for_stall()
+    opts = _make_options(tmp_path)
+    fake_mod = MagicMock()
+    fake_mod.YoutubeDL = _FakeYDL
+    engine = YtDlpEngine(yt_dlp_module=fake_mod)
+
+    ok = asyncio.run(engine.download(item, opts, on_progress=None))
+    assert ok is True
+    assert created == [], "live 传输不创建看门狗"
+
+
+# ---- 传输停摆看门狗（2026-11 silidm.com 挂死 20 分钟案例） ------------
+
+
+def _make_live_item_for_stall():
+    return MediaItem(
+        platform=Platform.BILIBILI,
+        item_id="6",
+        title="日常直播",
+        author=Author(name="主播 6"),
+        media_type=MediaType.LIVE,
+        source_url="https://live.bilibili.com/6",
+    )

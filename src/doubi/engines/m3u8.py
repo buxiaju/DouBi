@@ -58,6 +58,49 @@ _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 _SEGMENT_MAX_ATTEMPTS = 3
 _SEGMENT_RETRY_BACKOFF = 0.5
 
+# master playlist（#EXT-X-STREAM-INF）递归深度上限。规范上是一层，但
+# 不可信站点可能套娃；两三层后还没到媒体播放列表就该报错而不是无限递归。
+_MASTER_RECURSION_LIMIT = 3
+
+
+def _is_master_playlist(text: str) -> bool:
+    """播放列表是否为 master（多码率变体）而非媒体分片列表。"""
+    return "#EXT-X-STREAM-INF" in text
+
+
+def _pick_best_variant(text: str, base_url: str) -> str:
+    """解析 master playlist，返回带宽最高的变体播放列表绝对 URL。
+
+    每个 ``#EXT-X-STREAM-INF`` 的 URI 是紧随其后的第一条非空非注释行
+    （HLS 规范 §4.3.4.2）。只关心 ``BANDWIDTH``——码率最高的变体通常
+    就是源站标注的最高画质，与用户「最高质量」的选项语义一致。
+
+    Raises:
+        ValueError: 有 STREAM-INF 却没有任何变体 URI（坏列表）。
+    """
+    lines = [ln.strip() for ln in text.splitlines()]
+    best_bw, best_uri = -1, ""
+    for i, line in enumerate(lines):
+        if not line.startswith("#EXT-X-STREAM-INF"):
+            continue
+        bandwidth = 0
+        for attr in line.split(":", 1)[1].split(","):
+            key, _, value = attr.partition("=")
+            if key.strip().upper() == "BANDWIDTH":
+                try:
+                    bandwidth = int(float(value.strip().strip('"')))
+                except ValueError:
+                    bandwidth = 0
+        for nxt in lines[i + 1:]:
+            if not nxt or nxt.startswith("#"):
+                continue
+            if bandwidth > best_bw:
+                best_bw, best_uri = bandwidth, nxt
+            break
+    if not best_uri:
+        raise ValueError("master playlist has no variant URI after #EXT-X-STREAM-INF")
+    return urljoin(base_url, best_uri)
+
 # Common ffmpeg error patterns that indicate the HLS stream is valid
 # but unplayable with current settings.
 _FFMPEG_FATAL = (
@@ -407,11 +450,25 @@ class M3u8Engine(Engine):
             on_progress(EngineProgress(fraction=1.0, message="m3u8 下载完成"))
         return True
 
-    async def _fetch_segments(self, aiohttp, url: str, options: DownloadOptions) -> list[str]:
+    async def _fetch_segments(
+        self, aiohttp, url: str, options: DownloadOptions, *, _depth: int = 0,
+    ) -> list[str]:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, proxy=options.proxy) as resp:
-                resp.raise_for_status()
-                text = await resp.text()
+            text = await self._fetch_playlist_text(session, url, options)
+
+        # master playlist（多码率变体）：非 ``#`` 行是**变体播放列表的
+        # URI**而不是分片——把当分片下载产出的会是几个 m3u8 文本拼成的
+        # 垃圾「视频」。选带宽最高的变体，递归到真正的媒体播放列表。
+        if _is_master_playlist(text):
+            if _depth >= _MASTER_RECURSION_LIMIT:
+                raise ValueError(
+                    f"master playlist recursion exceeded {_MASTER_RECURSION_LIMIT} levels"
+                )
+            variant_url = _pick_best_variant(text, url)
+            logger.info("[m3u8] master playlist → variant %s", variant_url)
+            return await self._fetch_segments(
+                aiohttp, variant_url, options, _depth=_depth + 1,
+            )
 
         segments: list[str] = []
         for line in text.splitlines():
@@ -426,6 +483,12 @@ class M3u8Engine(Engine):
             # download mid-way.
             segments.append(urljoin(url, line))
         return segments
+
+    @staticmethod
+    async def _fetch_playlist_text(session, url: str, options: DownloadOptions) -> str:
+        async with session.get(url, proxy=options.proxy) as resp:
+            resp.raise_for_status()
+            return await resp.text()
 
     async def _download_and_concat(
         self,

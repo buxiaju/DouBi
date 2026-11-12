@@ -791,6 +791,9 @@ class DownloadPipeline:
         "aiohttp is required",
         "nm3u8dl",
         "无法创建输出目录",
+        # yt-dlp 停摆看门狗中止（engines/yt_dlp.py）：让重试日志携带
+        # 真实原因，而不是泛化的 "engine returned False"。
+        "传输停摆",
     )
 
     @classmethod
