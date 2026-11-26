@@ -398,11 +398,26 @@ import sys
 # Playwright 浏览器二进制位置：onefile/onedir 解压后，浏览器文件夹在
 # 临时目录的 ``playwright_browsers`` 子目录下（由 build_exe.py 的
 # ``--add-data`` 注入）。设环境变量让 Playwright 找到。
+#
+# 0.4.0 补丁（实锤案例：用户机器登录报「Executable doesn't exist at
+# _internal\\playwright\\driver\\package\\.local-browsers\\...」）：node
+# driver 只在 ``PLAYWRIGHT_BROWSERS_PATH="0"`` 时才找包内 .local-browsers
+# ——精简构建没有捆绑内核，这个目录必然不存在；而 "0" 可能来自用户
+# 终端会话里为别的项目设的临时环境变量，应用不该被它拖死。规则：
+#   * 包内有捆绑内核 → 钉死到包内目录（优先级最高）
+#   * 否则 env 为 "0" / 相对路径 / 指向不存在的目录 → 清掉，
+#     回落 node 默认 %LOCALAPPDATA%\\ms-playwright——正好是功能插件
+#     安装内核的目录（plugin_manager._default_browsers_dir）
+#   * env 指向真实存在的绝对目录 → 尊重用户，不动
 try:
     _base = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
     _browsers = os.path.join(_base, "playwright_browsers")
     if os.path.isdir(_browsers):
         os.environ["PLAYWRIGHT_BROWSERS_PATH"] = _browsers
+    else:
+        _env = os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or ""
+        if not _env or _env == "0" or not os.path.isdir(_env):
+            os.environ.pop("PLAYWRIGHT_BROWSERS_PATH", None)
 except Exception:
     pass
 

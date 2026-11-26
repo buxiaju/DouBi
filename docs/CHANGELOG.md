@@ -84,6 +84,29 @@
 > | local 全量 | 1612 passed / 8 skipped | **1788 passed / 8 skipped** | +176（插件管理 14 + 打包守门 24 + 下载页右键 3 + 统计条/更新检查等） |
 > | 安装包 | 230.9 MB | **74.7 MB** | -67% |
 
+### 五、发布日补丁：`PLAYWRIGHT_BROWSERS_PATH="0"` 环境免疫（实锤修复）
+
+**症状**：用户装好功能插件后登录报「Executable doesn't exist at
+`...\_internal\playwright\driver\package\.local-browsers\chromium-1234\...`」，
+但内核明明在 `%LOCALAPPDATA%\ms-playwright` 里。
+
+**根因**：node driver 只在 `PLAYWRIGHT_BROWSERS_PATH="0"` 时才找包内
+`.local-browsers`（相对包语义）。精简构建没有捆绑内核，这个目录必然
+不存在；而 `"0"` 可能来自用户终端会话里为其他项目设的临时环境变量。
+设置页探针（`_browsers_dir`）不识别 `"0"`、照走 LOCALAPPDATA → 报
+「已安装」，登录时 driver 却找不到内核——两处对 env 的解读不一致。
+
+**修法**（双层）：
+
+1. **冻结启动壳**：未捆绑内核时，env 为 `"0"` / 相对路径 / 指向不存在
+   目录 → 直接 pop，回落 node 默认 LOCALAPPDATA（正好是插件安装目录）；
+   env 指向真实存在的绝对目录则尊重用户。包内有捆绑内核时仍钉死包内目录。
+2. **探针对齐**：`_browsers_dir()` 把 `"0"` 当没设，与登录时的实际查找
+   语义保持一致。
+
+**判据**：dry-run 验证干净环境下 driver 计算路径即 LOCALAPPDATA 且
+chrome.exe 存在；新增 4 个守门测试（launcher 清理规则 + 探针三态）。
+
 ## 0.3.13 (2026-11-12) — tag 后三批功能随安装包首发：嗅探代理 + 停摆看门狗 + m3u8 AES/MAP
 
 0.3.12 发版（commit 055c6cd / tag v0.3.12 / 安装包 230.9 MB）之后、打包之前，

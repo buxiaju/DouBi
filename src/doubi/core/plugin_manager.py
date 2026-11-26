@@ -71,11 +71,17 @@ class PluginStatus:
 
 
 def _browsers_dir() -> Optional[Path]:
-    """定位 ms-playwright 目录（与 scripts/build_exe.py 同逻辑）。"""
+    """定位 ms-playwright 目录（与 scripts/build_exe.py 同逻辑）。
+
+    ``PLAYWRIGHT_BROWSERS_PATH="0"`` 特判：这个值在 playwright 语义里是
+    「用包内 .local-browsers」，对冻结版必然失效（实锤：设置页探针据此
+    报「已安装」，登录时 driver 却找不到内核——两边对 env 的解读不一致）。
+    探针把它当没设，走 LOCALAPPDATA 默认目录，与登录时的实际查找保持一致。
+    """
     import os
 
     env = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
-    if env:
+    if env and env != "0":
         p = Path(env)
         if p.is_dir():
             return p

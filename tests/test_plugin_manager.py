@@ -14,13 +14,16 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from doubi.core.plugin_manager import (
     PluginInstallProgress,
     PluginInstallResult,
     PluginStatus,
+    _browsers_dir,
     _parse_percent,
     install_sniffer_plugin,
     probe_sniffer_plugin,
@@ -93,6 +96,42 @@ class _ProbeCase(unittest.TestCase):
         # is_dir() 返回 truthy MagicMock。这里只需断言 ready 路径成立。
         self.assertTrue(status.ready)
         self.assertIn("已安装", status.summary())
+
+
+class _BrowsersDirCase(unittest.TestCase):
+    """_browsers_dir 对 PLAYWRIGHT_BROWSERS_PATH 的判定。"""
+
+    def test_env_zero_is_ignored_not_returned(self):
+        """env="0" 在 playwright 语义里是包内 .local-browsers——对冻结版
+        必然失效；探针必须把它当没设，走 LOCALAPPDATA 默认候选，绝不能
+        把 Path("0") 当答案（否则设置页报「已安装」而登录时找不到内核）。"""
+        with mock.patch.dict(
+            "os.environ", {"PLAYWRIGHT_BROWSERS_PATH": "0"}
+        ):
+            result = _browsers_dir()
+        self.assertIsNot(result, Path("0"))
+        # 走了默认候选（本机有内核则返回它；CI 无内核则 None）——
+        # 无论哪种，都不会是字面量 "0"。
+        if result is not None:
+            self.assertNotEqual(str(result), "0")
+
+    def test_existing_custom_dir_is_respected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(
+                "os.environ", {"PLAYWRIGHT_BROWSERS_PATH": tmp}
+            ):
+                result = _browsers_dir()
+        self.assertEqual(result, Path(tmp))
+
+    def test_nonexistent_dir_falls_through_to_default(self):
+        with mock.patch.dict(
+            "os.environ",
+            {"PLAYWRIGHT_BROWSERS_PATH": r"C:\definitely\not\here\xyz"},
+        ):
+            result = _browsers_dir()
+        # 本机有内核 → 返回默认 LOCALAPPDATA 目录；CI → None。都不应
+        # 是那个不存在的路径。
+        self.assertNotEqual(result, Path(r"C:\definitely\not\here\xyz"))
 
 
 class _InstallFlowCase(unittest.TestCase):
