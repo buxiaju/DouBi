@@ -4,6 +4,7 @@
 >
 > | 版本 | 日期 | 一句话摘要 |
 > | --- | --- | --- |
+> | 0.4.0 | 2026-11-26 | 安装包 230.9 MB → **74.7 MB**（精简构建 + 大件插件化）+ N_m3u8DL-CLI 随包 + 多选批量下载 + 右键打开文件夹 + 启动更新检查 + 文案打磨 |
 > | 0.3.13 | 2026-11-12 | 0.3.12 tag 后三个功能 commit 随安装包首发（嗅探代理 + 停摆看门狗 + m3u8 AES/MAP/master playlist + aria2 取消进度对齐） |
 > | 0.3.12 | 2026-11-12 | 安装包瘦身 + GUI 收藏页 + 暂停续传进度条修复 + 通用引擎 HLS 稳定性 + 嗅探层代理 + 下载引擎稳定性加固 ×2 |
 > | 0.3.11 | 2026-11-11 | 功能三连（章节三端/解析历史/剪贴板开关）+ GUI 缺口收口 + 主题订阅泄漏修复 |
@@ -25,6 +26,63 @@
 > - **测试基线**（passed / skipped）→ 见每版段尾的「统计」表，或者直接读 [BUILD.md](BUILD.md) §6.5 / §7 的本地全量 + ci 双口径脚本。
 > - **构建产物基线**（体积 / SHA256）→ 见 [BUILD.md](BUILD.md) §6.5 的「实测基线速查表」。
 > - **检索**：编辑器用 `Ctrl+F` 搜版本号（如 `0.3.6` 或 `M6.48`）是最快的跳转方式。
+
+## 0.4.0 (2026-11-26) — 安装包瘦身到 100 MB 以内：大件插件化 + 精简构建 + 体验打磨
+
+本版是一次**分发形态重构**：默认安装包从 230.9 MB 压到 **74.7 MB**（压缩比
+约 0.303），代价由用户按需承担——两个大件（Chromium 嗅探内核、N_m3u8DL-CLI）
+分别走「插件按需安装」与「随包分发」两条路线。
+
+### 一、安装包 230.9 MB → 74.7 MB 的三层拆解
+
+| 层 | 内容 | 手段 | 收益 |
+| --- | --- | --- | --- |
+| ① 浏览器内核 | playwright_browsers 432 MB（chromium + ffmpeg） | 移出默认包，降级为「功能插件」，用户在设置页一键安装 | -432 MB |
+| ② Playwright 本体 | Python 壳 5.2 MB + node 驱动 104 MB | Python 壳从 frozen 包剔除（pyproject 移到 `sniffer` extra），node 驱动保留（它既是运行时又是插件安装执行器） | -104 MB |
+| ③ Qt 死重 | Quick/Qml/Pdf/VirtualKeyboard/opengl32sw 等 22 个 DLL + 翻译 | `_prune_qt_dead_weight()` 构建后清理（保留 zh_CN/en 翻译） | -39 MB |
+
+精简 onedir 产物 727 MB → **236 MB**，NSIS LZMA solid 压缩后安装包
+**74.7 MB**。`--with-sniffer` 开关保留：特殊分发可回退旧的全量行为。
+
+### 二、功能插件卡（设置 → 功能插件）
+
+- `core/plugin_manager.py`：`probe_sniffer_plugin()` 毫秒级状态探测 +
+  `install_sniffer_plugin()` 工作线程安装，事件流（`PluginInstallProgress`）
+  覆盖 下载 → 解压 → 落盘 全阶段
+- GUI 三层反馈：进度条（0–100%）+ 阶段文案 + 最近一行安装日志；
+  完成后自动重探状态、按钮从「安装插件」变「重新安装」
+- 冻结版路径解析：优先用包内 `driver/node.exe package/cli.js install
+  chromium`，缺失时回退 `python -m playwright install chromium`
+- 嗅探降级文案（`sniffer.py` / `browser_login.py`）统一指向设置页插件卡，
+  不再让用户自己猜 pip 命令
+
+### 三、N_m3u8DL-CLI 随包分发
+
+- `N_m3u8DL-CLI_v3.0.2.exe`（1.37 MB）随安装包进 `_internal\tools\nm3u8dl\`
+- 0.3.13 之前 CLI 缺失导致 HLS 回退到 yt-dlp 慢路径；随包后恢复**主力路径**
+- 隔离安装实测：从安装目录运行，日志确认 `using CLI: ...\_internal\tools\nm3u8dl\...`
+
+### 四、体验与文案
+
+- **多选批量下载**（搜索页 / 热榜页，移植自 BiliMusic-Desktop）：
+  表格多选 → 底部操作条「已选 N 项 / 批量下载选中项 / 退出多选」；
+  容器行批量语义下直接计入 skipped，不逐行弹确认
+- **下载页右键菜单**：「打开所在文件夹」（Windows `explorer /select` 直接
+  选中文件）/「打开输出目录」；文件未落盘时「打开所在文件夹」自动置灰
+- **启动更新检查**：1.5s 静默后台查 GitHub Releases（双镜像回退），
+  有新版弹 InfoBar + 复制 Release 链接；设置页 `update_check_on_startup`
+  开关可关，「检查更新」按钮不受开关影响
+- **历史页统计条**：近 7 天平台分布 / 最近下载数 / Top 作者（数据视图
+  借鉴 BiliMusic-Desktop；失败不拖垮主表格）
+- **文案打磨**：「产物」→「视频文件」、「不可用，先展开」→「请先展开合集」、
+  「已重新下载」→「已重新入队」等易误解表述修正
+
+### 统计
+
+> | 口径 | 0.3.13 | **0.4.0** | 差量 |
+> | --- | --- | --- | --- |
+> | local 全量 | 1612 passed / 8 skipped | **1788 passed / 8 skipped** | +176（插件管理 14 + 打包守门 24 + 下载页右键 3 + 统计条/更新检查等） |
+> | 安装包 | 230.9 MB | **74.7 MB** | -67% |
 
 ## 0.3.13 (2026-11-12) — tag 后三批功能随安装包首发：嗅探代理 + 停摆看门狗 + m3u8 AES/MAP
 

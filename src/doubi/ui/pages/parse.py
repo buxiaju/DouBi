@@ -1012,7 +1012,7 @@ def build_parse_widgets():
                 # entry; users who want a section's episodes should use
                 # the main 「下载选中」 button instead.
                 single.setEnabled(False)
-                single.setText("作为单个视频下载（不可用，先展开）")
+                single.setText("作为单个视频下载（请先展开合集）")
             chosen = menu.exec(self.result_table.viewport().mapToGlobal(pos))
             if chosen is None:
                 return

@@ -68,7 +68,13 @@ python scripts/run_full_tests.py --mode gui-slow
 2. **CHANGELOG 补段落**：用「症状 / 根因 / 修法 / 判据」四段式写；速查表加行；删速查表里的「暂未收录」提示
 3. **打 tag**：`annotated`，单行 `X.Y.Z — <卖点>`，**不要**长 commit message 格式
 4. **推远端**：`git push origin vX.Y.Z`（Gitee）+ `git push Github vX.Y.Z`（GitHub），两个都要显式推
-5. **打包**：`python scripts/build_installer.py`（7-8 分钟）
+5. **打包**：`python scripts/build_installer.py`（7-8 分钟）。
+   0.3.14 起默认**最精简**：不捆绑 Chromium 内核（省约 430MB），保留
+   playwright 客户端 + node 驱动（嗅探插件的运行时执行器与安装器）。
+   通用嗅探降级为可选插件，用户在设置页「功能插件」一键安装（内核落
+   `LOCALAPPDATA/ms-playwright`）。回退旧行为：`build_installer.py`
+   透传 `--with-sniffer` 给 `build_exe.py`。构建后自动修剪 Qt 死重
+   （Quick/Qml/Pdf/opengl32sw/96 国翻译，约 39MB）。
 6. **SHA256 侧签** + **隔离静默验收**（NSIS /S，0.3.5 起不再卡在确认框，但仍要验）
 7. **手工建 Release**：Gitee + GitHub 两个平台都要建
 

@@ -44,6 +44,10 @@ CATCH_LITE_JS = ROOT / "src" / "doubi" / "platforms" / "generic" / "catch_lite.j
 # N_m3u8DL 自带的 ffmpeg 构建（10.91 MB）——发布版的 ffmpeg 来源，
 # 用来替掉 imageio_ffmpeg 轮子里那个 83.6 MB 的等效二进制。
 FFMPEG_EXE = ROOT / "tools" / "nm3u8dl" / "ffmpeg.exe"
+# N_m3u8DL-CLI 主程序（1.37 MB）。0.3.13 之前只带 ffmpeg 不带 CLI，
+# 发布版 nm3u8dl 引擎永远「binary not found」降级到 m3u8 引擎——
+# 开发机上能跑是因为引擎按 cwd 找到了仓库 tools/ 里的那份。
+NMCCLI_EXE = ROOT / "tools" / "nm3u8dl" / "N_m3u8DL-CLI_v3.0.2.exe"
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +145,28 @@ EXCLUDE_MODULES = [
     "matplotlib",
     "pandas",
     "tkinter",
+    # --- 0.3.14 实测的死重（旧 dist 里有、运行时永不加载） ---
+    # mypy + ast_serialize：mypy 的编译扩展（.pyd 约 4MB），来源是某
+    #     个 hook 的依赖推导；GUI 全量 import 后 sys.modules 里没有它们。
+    # Cryptodome：pycryptodome。m3u8 的 AES-128 解密走 cryptography
+    #     （延迟导入），yt-dlp 对 pycryptodome 也只有可选路径 + 纯 Python
+    #     回退。两个加密库留一个就够，留被真正 import 的那个。
+    "mypy",
+    "ast_serialize",
+    "Cryptodome",
+]
+
+#: 仅 GUI 构建排除的模块。
+#:
+#: 与 EXCLUDE_MODULES 的区别：EXCLUDE_MODULES 是「整个 src 都不许
+#: import」的硬禁令（test_packaging_slim 会扫全源码）；这里的模块
+#: 被 src 里的**非 GUI 入口**合法使用（doubi/server/schemas.py 用
+#: pydantic 定义 REST 模型），只是冻结 GUI 进程永不走到那条 import
+#: 路径——GUI exe 只跑 ui，REST/MCP 服务走 pip 安装形态。
+#: pydantic + pydantic_core 合计约 11MB。
+GUI_ONLY_EXCLUDES = [
+    "pydantic",
+    "pydantic_core",
 ]
 
 
@@ -284,6 +310,75 @@ def _browser_add_data(browsers_dir: Path, sep: str) -> list[str]:
         args.append(f"{child}{sep}{dst}")
     return args
 
+#: 构建后修剪：按文件名删除的 Qt DLL（大小写敏感，与 dist 实际文件名一致）。
+#: 只删「纯 Widgets 应用确定用不到」的运行时 DLL；QtCore/Gui/Widgets/Svg/
+#: Network/Xml 及所有 MSVC 运行库绝不进名单。
+_PRUNE_DLLS = (
+    "Qt6Quick.dll",
+    "Qt6Qml.dll",
+    "Qt6QmlMeta.dll",
+    "Qt6QmlModels.dll",
+    "Qt6QmlWorkerScript.dll",
+    "Qt6QmlCompilerPlus.dll",     # 部分版本会带
+    "Qt6QuickWidgets.dll",
+    "Qt6QuickControls2.dll",
+    "Qt6QuickControls2Impl.dll",
+    "Qt6QuickTemplates2.dll",
+    "Qt6Quick3D.dll",
+    "Qt6Quick3DRuntimeRender.dll",
+    "Qt6Quick3DUtils.dll",
+    "Qt6Pdf.dll",
+    "Qt6PdfWidgets.dll",
+    "Qt6OpenGL.dll",
+    "Qt6OpenGLWidgets.dll",
+    "Qt6VirtualKeyboard.dll",
+    "opengl32sw.dll",             # Mesa 软件渲染回退（20 MB）
+    "d3dcompiler_47.dll",         # Qt 自带的 shader 编译器（Quick/3D 才用）
+    "chrome_elf.dll",             # WebEngine 残留（若钩子拉了它）
+    "libEGL.dll",                 # 仅 WebEngine/Quick 需要；Widgets 走系统 GDI
+    "libGLESv2.dll",
+)
+
+#: 修剪后保留的翻译文件（Qt 自身 UI 文案：对话框按钮 / 菜单右键项等）。
+#: zh_CN 之外留 en 作为回退——Qt 在 .qm 缺 key 时自动落回英文源串。
+_KEEP_TRANSLATIONS = ("qt_zh_CN.qm", "qtbase_zh_CN.qm", "qt_en.qm", "qtbase_en.qm")
+
+
+def _prune_qt_dead_weight(pyside_dir: Path) -> None:
+    """删除 dist 里 PySide6 的死重 DLL 与多余翻译。
+
+    存在才删、逐项打印体积，最后汇总省了多少。目录不存在（onefile /
+    结构变化）时静默跳过——修剪是锦上添花，不能让构建失败。
+    """
+    if not pyside_dir.is_dir():
+        return
+    saved = 0
+    for name in _PRUNE_DLLS:
+        f = pyside_dir / name
+        if f.is_file():
+            size = f.stat().st_size
+            f.unlink()
+            saved += size
+            print(f"修剪 Qt 死重：{name}（{size / 1048576:.1f} MB）")
+
+    trans = pyside_dir / "translations"
+    if trans.is_dir():
+        for f in sorted(trans.rglob("*.qm")):
+            if f.name in _KEEP_TRANSLATIONS:
+                continue
+            size = f.stat().st_size
+            f.unlink()
+            saved += size
+        # 删空的子目录（categories/help 等）
+        for sub in sorted(trans.iterdir(), reverse=True):
+            if sub.is_dir() and not any(sub.iterdir()):
+                sub.rmdir()
+        print(f"翻译文件保留：{', '.join(_KEEP_TRANSLATIONS)}")
+
+    if saved:
+        print(f"Qt 死重修剪完成：共省 {saved / 1048576:.1f} MB")
+
+
 # PyInstaller 只接受「脚本文件路径」作为入口，没有 --module 选项
 # （历史上也没有；6.x 直接报 unrecognized arguments）。而直接把
 # src/doubi/ui/app.py 当入口会触发 BUILD.md §5.1 的相对导入崩溃：
@@ -326,6 +421,12 @@ def main() -> int:
     parser.add_argument(
         "--console", action="store_true", help="带控制台窗口（默认 GUI）",
     )
+    parser.add_argument(
+        "--with-sniffer", action="store_true",
+        help="捆绑 playwright 与 Chromium 内核（0.3.14 起默认**不**捆绑——"
+             "最精简安装包，通用嗅探降级为可选插件，用户在设置页一键安装，"
+             "内核落在用户 LOCALAPPDATA。本开关用于回退旧行为或特殊分发）。",
+    )
     args = parser.parse_args()
 
     if not ICON.is_file():
@@ -344,6 +445,15 @@ def main() -> int:
         # 成功，但发布版里没有 ffmpeg，问题要等到用户下载 HLS 才暴露。
         print(
             f"缺少 {FFMPEG_EXE}。它是发布版唯一的 ffmpeg 来源，"
+            "从 N_m3u8DL-CLI 发布包解压到 tools/nm3u8dl/ 后重试。",
+            file=sys.stderr,
+        )
+        return 1
+    if not NMCCLI_EXE.is_file():
+        # 同上：缺 CLI 时构建照样成功，但发布版 nm3u8dl 引擎会静默
+        # 「binary not found」降级，HLS 下载少一条主力路径。
+        print(
+            f"缺少 {NMCCLI_EXE}。它是发布版 nm3u8dl 引擎的主程序，"
             "从 N_m3u8DL-CLI 发布包解压到 tools/nm3u8dl/ 后重试。",
             file=sys.stderr,
         )
@@ -373,12 +483,6 @@ def main() -> int:
         # 第三方 Qt 库的隐藏资源 / 插件
         "--collect-all", "qframelesswindow",
         "--collect-all", "qfluentwidgets",
-        # ---- Playwright + Chromium 浏览器二进制 ----
-        # generic adapter 的 Sniffer 调 ``playwright.chromium.launch()``
-        # 需要浏览器二进制，所以整个 ms-playwright 目录随包分发（除
-        # headless_shell，见 _browser_add_data）。启动壳在运行时设
-        # ``PLAYWRIGHT_BROWSERS_PATH`` 指向它。
-        "--collect-all", "playwright",
         # ---- aiohttp（HLS 下载的唯一可行路径） ----
         # 捆绑的 tools/nm3u8dl/ffmpeg.exe 编译时未启用任何 TLS 后端，
         # 喂它 https 播放列表会直接 "Protocol not found" 退出。现实中
@@ -403,6 +507,11 @@ def main() -> int:
         # ``-version`` 可跑）而不是 imageio_ffmpeg 轮子里的那个（83.6 MB）：
         # 同样一个可执行文件，省 72.7 MB。imageio_ffmpeg 随之进排除列表。
         "--add-data", f"{FFMPEG_EXE}{sep}tools/nm3u8dl",
+        # ---- N_m3u8DL-CLI 主程序 ----
+        # 引擎 _find_cli 的 script_dir 候选（__file__ 上溯三级 =
+        # _internal）会在这里找到它。0.3.13 之前漏打，发布版
+        # nm3u8dl 引擎永远「binary not found」降级。
+        "--add-data", f"{NMCCLI_EXE}{sep}tools/nm3u8dl",
         # 自己写的进 src 目录的代码
         "--paths", str(ROOT / "src"),
         # 平台适配器靠 import 副作用自注册，PyInstaller 静态分析
@@ -410,27 +519,53 @@ def main() -> int:
         "--collect-submodules", "doubi",
         str(launcher),
     ]
+    if args.with_sniffer:
+        # ---- Playwright + Chromium 浏览器二进制（--with-sniffer 才捆绑） ----
+        # 0.3.14 起默认最精简：不收 Chromium 内核（430 MB），保留
+        # playwright 客户端 + 自带 node 驱动（约 107 MB）——驱动既是
+        # 运行时执行器，也是插件安装器的下载器（冻结版没有 python -m，
+        # core/plugin_manager._browser_install_cmd 调驱动 cli.js 装内核）。
+        # --with-sniffer 用于回退旧行为 / 特殊分发。
+        cmd += [
+            "--collect-all", "playwright",
+        ]
+        # 捆绑模式额外收内核
+        cmd.extend(_browser_add_data(browsers_dir, sep))
+        print(f"捆绑 Playwright 浏览器内核：{browsers_dir}")
+    else:
+        # 最精简（默认）：仍要 --collect-all playwright（客户端 5MB +
+        # node 驱动 102MB），只跳过内核 --add-data。
+        cmd += [
+            "--collect-all", "playwright",
+        ]
+        print(
+            "体积精简：不捆绑 Chromium 内核（通用嗅探降级为可选插件，"
+            "用户在设置页一键安装；playwright 客户端 + node 驱动保留，"
+            "它们是插件安装的执行器）"
+        )
 
     for mod in EXCLUDE_MODULES:
         cmd.insert(4, mod)
         cmd.insert(4, "--exclude-module")
 
-    # ---- Chromium 浏览器二进制 ----
+    # GUI 构建专属排除（server 栈；见 GUI_ONLY_EXCLUDES 注释）
+    for mod in GUI_ONLY_EXCLUDES:
+        cmd.insert(4, mod)
+        cmd.insert(4, "--exclude-module")
+
+    # ---- Chromium 浏览器二进制（仅 --with-sniffer 捆绑模式） ----
     # ms-playwright 目录位置：
     #   Windows: %USERPROFILE%\AppData\Local\ms-playwright
     #   POSIX:   ~/.cache/ms-playwright
     # 该目录下有 chromium-XXXX / ffmpeg-XXXX 等子目录，整目录打包进去。
-    browsers_dir = _find_playwright_browsers_dir()
-    if browsers_dir is None:
+    # 默认（最精简）跳过：内核由插件安装器在用户机上按需下载。
+    browsers_dir = _find_playwright_browsers_dir() if args.with_sniffer else None
+    if args.with_sniffer and browsers_dir is None:
         print(
-            "警告：未找到 Playwright 浏览器目录（ms-playwright）。generic adapter"
-            " 的嗅探功能在运行时不可用。如要完整功能：pip install doubi[gui] "
-            "&& playwright install chromium，然后重新构建。",
+            "警告：未找到 Playwright 浏览器目录（ms-playwright），"
+            "捆绑模式将没有内核，运行时嗅探不可用。",
             file=sys.stderr,
         )
-    else:
-        cmd.extend(_browser_add_data(browsers_dir, sep))
-        print(f"打包 Playwright 浏览器：{browsers_dir}")
     if args.onedir:
         cmd.insert(4, "--onedir")
     else:
@@ -448,6 +583,28 @@ def main() -> int:
         launcher.unlink(missing_ok=True)
     if rc != 0:
         return rc
+
+    # ---- 构建后修剪（0.3.14）：EXCLUDE_MODULES 拦不到的 Qt 死重 ----
+    # PyInstaller 的 Qt 钩子按「插件依赖」工作：platforms 插件引用
+    # Qt6Gui，imageformats 引用 Qt6Pdf，virtualkeyboard 插件引用
+    # Qt6Quick/Qml……于是这些 DLL 连带 96 个语言的翻译文件被硬拉进
+    # dist，哪怕 Python 导入图里根本没有它们（EXCLUDE_MODULES 只作用于
+    # 导入图）。实测 dist/doubi-gui/_internal/PySide6 里躺着：
+    #   Qt6Quick/Qml/QmlMeta/QmlModels/QmlWorkerScript (约 13.6 MB)
+    #   Qt6Pdf (4.5 MB) / Qt6OpenGL (1.9 MB) / Qt6VirtualKeyboard
+    #   opengl32sw.dll (20 MB，Mesa 软件渲染回退)
+    #   translations/ 96 个 .qm（约 6.7 MB，中文用户只需要 2 个）
+    # 修剪安全性依据（同 EXCLUDE_MODULES 的「sys.modules 判据」）：
+    #   1. grep 全 src 无任何 Quick/Qml/Pdf/VirtualKeyboard import；
+    #   2. 探针 import doubi.ui.app 后 sys.modules 无上述模块；
+    #   3. 纯 Widgets 应用不发起 OpenGL 调用，软件渲染回退永远走不到
+    #      （qfluentwidgets 的圆角/模糊是 QPainter + QSS，不依赖 QSurface）。
+    # 误删兜底：修剪名单与 EXCLUDE_MODULES 同源维护，删错模块会在
+    # 首次启动/切换主题时立刻崩溃——发版前的隔离静默验收
+    # （NSIS /S + 手工开 GUI）就是这道闸。
+    dist_dir = ROOT / "dist" / "doubi-gui"
+    if args.onedir:
+        _prune_qt_dead_weight(dist_dir / "_internal" / "PySide6")
 
     # 清理临时构建目录，节省磁盘
     build = ROOT / "build" / "doubi-gui"

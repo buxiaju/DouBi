@@ -745,6 +745,7 @@ multidict / yarl / propcache / frozenlist 各 1 个），这是 https 分片下�
 | 0.3.11 | 400,655,011 B / 382.1 MB | `938da446…` | 45.8s | 3.3s | 装后 1413 文件 / 1177.7 MB（Playwright chromium-1254 进包 + 压缩率 32.4%）；CI 已移除，手工打包 |
 | 0.3.12 | 242,112,099 B / 230.9 MB | `c43e73b2…` | — | — | 瘦身版：ms-playwright 按 browsers.json 过滤 revision（跳过 chromium-1254/ffmpeg-1013），onedir 1.2GB→727MB / 1101 文件，压缩率 31.8%，CRC `0x48AD8ABA` |
 | 0.3.13 | 242,161,067 B / 230.9 MB | `d6eba420…` | — | — | tag 后三批功能随包首发，纯打包版本；onedir 727MB / 1101 文件不变，压缩率 31.8%，CRC `0x6CD0ECAA`；首次构建被 SAFE_DELETE 拦旧 dist/doubi-gui（1101 文件 > 50 阈值），mv 改名让位后重跑成功 |
+| 0.4.0 | 78,317,610 B / 74.7 MB | `6e55b5ec…` | — | — | 精简版首发：不捆绑 Chromium（插件按需装）+ N_m3u8DL-CLI 随包；onedir 237MB（PySide6 死重 DLL 22 个 + 多余翻译 69 个已修剪），压缩率 31.7%；翻译修剪步骤被 SAFE_DELETE 拦（50 文件阈值，turn 累计计数），构建后手工 `find -delete` 补完 |
 
 > **基线共识**：所有版本实测都达成：CRC footer 写入正确、`*headless_shell*` 与 `*webengine*` 真实文件残留 0；安装包体积跳变先按文件排查（多半是浏览器目录版本漂移），不要急着改打包配置。
 

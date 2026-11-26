@@ -98,3 +98,34 @@ def test_settings_factory_returns_widget_class():
     # Old card methods preserved.
     assert hasattr(cls, "_build_account_card")
     assert hasattr(cls, "_build_card")
+    # 0.3.14 插件卡（「功能插件」）与更新卡的公共方法。
+    assert hasattr(cls, "_build_plugins_card")
+    assert hasattr(cls, "_on_install_sniffer")
+    assert hasattr(cls, "_refresh_plugin_status")
+    assert hasattr(cls, "_build_update_card")
+
+
+# -----------------------------------------------------------------------
+# 0.3.14 — plugins card（体积策略的 GUI 面）
+# -----------------------------------------------------------------------
+
+
+def test_plugins_card_exists_with_sniffer_plugin():
+    """「功能插件」卡必须在源码中存在，且管理通用嗅探插件。"""
+    src = (SRC / "doubi" / "ui" / "pages" / "settings.py").read_text(encoding="utf-8")
+    assert "功能插件" in src
+    assert "_build_plugins_card" in src
+    # 卡内必须引用 core.plugin_manager（检测与安装的唯一出口）
+    assert "plugin_manager" in src
+    assert "probe_sniffer_plugin" in src
+    assert "install_sniffer_plugin" in src
+
+
+def test_plugins_card_has_progress_feedback():
+    """安装必须有进度反馈：进度条 + 阶段文案 + 日志行三件套。"""
+    src = (SRC / "doubi" / "ui" / "pages" / "settings.py").read_text(encoding="utf-8")
+    assert "_plugin_progress" in src          # ProgressBar
+    assert "_plugin_stage_label" in src       # 当前阶段
+    assert "_plugin_log_label" in src         # 最近日志行
+    # 安装期间按钮必须禁用（防重复点击）
+    assert 'btn.setText("安装中…")' in src

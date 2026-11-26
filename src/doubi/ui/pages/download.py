@@ -151,6 +151,7 @@ def build_download_widgets():
     from PySide6.QtWidgets import (
         QHBoxLayout,
         QLabel,
+        QMenu,
         QScrollArea,
         QSizePolicy,
         QVBoxLayout,
@@ -636,9 +637,38 @@ def build_download_widgets():
             if self._on_pause_requested is not None:
                 self._on_pause_requested(self)
 
+        def _build_context_menu(self) -> tuple:
+            """构造右键菜单，返回 (menu, act_file, act_out)。
+
+            抽成方法是为了无头测试：菜单的**启用逻辑**（文件落盘才可
+            点「打开所在文件夹」）可以脱离 exec() 单独断言。
+            """
+            menu = QMenu(self)
+            act_file = menu.addAction("打开所在文件夹")
+            act_out = menu.addAction("打开输出目录")
+            path = Path(self.info.save_path) if self.info.save_path else None
+            act_file.setEnabled(bool(path and path.exists()))
+            return menu, act_file, act_out
+
+        def contextMenuEvent(self, event) -> None:      # noqa: N802 (Qt naming)
+            """右键菜单：打开所在文件夹 / 打开输出目录。
+
+            「打开所在文件夹」只在文件真实落盘后可点——save_path 是
+            引擎回写的最终产物路径，下载中或已删除时置灰，避免用户
+            点开一个空目录还以为程序坏了。
+            """
+            menu, act_file, act_out = self._build_context_menu()
+            chosen = menu.exec(event.globalPos())
+            if chosen is act_file and self._on_open_folder_requested is not None:
+                self._on_open_folder_requested(self)
+            elif chosen is act_out and self._on_open_output_dir_requested is not None:
+                self._on_open_output_dir_requested(self)
+
         _on_remove_requested = None
         _on_retry_requested = None
         _on_pause_requested = None
+        _on_open_folder_requested = None
+        _on_open_output_dir_requested = None
 
     # ------------------------------------------------------------------
     # Page
@@ -887,6 +917,10 @@ def build_download_widgets():
             row._on_remove_requested = self._on_remove_row
             row._on_retry_requested = self._on_retry_row
             row._on_pause_requested = self._on_pause_row
+            row._on_open_folder_requested = self._on_row_open_folder
+            row._on_open_output_dir_requested = (
+                lambda _row: self._on_open_output_dir()
+            )
             # Insert before the trailing stretch
             idx = self.active_list_layout.count() - 1
             self.active_list_layout.insertWidget(idx, row)
@@ -906,6 +940,10 @@ def build_download_widgets():
                 row._on_remove_requested = self._on_remove_row
                 row._on_retry_requested = self._on_retry_row
                 row._on_pause_requested = self._on_pause_row
+                row._on_open_folder_requested = self._on_row_open_folder
+                row._on_open_output_dir_requested = (
+                    lambda _row: self._on_open_output_dir()
+                )
                 idx = self.completed_list_layout.count() - 1
                 self.completed_list_layout.insertWidget(idx, row)
                 self._rows[info.task_id] = row
@@ -961,7 +999,7 @@ def build_download_widgets():
             if started:
                 self.tabs.setCurrentItem("active")
                 self._show_view("active")
-                self._toast(InfoBar.success, "已重新下载", f"共 {started} 个失败任务")
+                self._toast(InfoBar.success, "已重新入队", f"共 {started} 个失败任务开始重新下载")
             else:
                 self._toast(InfoBar.warning, "没有可重试的任务", "已完成列表中没有失败记录")
 
@@ -1252,6 +1290,39 @@ def build_download_widgets():
             """列表为空时显示 EmptyState，否则隐藏。"""
             self._active_empty.setVisible(active == 0)
             self._completed_empty.setVisible(completed == 0)
+
+        def _on_row_open_folder(self, row) -> None:
+            """打开某条任务产物所在的文件夹。
+
+            Windows 用 ``explorer /select`` 直接选中文件（比"打开后再
+            找"省一步）；目录产物或非 Windows 平台退化为打开父目录。
+            """
+            path = Path(row.info.save_path) if row.info.save_path else None
+            if path is None or not path.exists():
+                self._toast(
+                    InfoBar.warning, "文件不存在",
+                    "视频文件可能已被移动或删除，可重新下载。",
+                )
+                return
+            try:
+                if sys.platform.startswith("win"):
+                    if path.is_file():
+                        # explorer /select 的参数必须反斜杠且逗号后无空格
+                        subprocess.Popen(
+                            ["explorer", "/select,", str(path)],
+                        )
+                    else:
+                        os.startfile(str(path))   # type: ignore[attr-defined]
+                else:
+                    target = path if path.is_dir() else path.parent
+                    opener = "open" if sys.platform == "darwin" else "xdg-open"
+                    subprocess.Popen([opener, str(target)])
+            except Exception as exc:   # noqa: BLE001
+                logger.warning("open containing folder failed: %s", exc)
+                self._toast(
+                    InfoBar.error, "打开失败",
+                    f"请手动前往 {path.parent}",
+                )
 
         def _on_open_output_dir(self) -> None:
             from ...core.config import load_config

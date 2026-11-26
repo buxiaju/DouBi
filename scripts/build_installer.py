@@ -75,6 +75,12 @@ def main() -> int:
         action="store_true",
         help="跳过 PyInstaller，直接用现有 dist/doubi-gui/",
     )
+    parser.add_argument(
+        "--with-sniffer",
+        action="store_true",
+        help="捆绑 Chromium 内核（透传给 build_exe.py）。0.3.14 起默认"
+             "最精简——不捆绑内核，通用嗅探由用户在设置页按需安装。",
+    )
     args = parser.parse_args()
 
     if not NSI.is_file():
@@ -86,10 +92,10 @@ def main() -> int:
 
     if not args.skip_build:
         print(f">>> PyInstaller onedir 构建中（这一步几分钟）...")
-        rc = subprocess.run(
-            [sys.executable, str(ROOT / "scripts" / "build_exe.py"), "--onedir"],
-            cwd=ROOT,
-        ).returncode
+        build_cmd = [sys.executable, str(ROOT / "scripts" / "build_exe.py"), "--onedir"]
+        if args.with_sniffer:
+            build_cmd.append("--with-sniffer")
+        rc = subprocess.run(build_cmd, cwd=ROOT).returncode
         if rc != 0:
             print("PyInstaller 构建失败，安装包不打了", file=sys.stderr)
             return rc

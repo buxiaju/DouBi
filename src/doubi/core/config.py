@@ -99,6 +99,11 @@ DEFAULTS: dict[str, Any] = {
     #   "all"      — 成功 + 失败都弹（多任务并发走完一眼看结果）
     #   "summary"  — 单个任务静默；队列全部跑完时弹一次汇总（N 项完成 / M 项失败）
     "notify_on_completion": "success",
+    # ---- 检查更新（GitHub Releases API） ----
+    # GUI 启动后后台查一次 GitHub latest release；发现新版本弹 InfoBar。
+    # 默认开——版本提示是低打扰动作（只在有新版时出现一次），关掉是
+    # 给完全离线 / 不想被提醒的用户准备的。
+    "update_check_on_startup": True,
 }
 
 
@@ -160,6 +165,9 @@ class AppConfig:
     sniff_capture_types: tuple[str, ...] = DEFAULTS["sniff_capture_types"]
     # 系统通知范围。允许值见 ``DEFAULTS["notify_on_completion"]`` 注释。
     notify_on_completion: str = DEFAULTS["notify_on_completion"]
+    #: 启动时后台检查 GitHub Releases 是否有新版本（默认开）。
+    #: 关掉后完全不出网查询；设置页的「检查更新」按钮不受影响。
+    update_check_on_startup: bool = DEFAULTS["update_check_on_startup"]
     extra: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -341,6 +349,10 @@ def load_config(path: Optional[Path] = None, *, env_prefix: str = "DOUBI_") -> A
         sniff_capture_types=tuple(data.get("sniff_capture_types", DEFAULTS["sniff_capture_types"])),
         notify_on_completion=_validate_notify_mode(
             data.get("notify_on_completion", DEFAULTS["notify_on_completion"]),
+        ),
+        update_check_on_startup=_coerce(
+            data.get("update_check_on_startup", DEFAULTS["update_check_on_startup"]),
+            DEFAULTS["update_check_on_startup"],
         ),
     )
     # 0.3.3 P1-1 — best-effort one-shot migration of the legacy CWD-

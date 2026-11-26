@@ -563,3 +563,93 @@ async def test_summary_omits_speed_when_no_metrics(qapp, tmp_path):
     assert "已下" not in text
 
     await _drain()
+
+
+# ---------------------------------------------------------------------------
+# 右键「打开所在文件夹」
+# ---------------------------------------------------------------------------
+
+async def test_row_context_menu_wiring_and_enabled_state(qapp, tmp_path):
+    """渲染出的行必须挂上回调，且菜单启用逻辑跟着文件落盘状态走。"""
+    from doubi.ui.pages.download import build_download_widgets
+    from doubi.ui.task_manager import TaskManager
+
+    cls, _ = build_download_widgets()
+    page = cls()
+    page.set_task_manager(TaskManager(_OkPipeline()))
+    task_id = page._manager.add(_make_item(), _make_options(tmp_path))
+    qapp.processEvents()
+    row = page._rows[task_id]
+
+    # 回调接线（绑定方法每次访问都是新对象，比 __func__ + __self__）
+    cb = row._on_open_folder_requested
+    assert cb.__func__ is page._on_row_open_folder.__func__
+    assert cb.__self__ is page
+
+    # 文件不存在 → 「打开所在文件夹」置灰
+    menu, act_file, act_out = row._build_context_menu()
+    assert not act_file.isEnabled()
+    assert act_out.isEnabled()
+
+    # 文件落盘 → 可点
+    target = tmp_path / "video.mp4"
+    target.write_bytes(b"x")
+    row.info.save_path = str(target)
+    menu, act_file, _ = row._build_context_menu()
+    assert act_file.isEnabled()
+    menu.deleteLater()
+
+
+async def test_row_open_folder_selects_file_on_windows(qapp, tmp_path, monkeypatch):
+    """Windows 上 explorer /select 直接选中文件，且文件消失时给 toast。"""
+    from types import SimpleNamespace
+
+    from doubi.ui.pages import download as dl_mod
+    from doubi.ui.pages.download import build_download_widgets
+
+    cls, _ = build_download_widgets()
+    page = cls()
+
+    target = tmp_path / "video.mp4"
+    target.write_bytes(b"x")
+    row = SimpleNamespace(info=SimpleNamespace(save_path=str(target)))
+
+    calls: list = []
+
+    def _fake_popen(argv, **_kw):
+        calls.append(argv)
+
+    monkeypatch.setattr(dl_mod.subprocess, "Popen", _fake_popen)
+    page._on_row_open_folder(row)
+    if sys.platform.startswith("win"):
+        assert calls and calls[0][:2] == ["explorer", "/select,"]
+        assert calls[0][2] == str(target)
+    else:
+        assert calls  # POSIX 打开父目录
+
+    # 文件已消失 → 不再调用 explorer，且弹警告 toast
+    calls.clear()
+    row.info.save_path = str(tmp_path / "gone.mp4")
+    toasts: list = []
+    monkeypatch.setattr(page, "_toast", lambda *a, **k: toasts.append(a))
+    page._on_row_open_folder(row)
+    assert not calls
+    assert toasts and "文件不存在" in toasts[0][1]
+
+
+async def test_row_open_output_dir_action_delegates(qapp, tmp_path, monkeypatch):
+    """行的「打开输出目录」动作触发页面级 _on_open_output_dir。"""
+    from doubi.ui.pages.download import build_download_widgets
+    from doubi.ui.task_manager import TaskManager
+
+    cls, _ = build_download_widgets()
+    page = cls()
+    page.set_task_manager(TaskManager(_OkPipeline()))
+    task_id = page._manager.add(_make_item(), _make_options(tmp_path))
+    qapp.processEvents()
+    row = page._rows[task_id]
+
+    fired = []
+    monkeypatch.setattr(page, "_on_open_output_dir", lambda: fired.append(1))
+    row._on_open_output_dir_requested(row)
+    assert fired == [1]

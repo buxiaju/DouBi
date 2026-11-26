@@ -351,8 +351,9 @@ class Sniffer:
         if not _HAS_PLAYWRIGHT:
             return SniffResult(
                 page_url=url,
-                error="Playwright 未安装；请 pip install playwright 并 "
-                       "运行 playwright install chromium",
+                error="通用嗅探插件未安装。请到「设置 → 功能插件」"
+                       "一键安装（约 170 MB 下载）；或 pip install playwright "
+                       "并运行 playwright install chromium",
             )
 
         js = self._load_catch_lite_js()

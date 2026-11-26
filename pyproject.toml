@@ -39,26 +39,30 @@ dependencies = [
     "aiosqlite>=0.19.0",
     "qrcode>=7.4",          # used by bilibili QR login in the CLI
     "gmssl>=3.2",           # sm3 for douyin a_bogus signing (M6.7, platforms/douyin/sign)
-    # M6.16 起，通用嗅探（platforms/generic）是 CLI/GUI/REST/MCP 四入口共享的兜底
-    # 解析路径，因此 playwright 从 gui extra 提升为基础依赖。
-    #
-    # 注意：pip 装的只是 Python 客户端（几 MB），浏览器内核要另外执行
-    #   playwright install chromium
-    # 才会下载（约 150 MB）。缺内核时 Sniffer.is_available() 返回 False，
-    # GenericAdapter 会返回一条「[嗅探失败] Playwright 未安装」的 MediaItem
-    # 而不是抛异常，所以未装内核也不会让主流程崩掉。
-    "playwright>=1.40.0",
+    # 0.3.14 体积策略：playwright（107 MB Python 包 + 约 430 MB Chromium
+    # 内核）从基础依赖降级为可选插件「sniffer」。通用嗅探是兜底功能，
+    # 缺失时优雅降级（Sniffer.is_available() 返回 False，GenericAdapter
+    # 返回「插件未安装」的错误 MediaItem），GUI 设置页提供一键安装
+    # （core/plugin_manager）。需要捆绑的安装方式：
+    #   pip install doubi[sniffer]  && playwright install chromium
+    # 或直接 pip install doubi[all]。
 ]
 
 [project.optional-dependencies]
+# 通用嗅探插件：playwright 客户端 + Chromium 内核按需安装。
+# GUI 设置页「功能插件」卡可一键安装（0.3.14 体积策略）。
+sniffer = [
+    "playwright>=1.40.0",
+]
 gui = [
     "PySide6>=6.6.0",
     "PySide6-Fluent-Widgets[full]>=1.6.0",
     "qrcode>=7.4",
     "psutil>=5.9",
     "qasync>=0.27.1",        # asyncio <-> Qt event-loop bridge
-    # playwright 不在这里重复声明：M6.16 已提升到 [project] dependencies。
-    # 浏览器自动登录（M3.1.1）和通用嗅探（M6.16）共用同一个 playwright。
+    # 0.3.14 起 playwright 不再随 gui 捆绑（见 [project] dependencies 注释）。
+    # 浏览器自动登录（M3.1.1）与通用嗅探（M6.16）共享同一份 playwright，
+    # 需要 GUI 全功能时装 doubi[gui,sniffer] 或 doubi[all]。
 ]
 server = [
     "fastapi>=0.100",
@@ -78,7 +82,7 @@ dev = [
     "httpx>=0.25",           # for testing the FastAPI server
 ]
 all = [
-    "doubi[gui,server,dev]",
+    "doubi[gui,server,sniffer,dev]",
 ]
 
 [project.scripts]

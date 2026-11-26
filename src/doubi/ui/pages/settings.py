@@ -519,7 +519,22 @@ def build_settings_widgets():
 
             body_layout.addWidget(self._shortcut_card["widget"])
 
-            # ---- 8) 诊断卡（最末位） ----
+            # ---- 8) 功能插件卡 ----
+            # 0.3.14 体积策略：安装包只带必需依赖，大型可选件（playwright
+            # + Chromium，约 170 MB 下载）降级为插件，用户在这里一键安装。
+            # 核心逻辑在 core.plugin_manager（纯 stdlib，可测试）。
+            self._plugins_card = self._build_plugins_card()
+            body_layout.addWidget(self._plugins_card["widget"])
+
+            # ---- 9) 关于与更新卡 ----
+            # 移植自 BiliMusic-Desktop 的设计：桌面应用应该在应用内告诉
+            # 用户「有新版本」，而不是指望用户自己去看 Release 页。
+            # 核心查询逻辑在 core.update_check（纯 stdlib，可测试），
+            # 本卡只负责触发 + 展示结果。
+            self._update_card = self._build_update_card()
+            body_layout.addWidget(self._update_card["widget"])
+
+            # ---- 10) 诊断卡（最末位） ----
             # 用户报 bug 时一键导出 ~/.doubi/ 关键文件 + 系统信息 + 最近日志
             # 为 zip（已脱敏）。核心逻辑在 core.diagnostics 里，本卡只负责
             # 弹文件对话框 + toast 反馈。
@@ -650,6 +665,316 @@ def build_settings_widgets():
             self._sniff_toggle_btn.setText("隐藏高级" if on else "显示高级")
 
         # -------------------------------------------------------- 诊断卡
+
+        # -------------------------------------------------------- 更新卡
+
+        # -------------------------------------------------------- 插件卡
+
+        def _build_plugins_card(self) -> dict:
+            """「功能插件」卡：通用嗅探（playwright + Chromium）按需安装。
+
+            0.3.14 体积策略的 GUI 面：安装包不再捆绑 playwright 与
+            Chromium 内核（合计约 500 MB 磁盘），通用嗅探与抖音浏览器
+            登录降级为可选插件。本卡提供：
+
+            * 状态探针（probe_sniffer_plugin，纯读不联网）
+            * 一键安装（工作线程跑 install_sniffer_plugin，进度条 +
+              阶段文案 + 最近一行日志实时刷新）
+            * 安装完成自动重探 + toast 收尾
+
+            反馈设计：进度条显示总体百分比（library 0-20% / browser
+            20-100%，从 playwright 下载输出解析），下面一行显示当前
+            阶段，再下面一行滚动最近日志——三层反馈对应「整体到哪了 /
+            现在在干什么 / 刚发生了什么」。
+            """
+            card_dict = self._build_card(
+                title="功能插件",
+                subtitle="可选的大型功能组件，按需安装以减小安装包体积",
+            )
+            body = card_dict["body"]
+            from qfluentwidgets import BodyLabel, ProgressBar
+
+            body_layout = QVBoxLayout(body)
+            body_layout.setContentsMargins(0, 0, 0, 0)
+            body_layout.setSpacing(SPACE_SM)
+
+            # 状态行
+            self._plugin_status_label = BodyLabel("", body)
+            self._plugin_status_label.setWordWrap(True)
+            body_layout.addWidget(self._plugin_status_label)
+            self._refresh_plugin_status()
+
+            # 进度条 + 阶段行（安装时才可见）
+            self._plugin_progress = ProgressBar(body)
+            self._plugin_progress.setFixedWidth(320)
+            self._plugin_progress.setValue(0)
+            self._plugin_progress.hide()
+            body_layout.addWidget(self._plugin_progress)
+
+            self._plugin_stage_label = BodyLabel("", body)
+            self._plugin_stage_label.setStyleSheet(muted_qss())
+            self._plugin_stage_label.setWordWrap(True)
+            self._plugin_stage_label.hide()
+            body_layout.addWidget(self._plugin_stage_label)
+
+            # 日志行（最近一条；完整日志走诊断包）
+            self._plugin_log_label = BodyLabel("", body)
+            self._plugin_log_label.setStyleSheet(muted_qss())
+            self._plugin_log_label.setWordWrap(True)
+            self._plugin_log_label.hide()
+            body_layout.addWidget(self._plugin_log_label)
+
+            # 按钮行
+            btn_row = QHBoxLayout()
+            btn_row.setContentsMargins(0, 0, 0, 0)
+            btn_row.setSpacing(SPACE_SM)
+            self._plugin_install_btn = PushButton("安装插件", body)
+            self._plugin_install_btn.setFixedWidth(110)
+            self._plugin_install_btn.clicked.connect(self._on_install_sniffer)
+            btn_row.addWidget(self._plugin_install_btn)
+            btn_row.addStretch(1)
+            body_layout.addLayout(btn_row)
+
+            return {"widget": card_dict["widget"], "body": body}
+
+        def _refresh_plugin_status(self) -> None:
+            """重探插件状态并刷新状态行 + 按钮可用性。纯读，毫秒级。"""
+            from ...core.plugin_manager import probe_sniffer_plugin
+
+            try:
+                status = probe_sniffer_plugin()
+            except Exception:  # noqa: BLE001 — 探针按约定不抛，防御一层
+                status = None
+            if status is None:
+                self._plugin_status_label.setText("插件状态未知。")
+                return
+            self._plugin_status_label.setText(f"通用嗅探（Playwright + Chromium）：{status.summary()}")
+            if hasattr(self, "_plugin_install_btn"):
+                # 已就绪时禁用安装按钮——重复安装没有意义
+                self._plugin_install_btn.setEnabled(not status.ready)
+                self._plugin_install_btn.setText(
+                    "重新安装" if status.ready else "安装插件"
+                )
+
+        def _on_install_sniffer(self) -> None:
+            """「安装插件」按钮：工作线程安装，三层反馈实时刷新。
+
+            回调从工作线程进来，必须 marshal 回主线程才能碰 Qt 控件
+            ——与更新卡同款 ``QTimer.singleShot(0, receiver, fn)`` 路径。
+            安装期间禁用按钮防重复点击；结束后自动重探状态。
+            """
+            from PySide6.QtCore import QRunnable, QThreadPool
+            from PySide6.QtCore import QTimer
+            from PySide6.QtCore import Slot as _Slot
+
+            btn = self._plugin_install_btn
+            btn.setEnabled(False)
+            btn.setText("安装中…")
+            self._plugin_progress.setValue(0)
+            self._plugin_progress.show()
+            self._plugin_stage_label.show()
+            self._plugin_log_label.show()
+            page_holder = {"page": self}
+            timer_holder = {"timer": QTimer(self)}
+            timer_holder["timer"].setSingleShot(False)
+            timer_holder["timer"].setInterval(50)
+            # 进度事件队列：工作线程只往里塞，主线程定时器统一消费——
+            # 比每条事件一个 singleShot 更省（下载输出可达每秒几十行）。
+            pending_events: list = []
+
+            class _InstallRunnable(QRunnable):
+                @_Slot()
+                def run(self) -> None:
+                    from ...core import plugin_manager
+
+                    def cb(event) -> None:
+                        pending_events.append(event)
+
+                    result = None
+                    try:
+                        result = plugin_manager.install_sniffer_plugin(cb)
+                    except Exception:  # noqa: BLE001 — 安装绝不崩 GUI
+                        from ...core.plugin_manager import PluginInstallResult
+
+                        result = PluginInstallResult(
+                            ok=False, message="安装过程出现未预期错误。"
+                        )
+                    pending_events.append(result)
+
+            from ...core.plugin_manager import PluginInstallResult
+
+            def _drain() -> None:
+                """主线程消费队列：刷 UI；拿到最终 result 就收尾。"""
+                final = None
+                while pending_events:
+                    event = pending_events.pop(0)
+                    if isinstance(event, PluginInstallResult):
+                        final = event
+                        continue
+                    kind = getattr(event, "kind", "")
+                    if kind == "percent" and event.percent is not None:
+                        self._plugin_progress.setValue(event.percent)
+                    elif kind == "stage":
+                        self._plugin_stage_label.setText(event.stage_detail)
+                        self._plugin_log_label.setText("")
+                    elif kind == "line" and event.message.strip():
+                        self._plugin_log_label.setText(
+                            f"… {event.message[-120:]}"
+                        )
+                    elif kind == "error":
+                        self._plugin_stage_label.setText(event.message)
+                if final is not None:
+                    timer_holder["timer"].stop()
+                    self._plugin_install_btn.setEnabled(True)
+                    self._plugin_install_btn.setText("安装插件")
+                    self._plugin_progress.hide()
+                    self._plugin_stage_label.hide()
+                    self._plugin_log_label.hide()
+                    self._refresh_plugin_status()
+                    from ..feedback import toast_error, toast_success
+
+                    if final.ok:
+                        toast_success(self, "插件安装完成", final.message)
+                    else:
+                        toast_error(self, "插件安装失败", final.message[:200])
+
+            timer_holder["timer"].timeout.connect(_drain)
+            timer_holder["timer"].start()
+            QThreadPool.globalInstance().start(_InstallRunnable())
+
+        def _build_update_card(self) -> dict:
+            """「关于与更新」卡：版本信息 + 手动检查 + 启动检查开关。
+
+            查询走 :mod:`doubi.core.update_check`（stdlib urllib，8s 超时，
+            多镜像回退，失败静默返回 None）。结果展示在卡内的状态行，
+            有新版时把 Release 链接复制进剪贴板（不在 GUI 里开浏览器
+            是刻意的——保持与其他卡片「只展示不跳转」的一致性）。
+            """
+            import doubi
+
+            card_dict = self._build_card(
+                title="关于与更新",
+                subtitle=f"DouBi v{doubi.__version__} — 多平台媒体下载助手",
+            )
+            body = card_dict["body"]
+            from qfluentwidgets import BodyLabel
+
+            body_layout = QVBoxLayout(body)
+            body_layout.setContentsMargins(0, 0, 0, 0)
+            body_layout.setSpacing(SPACE_SM)
+
+            self._update_status = BodyLabel(
+                f"当前版本 v{doubi.__version__}。点「检查更新」查询 GitHub Releases。",
+                body,
+            )
+            self._update_status.setStyleSheet(muted_qss())
+            self._update_status.setWordWrap(True)
+            body_layout.addWidget(self._update_status)
+
+            btn_row = QHBoxLayout()
+            btn_row.setContentsMargins(0, 0, 0, 0)
+            btn_row.setSpacing(SPACE_SM)
+
+            self._check_update_btn = PushButton("检查更新", body)
+            self._check_update_btn.setFixedWidth(110)
+            self._check_update_btn.clicked.connect(self._on_check_update)
+            btn_row.addWidget(self._check_update_btn)
+
+            # 开关与启动检查共用一份配置：勾选变化走既有自动保存链路
+            # （checkedChanged → _schedule_auto_save → _write_config）。
+            self.update_check_on_startup = SwitchButton(body)
+            self.update_check_on_startup.setChecked(
+                bool(getattr(self._cfg, "update_check_on_startup", True))
+            )
+            self.update_check_on_startup.checkedChanged.connect(
+                self._schedule_auto_save
+            )
+            btn_row.addWidget(self.update_check_on_startup)
+            launch_label = BodyLabel("启动时自动检查", body)
+            launch_label.setStyleSheet(muted_qss())
+            btn_row.addWidget(launch_label)
+            btn_row.addStretch(1)
+
+            body_layout.addLayout(btn_row)
+            return {"widget": card_dict["widget"], "body": body}
+
+        def _on_check_update(self) -> None:
+            """「检查更新」按钮：后台线程查询 → 主线程更新状态行。
+
+            查询在 ``QThreadPool`` 的工作线程里跑（最多 8s + 镜像重试），
+            不卡 UI 线程；结果经 ``QMetaObject.invokeMethod`` 回主线程。
+            失败/无结果时状态行直接说明，不弹 toast——手动检查是显式
+            动作，行内反馈已足够。
+            """
+            from PySide6.QtCore import QThreadPool
+            from PySide6.QtCore import QRunnable, Slot as _Slot
+
+            btn = self._check_update_btn
+            btn.setEnabled(False)
+            btn.setText("检查中…")
+            self._update_status.setText("正在查询 GitHub Releases…")
+            self._update_status.setStyleSheet(muted_qss())
+
+            class _CheckRunnable(QRunnable):
+                @_Slot()
+                def run(self) -> None:
+                    from ...core import update_check
+
+                    info = None
+                    try:
+                        info = update_check.fetch_latest_release()
+                    except Exception:  # noqa: BLE001 — 查询绝不崩 GUI
+                        info = None
+                    # 回主线程：QTimer.singleShot(0, receiver, fn) 从工作
+                    # 线程调用时会调度到 receiver 所属线程（主线程）的
+                    # 事件循环，是 Qt 官方认可的跨线程 UI 更新路径。
+                    from PySide6.QtCore import QTimer
+
+                    page_ref = page_holder["page"]
+
+                    def _deliver() -> None:
+                        page_ref._check_update_btn.setEnabled(True)
+                        page_ref._check_update_btn.setText("检查更新")
+                        page_ref._show_update_result(info)
+
+                    QTimer.singleShot(0, btn, _deliver)
+
+            page_holder = {"page": self}
+            QThreadPool.globalInstance().start(_CheckRunnable())
+
+        def _show_update_result(self, info) -> None:
+            """把 update_check 的结果渲染到状态行。``None`` 表示查询失败。"""
+            from qfluentwidgets import BodyLabel as _BL
+
+            if info is None:
+                self._update_status.setText(
+                    "查询失败（离线或被限流）。可稍后重试，或直接到\n"
+                    "github.com/buxiaju/DouBi/releases 查看最新版本。"
+                )
+                self._update_status.setStyleSheet(muted_qss())
+                return
+            if info.update_available:
+                self._update_status.setText(
+                    f"✦ 发现新版本 v{info.latest_version}（当前 v{info.current_version}）。\n"
+                    f"Release 页：{info.release_url}"
+                )
+                # 用强调色提示——主题 token 的 progress_normal 与快捷键
+                # 键位色一致，视觉上「值得注意」但不刺眼。
+                self._update_status.setStyleSheet(
+                    f"color: {token('progress_normal')}; font-weight: 600;"
+                )
+                # 有新版时顺手复制 Release 链接，用户直接去浏览器粘贴。
+                try:
+                    from PySide6.QtWidgets import QApplication
+
+                    QApplication.clipboard().setText(info.release_url)
+                except Exception:  # noqa: BLE001
+                    pass
+            else:
+                self._update_status.setText(
+                    f"已是最新版本（v{info.current_version}）。"
+                )
+                self._update_status.setStyleSheet(muted_qss())
 
         def _build_diagnostics_card(self) -> dict:
             """诊断卡：导出诊断包。
@@ -885,6 +1210,10 @@ def build_settings_widgets():
             self.sniff_headless.setChecked(self._cfg.sniff_headless)
             self.sniff_auto_play.setChecked(self._cfg.sniff_auto_play)
             self.sniff_user_agent.setText(self._cfg.sniff_user_agent or "")
+            if hasattr(self, "update_check_on_startup"):
+                self.update_check_on_startup.setChecked(
+                    bool(getattr(self._cfg, "update_check_on_startup", True))
+                )
             self._sync_theme_combo()
             self.cookies_dir_label.setText(
                 str(Path.home() / ".doubi" / "cookies")
@@ -1106,6 +1435,8 @@ def build_settings_widgets():
                         self.write_subtitles,
                         self.sniff_enabled, self.sniff_headless,
                         self.sniff_auto_play)
+            if hasattr(self, "update_check_on_startup"):
+                switches = switches + (self.update_check_on_startup,)
             for w in switches:
                 w.checkedChanged.connect(self._schedule_auto_save)
 
@@ -1183,6 +1514,12 @@ def build_settings_widgets():
             data["write_nfo"] = self.write_nfo.isChecked()
             data["write_danmaku"] = self.write_danmaku.isChecked()
             data["write_subtitles"] = self.write_subtitles.isChecked()
+
+            # 检查更新开关（卡内 SwitchButton；缺失视为默认开——老测试
+            # 构造的 page 可能没走到 _build_update_card）。
+            data["update_check_on_startup"] = getattr(
+                self, "update_check_on_startup", None
+            ) is None or self.update_check_on_startup.isChecked()
 
             # 通用嗅探。时长夹到 5–60：低于 5 秒基本抓不到 m3u8（页面还没起播），
             # 高于 60 秒用户会以为程序卡死。非法输入回落到默认 15。

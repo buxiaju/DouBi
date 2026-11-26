@@ -465,7 +465,9 @@ class TestSnifferUnavailable:
 
         result = asyncio.run(sniffer.sniff("https://example.com/page"))
         assert result.error is not None
-        assert "Playwright" in result.error
+        # 0.3.14 插件化文案：指向设置页插件卡，同时保留 pip 手动路径
+        assert "插件" in result.error
+        assert "playwright" in result.error
         assert result.items == []
 
     def test_is_available_returns_false_when_playwright_missing(self, monkeypatch):

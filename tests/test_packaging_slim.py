@@ -223,6 +223,36 @@ def test_bundled_ffmpeg_is_present_in_the_repo():
     assert mod.FFMPEG_EXE.is_file(), f"缺少构建输入 {mod.FFMPEG_EXE}"
 
 
+def test_nmccli_exe_is_bundled_next_to_ffmpeg():
+    """N_m3u8DL-CLI 主程序必须与 ffmpeg 同目录随包分发（0.3.13 事故）。
+
+    0.3.13 及之前只 --add-data 了 ffmpeg.exe 没带 CLI：开发机靠
+    ``Path.cwd()/tools/nm3u8dl`` 找到仓库里的那份，一切正常；发布版
+    cwd 是安装目录，_find_cli 三条候选全部落空，nm3u8dl 引擎静默
+    「binary not found」降级——HLS 少一条主力下载路径，且测试全绿
+    毫无征兆。与 FFMPEG_EXE 同一套标准：预检 + is_file() 守门。
+    """
+    mod = _load_build_module()
+    assert mod.NMCCLI_EXE.is_file(), f"缺少构建输入 {mod.NMCCLI_EXE}"
+
+    source = BUILD_SCRIPT.read_text(encoding="utf-8")
+    assert 'f"{NMCCLI_EXE}{sep}tools/nm3u8dl"' in source, (
+        "NMCCLI_EXE 没有 --add-data；发布版 nm3u8dl 引擎会 binary not found"
+    )
+    assert "if not NMCCLI_EXE.is_file():" in source, (
+        "NMCCLI_EXE 没有预检，缺文件时构建会静默成功并产出坏包"
+    )
+
+    # 引擎必须在冻结布局可达的位置解析它：_find_cli 的候选里要有
+    # 「__file__ 上溯到 _internal/tools/nm3u8dl」这条（与 ffmpeg 同理）。
+    engine_src = (ROOT / "src" / "doubi" / "engines" / "nm3u8dl.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'tools" / "nm3u8dl' in engine_src or "tools/nm3u8dl" in engine_src, (
+        "nm3u8dl 引擎的 CLI 候选路径没了，随包分发的 CLI 将找不到"
+    )
+
+
 def test_all_engines_resolve_ffmpeg_through_the_shared_helper():
     """三个引擎都必须走 find_bundled_ffmpeg，而不是各自造轮子。
 
@@ -400,7 +430,7 @@ def test_build_script_preflights_every_add_data_source_file():
 
     single_file_inputs = [
         name
-        for name in ("SVG_TEMPLATE", "CATCH_LITE_JS", "FFMPEG_EXE")
+        for name in ("SVG_TEMPLATE", "CATCH_LITE_JS", "FFMPEG_EXE", "NMCCLI_EXE")
         if isinstance(getattr(mod, name, None), Path)
     ]
     assert single_file_inputs, "一个单文件构建输入都没找到，常量可能被改名了"
@@ -469,3 +499,39 @@ def test_aiohttp_stack_is_not_excluded():
         assert package not in mod.EXCLUDE_MODULES, (
             f"{package} 被排除了，HLS 下载会完全失效"
         )
+
+
+# ---------------------------------------------------------------------------
+# 7. GUI 构建专属排除：server 栈不进 GUI exe（0.3.14，冲 100MB 安装包）
+# ---------------------------------------------------------------------------
+
+def test_gui_only_excludes_define_the_server_stack():
+    """GUI_ONLY_EXCLUDES 必须点名 pydantic 全家。
+
+    pydantic + pydantic_core（Rust 扩展）合计约 11MB，唯一的 import
+    方是 doubi/server/schemas.py——GUI exe 永不执行到它。之所以不进
+    EXCLUDE_MODULES：那是扫**全源码**的硬禁令，server 合法用它；
+    这里只约束「GUI 进程运行时不可达」。
+    """
+    mod = _load_build_module()
+    assert "pydantic" in getattr(mod, "GUI_ONLY_EXCLUDES", [])
+    assert "pydantic_core" in getattr(mod, "GUI_ONLY_EXCLUDES", [])
+
+
+def test_gui_never_imports_the_excluded_server_stack():
+    """GUI 代码不许 import server 栈——排除项安全性的运行时前提。
+
+    若哪天 ui/ 或 GUI 启动路径 import 了 doubi.server（进而 pydantic），
+    GUI_ONLY_EXCLUDES 的 --exclude-module 会把发布版变成启动即崩。
+    CLI/REST/MCP 的 pip 形态不受影响，它们不走这份排除清单。
+    """
+    gui_roots = [SRC / "ui", SRC / "__main__.py", SRC / "app.py"]
+    offenders = []
+    for root in gui_roots:
+        paths = [root] if root.is_file() else sorted(root.rglob("*.py"))
+        for path in paths:
+            src = path.read_text(encoding="utf-8")
+            for needle in ("doubi.server", "import pydantic", "from pydantic"):
+                if needle in src:
+                    offenders.append(f"{path.relative_to(ROOT)}: {needle}")
+    assert not offenders, "GUI 启动路径 import 了被排除的 server 栈：\n  " + "\n  ".join(offenders)

@@ -74,8 +74,9 @@ def require_playwright() -> None:
 
 def install_playwright_instructions() -> str:
     return (
-        "Playwright is not installed.\n"
-        "Install it with:\n"
+        "通用嗅探插件未安装。\n"
+        "GUI 用户：到「设置 → 功能插件」一键安装（约 170 MB 下载）。\n"
+        "命令行用户：手动执行\n"
         "  pip install playwright\n"
         "  python -m playwright install chromium\n"
         "(or: pip install 'doubi[gui]' to get everything at once)"

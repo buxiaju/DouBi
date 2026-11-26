@@ -37,7 +37,36 @@ HOT_WORD_ACTION = "搜索该词并下载全部视频"
 #: hits / any row whose URL parses to USER or MIX).
 CONTAINER_ACTION = "下载（展开全部）"
 
+#: Action-bar button label for the multi-select batch download mode
+#: (0.3.14 移植自 BiliMusic-Desktop 的「多选整理」交互：B 站收藏夹/
+#: 搜索结果经常要一次收好几条，右键逐条下载效率太低)。
+MULTI_SELECT_ACTION = "批量下载选中项"
 
+
+def confirm_multi_select_plan(count: int, skipped: int = 0) -> ConfirmPlan:
+    """Confirmation for queuing every checked row of the search / hot table.
+
+    :param count: rows that resolved to a downloadable target.
+    :param skipped: rows that could not be resolved (no URL / hot-word
+        rows / parse failures) — mentioned in the body so the number on
+        the dialog matches what actually gets queued.
+    """
+    lines = [
+        f"已选中 {count} 项，将逐条解析并加入下载队列。",
+    ]
+    if skipped > 0:
+        lines.append(
+            f"另有 {skipped} 项无法下载（热搜词或没有直链），已跳过。"
+        )
+    lines.append(
+        "容器类内容（用户主页 / 合集）会展开为多条视频，实际下载数可能更多。"
+    )
+    return ConfirmPlan(
+        title="批量下载",
+        body="\n\n".join(lines),
+        confirmed_text="全部下载",
+        cancelled_text="取消",
+    )
 @dataclass(frozen=True)
 class ConfirmPlan:
     """A ready-to-render confirmation dialog.

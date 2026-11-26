@@ -51,6 +51,7 @@ import json
 import logging
 import sqlite3
 import threading
+import time
 import time as _time
 from dataclasses import (
     dataclass,
@@ -869,6 +870,58 @@ class Database:
         async with conn.execute("SELECT COUNT(*) FROM media_item") as cur:
             row = await cur.fetchone()
         return int(row[0]) if row else 0
+
+    async def stats_summary(
+        self, *, recent_days: int = 7
+    ) -> dict:
+        """Aggregate download stats for the history page (0.3.14).
+
+        Borrowed from BiliMusic-Desktop's「听歌时长热力日历」data view:
+        a downloader's equivalent insight is *when and what* the user
+        downloads. Pure read over the existing ``media_item`` table —
+        no schema change, no write path, safe to call on any database.
+
+        Returns::
+
+            {
+              "total": int,
+              "by_platform": {platform: count, ...},   # desc by count
+              "recent_count": int,                     # last N days
+              "top_authors": [(author_name, count), ...],  # top 5
+            }
+        """
+        conn = await self._conn_required()
+        summary: dict = {"total": 0, "by_platform": {},
+                         "recent_count": 0, "top_authors": []}
+
+        async with conn.execute(
+            "SELECT COUNT(*) FROM media_item"
+        ) as cur:
+            row = await cur.fetchone()
+        summary["total"] = int(row[0]) if row else 0
+
+        async with conn.execute(
+            "SELECT platform, COUNT(*) AS n FROM media_item "
+            "GROUP BY platform ORDER BY n DESC"
+        ) as cur:
+            for r in await cur.fetchall():
+                summary["by_platform"][str(r[0] or "?")] = int(r[1])
+
+        cutoff = int(time.time()) - max(1, recent_days) * 86400
+        async with conn.execute(
+            "SELECT COUNT(*) FROM media_item WHERE last_download_time >= ?",
+            (cutoff,),
+        ) as cur:
+            row = await cur.fetchone()
+        summary["recent_count"] = int(row[0]) if row else 0
+
+        async with conn.execute(
+            "SELECT COALESCE(author_name, '(未知)') AS a, COUNT(*) AS n "
+            "FROM media_item GROUP BY a ORDER BY n DESC LIMIT 5"
+        ) as cur:
+            for r in await cur.fetchall():
+                summary["top_authors"].append((str(r[0]), int(r[1])))
+        return summary
 
     # ---- task -------------------------------------------------------
 

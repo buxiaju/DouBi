@@ -42,6 +42,7 @@ def build_history_widgets():
         SPACE_MD,
         SPACE_XL,
         heading_qss,
+        muted_qss,
         subscribe_theme,
     )
     from ..widgets import (
@@ -122,6 +123,16 @@ def build_history_widgets():
             stats_row.addWidget(self._stat_showing, 1)
             stats_row.addStretch(2)
             outer.addLayout(stats_row)
+
+            # ---- 下载统计条 (0.3.14，数据视图借鉴 BiliMusic-Desktop) ----
+            # BiliMusic 用听歌时长 + 热力日历回答「我最近在听什么」；
+            # 下载器的同款洞察是「我最近在下什么、哪位作者占了大头」。
+            # 纯读 media_item 表（Database.stats_summary），零写路径。
+            self._stats_detail = QLabel("", self)
+            self._stats_detail.setWordWrap(True)
+            self._stats_detail.setStyleSheet(muted_qss())
+            self._stats_detail.hide()
+            outer.addWidget(self._stats_detail)
 
             # ---- 主内容：表格 ↔ 空态 ----
             self._stack = QStackedWidget(self)
@@ -218,6 +229,12 @@ def build_history_widgets():
             try:
                 rows = await db.list_recent(limit=500)
                 total = await db.count()
+                # 统计条数据（0.3.14）。失败不拖垮主查询——历史列表
+                # 是主体，统计是锦上添花。
+                try:
+                    stats = await db.stats_summary(recent_days=7)
+                except Exception:  # noqa: BLE001
+                    stats = None
             finally:
                 await db.close()
 
@@ -227,6 +244,7 @@ def build_history_widgets():
             self._stat_total.set_value(str(total))
             self._stat_showing.set_value(len(rows))
             self._loading_state.stop()
+            self._render_stats(stats)
             if rows:
                 self._stack.setCurrentWidget(self.table)
             else:
@@ -269,6 +287,35 @@ def build_history_widgets():
             # 保留用户上一次选的排序列 / 方向；首次填充落到 _build_ui
             # 设好的默认（下载时间倒序）。
             header.setSortIndicator(prev_section, prev_order)
+
+        def _render_stats(self, stats) -> None:
+            """把 stats_summary 渲染成一行统计文案。
+
+            ``None``（查询失败 / 数据库关闭）时整条隐藏——空态/错误态
+            不需要统计。文案刻意压成单行：这是辅助信息，不该抢主表格
+            的视觉权重。
+            """
+            if not stats or not stats.get("total"):
+                self._stats_detail.hide()
+                return
+            parts: list[str] = []
+            by_platform = stats.get("by_platform") or {}
+            if by_platform:
+                parts.append(
+                    "平台分布：" + "、".join(
+                        f"{name} {n}" for name, n in by_platform.items()
+                    )
+                )
+            recent = stats.get("recent_count") or 0
+            parts.append(f"近 7 天 {recent} 条")
+            top_authors = stats.get("top_authors") or []
+            if top_authors:
+                top = "、".join(
+                    f"{name}({n})" for name, n in top_authors[:3]
+                )
+                parts.append(f"最多下载：{top}")
+            self._stats_detail.setText(" · ".join(parts))
+            self._stats_detail.show()
 
         def _row_record(self, row_idx: int):
             """视觉行 → 数据记录。

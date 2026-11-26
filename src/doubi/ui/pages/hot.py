@@ -49,6 +49,7 @@ def build_hot_widgets():
     from PySide6.QtWidgets import (
         QApplication,
         QHBoxLayout,
+        QLabel,
         QMenu,
         QMessageBox,
         QStackedWidget,
@@ -122,6 +123,12 @@ def build_hot_widgets():
             self.refresh_btn = PushButton("刷新", self)
             self.refresh_btn.clicked.connect(self._on_refresh)
             self._header.add_action(self.refresh_btn)
+            # 多选模式按钮（0.3.14 移植自 BiliMusic-Desktop），与搜索页同款。
+            self._multiselect_btn = PushButton("多选下载", self)
+            self._multiselect_btn.setCheckable(True)
+            self._multiselect_btn.setFixedWidth(110)
+            self._multiselect_btn.toggled.connect(self._on_multiselect_toggled)
+            self._header.add_action(self._multiselect_btn)
             outer.addWidget(self._header)
 
             # ---- 平台切换 ----
@@ -181,6 +188,25 @@ def build_hot_widgets():
             self._loading_state = LoadingState(self)
             self._loading_state.set_message("正在拉取榜单…")
             self._stack.addWidget(self._loading_state)
+
+            # ---- 多选批量操作条（默认隐藏，与搜索页同款） ----
+            self._batch_bar = QWidget(self)
+            batch_row = QHBoxLayout(self._batch_bar)
+            batch_row.setContentsMargins(0, 0, 0, 0)
+            batch_row.setSpacing(SPACE_MD)
+            self._batch_label = QLabel("已选 0 项", self._batch_bar)
+            self._batch_label.setStyleSheet("color: #888;")
+            batch_row.addWidget(self._batch_label, 1)
+            self._batch_download_btn = PushButton("批量下载选中项", self._batch_bar)
+            self._batch_download_btn.clicked.connect(self._on_batch_download)
+            batch_row.addWidget(self._batch_download_btn)
+            self._batch_cancel_btn = PushButton("退出多选", self._batch_bar)
+            self._batch_cancel_btn.clicked.connect(
+                lambda: self._multiselect_btn.setChecked(False)
+            )
+            batch_row.addWidget(self._batch_cancel_btn)
+            self._batch_bar.hide()
+            outer.addWidget(self._batch_bar)
 
             outer.addWidget(self._stack, 1)
 
@@ -542,6 +568,114 @@ def build_hot_widgets():
             box.setDefaultButton(box.buttons()[-1])
             box.exec()
             return box.clickedButton() is yes
+
+        # ---- 多选批量下载 (0.3.14，移植自 BiliMusic-Desktop) ----------
+        # 与搜索页同款逻辑；热榜的特例是热搜词行（is_hot_word_row），
+        # 批量时直接计入 skipped，不触发「搜索该词」分支——批量语义
+        # 下的用户意图是「收这几条」，搜词展开是另一种动作。
+
+        def _selected_row_indices(self) -> list[int]:
+            if not self._multiselect_btn.isChecked():
+                return []
+            rows = {index.row() for index in self.table.selectedIndexes()}
+            return sorted(rows)
+
+        def _on_multiselect_toggled(self, on: bool) -> None:
+            from PySide6.QtWidgets import QAbstractItemView
+
+            self.table.setSelectionMode(
+                QAbstractItemView.ExtendedSelection
+                if on else QAbstractItemView.SingleSelection
+            )
+            self._batch_bar.setVisible(on)
+            if not on:
+                self.table.clearSelection()
+                self._batch_label.setText("已选 0 项")
+            else:
+                self.table.selectionModel().selectionChanged.connect(
+                    self._on_batch_selection_changed
+                )
+                self._refresh_batch_label()
+
+        def _on_batch_selection_changed(self, *_args) -> None:
+            self._refresh_batch_label()
+
+        def _refresh_batch_label(self) -> None:
+            n = len(self._selected_row_indices())
+            self._batch_label.setText(f"已选 {n} 项")
+            self._batch_download_btn.setEnabled(n > 0)
+
+        def _on_batch_download(self) -> None:
+            if self._task_manager is None:
+                toast_error(self, "未连接任务管理器", "请在主窗口中打开此页面。")
+                return
+            rows = self._selected_row_indices()
+            if not rows:
+                toast_warning(self, "没有选中项", "先按住 Ctrl 点选要下载的行。")
+                return
+
+            from ..row_actions import is_hot_word_row, share_url_for
+
+            pending_urls: list[tuple[dict, str]] = []
+            skipped = 0
+            for r in rows:
+                record = self._rows[r]
+                if is_hot_word_row(record):
+                    skipped += 1
+                    continue
+                url = share_url_for(record, self._platform)
+                if url:
+                    pending_urls.append((record, url))
+                else:
+                    skipped += 1
+
+            if not pending_urls:
+                toast_warning(
+                    self, "没有可下载项",
+                    "选中的行都是热搜词或没有直链，无法批量下载。",
+                )
+                return
+
+            from ..row_confirm import confirm_multi_select_plan
+
+            plan = confirm_multi_select_plan(len(pending_urls), skipped)
+            if not self._confirm(plan):
+                return
+
+            async def _do():
+                from ..row_actions import build_media_item, row_label
+
+                opts = self._build_options()
+                queued = 0
+                failed: list[str] = []
+                for record, url in pending_urls:
+                    try:
+                        item, children = await build_media_item(url)
+                    except Exception:  # noqa: BLE001 — 单行失败不拖垮整批
+                        item, children = None, []
+                    targets = children or ([item] if item is not None else [])
+                    if not targets:
+                        failed.append(row_label(record) or url)
+                        continue
+                    for target in targets:
+                        self._task_manager.add(target, opts)
+                    queued += len(targets)
+                if queued:
+                    tail = (
+                        f"，另有 {len(failed)} 项解析失败"
+                        if failed else ""
+                    )
+                    toast_success(
+                        self, "批量任务已入队",
+                        f"共 {queued} 个视频加入下载队列{tail}。",
+                    )
+                else:
+                    toast_error(
+                        self, "批量下载失败",
+                        "所有选中项都没能解析出媒体项。",
+                    )
+
+            self._run_async(_do())
 
         def _run_async(self, coro) -> None:
             import asyncio

@@ -48,7 +48,7 @@ def build_main_window():
     )
 
     from ..core.engine_loader import build_default_pipeline
-    from .feedback import toast_info, toast_success
+    from .feedback import toast_info, toast_success, toast_warning
     from .i18n import tr
     from .pages import (
         build_download_widgets,
@@ -294,6 +294,79 @@ def build_main_window():
             # 把 ShortcutManager 注入设置页，让「快捷键速查」卡片显示出来。
             # 必须在 register 之后，否则 set_shortcuts 收到的 cheat_sheet 是空表。
             self.settings_interface.set_shortcuts(self.shortcuts)
+
+            # ---- 启动时静默检查更新（0.3.14 移植自 BiliMusic-Desktop） ----
+            # 与 _offer_restore 同款延迟射击：窗口先画出来，检查在工作
+            # 线程里跑（最多 8s × 镜像数），结果用 InfoBar 提示一次。
+            # 开关关闭 / 查询失败时完全不发声。
+            QTimer.singleShot(1500, self._startup_update_check)
+
+        # ---- 检查更新 ------------------------------------------------
+
+        def _startup_update_check(self) -> None:
+            """启动 1.5s 后后台查一次新版本；有新版弹 InfoBar。
+
+            刻意的设计取舍：
+
+            * **不进设置页状态行**——启动检查是给「没盯设置页」的用户
+              看的，直接 InfoBar 全局提示；设置页的「检查更新」按钮
+              走它自己的查询链路，两处互不干扰。
+            * **开关读 live 配置**（``load_config``）而不是
+              ``settings_interface._cfg`` 快照：用户上次会话关掉了开关，
+              本次启动就不应出网查询。
+            * **工作线程查询**（QThreadPool）——主线程只做 UI 更新，
+              单 Shot 定时器从工作线程回调到主线程。
+            """
+            from PySide6.QtCore import QRunnable, QThreadPool, QTimer as _QTimer
+            from PySide6.QtCore import Slot as _Slot
+
+            try:
+                from ...core.config import load_config
+
+                if not load_config(None).update_check_on_startup:
+                    return
+            except Exception:  # noqa: BLE001 — 配置读不出就不查
+                return
+
+            from qfluentwidgets import InfoBar
+
+            window = self
+            btn_holder = {"btn": self.about_btn}
+
+            class _StartupRunnable(QRunnable):
+                @_Slot()
+                def run(self) -> None:
+                    from ...core import update_check
+
+                    info = None
+                    try:
+                        info = update_check.fetch_latest_release()
+                    except Exception:  # noqa: BLE001 — 启动检查绝不崩
+                        info = None
+                    if info is None or not info.update_available:
+                        return
+
+                    def _notify() -> None:
+                        # 走统一 toast helper（AST 守护测试要求 main_window
+                        # 不直接调 InfoBar）。用 success 语义——「有新版」
+                        # 是值得注意的正面消息，比 info 更醒目。
+                        toast_success(
+                            window,
+                            "发现新版本",
+                            (
+                                f"DouBi v{info.latest_version} 已发布"
+                                f"（当前 v{info.current_version}），"
+                                "Release 链接已复制到剪贴板。"
+                            ),
+                        )
+                        try:
+                            QApplication.clipboard().setText(info.release_url)
+                        except Exception:  # noqa: BLE001
+                            pass
+
+                    _QTimer.singleShot(0, btn_holder["btn"], _notify)
+
+            QThreadPool.globalInstance().start(_StartupRunnable())
 
         # ---- 跨进程断点续传 -------------------------------------------
 
