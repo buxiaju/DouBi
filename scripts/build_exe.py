@@ -417,7 +417,22 @@ try:
     else:
         _env = os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or ""
         if not _env or _env == "0" or not os.path.isdir(_env):
-            os.environ.pop("PLAYWRIGHT_BROWSERS_PATH", None)
+            # playwright/_impl/_transport.py 在冻结进程里会对 driver 子进程
+            # env.setdefault("PLAYWRIGHT_BROWSERS_PATH", "0")——迫使 node
+            # driver 找包内 .local-browsers（为捆绑内核的构建设计）。精简
+            # 构建没捆绑内核，"0" 必然失败。setdefault 不覆盖已有键，所以
+            # 这里必须【显式设值】为 node 默认缓存目录（也是功能插件安装
+            # 内核的目录），而不是清掉。
+            if sys.platform == "win32":
+                _local = os.environ.get("LOCALAPPDATA") or os.path.expanduser(
+                    "~/AppData/Local"
+                )
+                _default = os.path.join(_local, "ms-playwright")
+            elif sys.platform == "darwin":
+                _default = os.path.expanduser("~/Library/Caches/ms-playwright")
+            else:
+                _default = os.path.expanduser("~/.cache/ms-playwright")
+            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = _default
 except Exception:
     pass
 

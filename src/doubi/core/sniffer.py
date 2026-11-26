@@ -395,6 +395,12 @@ class Sniffer:
         data: dict[str, Any] = {}
 
         try:
+            # 冻结进程兜底：playwright transport 会 setdefault
+            # ("PLAYWRIGHT_BROWSERS_PATH", "0")，精简构建没捆绑内核必然
+            # 失败——显式设值压制（详见 plugin_manager.ensure_browsers_env）
+            from doubi.core.plugin_manager import ensure_browsers_env
+
+            ensure_browsers_env()
             async with async_playwright() as p:  # type: ignore[misc]
                 # channel="chromium" 是**体积优化的前置条件**，不是可选装饰。
                 #

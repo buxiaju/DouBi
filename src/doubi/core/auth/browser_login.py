@@ -144,6 +144,12 @@ class _BaseBrowserLogin:
         import time
 
         started = time.monotonic()
+        # 冻结进程兜底：playwright transport 会对 driver 子进程
+        # setdefault("PLAYWRIGHT_BROWSERS_PATH", "0")，精简构建没捆绑内核
+        # 必然失败——显式设值压制（详见 plugin_manager.ensure_browsers_env）
+        from doubi.core.plugin_manager import ensure_browsers_env
+
+        ensure_browsers_env()
         with sync_playwright() as p:
             # channel="chromium" 必须和 core/sniffer.py 保持一致：发布版不打包
             # chrome-headless-shell.exe（270.7 MB），只带完整 Chromium。虽然

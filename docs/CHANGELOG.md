@@ -84,28 +84,38 @@
 > | local 全量 | 1612 passed / 8 skipped | **1788 passed / 8 skipped** | +176（插件管理 14 + 打包守门 24 + 下载页右键 3 + 统计条/更新检查等） |
 > | 安装包 | 230.9 MB | **74.7 MB** | -67% |
 
-### 五、发布日补丁：`PLAYWRIGHT_BROWSERS_PATH="0"` 环境免疫（实锤修复）
+### 五、发布日补丁：冻结进程浏览器路径修复（两轮实锤）
 
 **症状**：用户装好功能插件后登录报「Executable doesn't exist at
 `...\_internal\playwright\driver\package\.local-browsers\chromium-1234\...`」，
 但内核明明在 `%LOCALAPPDATA%\ms-playwright` 里。
 
-**根因**：node driver 只在 `PLAYWRIGHT_BROWSERS_PATH="0"` 时才找包内
-`.local-browsers`（相对包语义）。精简构建没有捆绑内核，这个目录必然
-不存在；而 `"0"` 可能来自用户终端会话里为其他项目设的临时环境变量。
-设置页探针（`_browsers_dir`）不识别 `"0"`、照走 LOCALAPPDATA → 报
-「已安装」，登录时 driver 却找不到内核——两处对 env 的解读不一致。
+**根因（第二轮实锤修正）**：`playwright/_impl/_transport.py` 的
+`PipeTransport.connect` 在**冻结进程**（`sys.frozen`）里会对 driver
+子进程 ``env.setdefault("PLAYWRIGHT_BROWSERS_PATH", "0")``——这是给
+"把内核捆进包" 的构建准备的（`"0"` = 相对包语义，找包内
+`.local-browsers`）。精简构建没有捆绑内核，这个目录必然不存在，
+冻结版登录/嗅探**必然**失败，与用户终端环境变量无关（第一轮
+"终端残留" 的判断是错的）。`setdefault` 不会覆盖已存在的键——
+所以解法是**在进程内显式设置**该变量为真实目录，压住 playwright
+自己的 `"0"`。探针（`_browsers_dir`）把 `"0"` 当没设走 LOCALAPPDATA，
+因此设置页报「已安装」而登录失败。
 
-**修法**（双层）：
+**修法**（三层）：
 
 1. **冻结启动壳**：未捆绑内核时，env 为 `"0"` / 相对路径 / 指向不存在
-   目录 → 直接 pop，回落 node 默认 LOCALAPPDATA（正好是插件安装目录）；
-   env 指向真实存在的绝对目录则尊重用户。包内有捆绑内核时仍钉死包内目录。
-2. **探针对齐**：`_browsers_dir()` 把 `"0"` 当没设，与登录时的实际查找
+   目录 → **显式设值**为 node 默认缓存目录（Windows
+   `%LOCALAPPDATA%\ms-playwright` / macOS `~/Library/Caches/ms-playwright`
+   / Linux `~/.cache/ms-playwright`——正好是插件安装目录）；env 指向
+   真实存在的绝对目录则尊重用户。包内有捆绑内核时仍钉死包内目录。
+2. **core 兜底**：`plugin_manager.ensure_browsers_env()` 在
+   `browser_login` / `sniffer` 启动 playwright 前执行同样规则，覆盖
+   不经启动壳的入口。
+3. **探针对齐**：`_browsers_dir()` 把 `"0"` 当没设，与登录时的实际查找
    语义保持一致。
 
-**判据**：dry-run 验证干净环境下 driver 计算路径即 LOCALAPPDATA 且
-chrome.exe 存在；新增 4 个守门测试（launcher 清理规则 + 探针三态）。
+**判据**：新增守门测试（launcher 显式设值规则 + `ensure_browsers_env`
+三态 + 探针三态），相关 119 例全过。
 
 ## 0.3.13 (2026-11-12) — tag 后三批功能随安装包首发：嗅探代理 + 停摆看门狗 + m3u8 AES/MAP
 

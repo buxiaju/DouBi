@@ -538,15 +538,18 @@ def test_gui_never_imports_the_excluded_server_stack():
 
 
 def test_launcher_neutralizes_bogus_browsers_path_env():
-    """冻结壳必须在未捆绑内核时清掉失效的 PLAYWRIGHT_BROWSERS_PATH。
+    """冻结壳必须在未捆绑内核时显式设置 PLAYWRIGHT_BROWSERS_PATH。
 
-    实锤案例：用户终端会话里残留 ``PLAYWRIGHT_BROWSERS_PATH="0"``（别的
-    项目留下的），node driver 据此去找包内 ``.local-browsers``——精简构建
-    必然没有 → 登录报「Executable doesn't exist」。壳的清理规则：
+    实锤根因（playwright/_impl/_transport.py PipeTransport.connect）：冻结
+    进程里 playwright 会对 driver 子进程
+    ``env.setdefault("PLAYWRIGHT_BROWSERS_PATH", "0")``，迫使 node driver
+    找包内 ``.local-browsers``——精简构建必然没有 → 登录报
+    「Executable doesn't exist」。setdefault 不覆盖已存在的键，所以壳的
+    规则是**显式设值**而非 pop：
 
-    * 包内有捆绑内核 → 钉死 env（优先级最高）
-    * env 是 "0" / 相对路径 / 指向不存在的目录 → pop，回落 node 默认
-      ``%LOCALAPPDATA%\\ms-playwright``（= 功能插件安装目录）
+    * 包内有捆绑内核 → 钉死 env 到包内目录（优先级最高）
+    * env 是 "0" / 相对路径 / 指向不存在的目录 → 设为 node 默认缓存目录
+      （``%LOCALAPPDATA%\\ms-playwright`` 等，= 功能插件安装目录）
     * env 指向真实存在的绝对目录 → 尊重用户
     """
     mod = _load_build_module()
@@ -554,7 +557,11 @@ def test_launcher_neutralizes_bogus_browsers_path_env():
     # 捆绑内核时钉死
     assert 'os.path.isdir(_browsers)' in src
     assert 'os.environ["PLAYWRIGHT_BROWSERS_PATH"] = _browsers' in src
-    # 未捆绑时清掉三类失效值："0" / 相对路径 / 不存在的目录
+    # 未捆绑时对三类失效值（"0" / 相对路径 / 不存在的目录）显式设默认目录
     assert '_env == "0"' in src
     assert 'not os.path.isdir(_env)' in src
-    assert 'os.environ.pop("PLAYWRIGHT_BROWSERS_PATH", None)' in src
+    assert 'os.environ["PLAYWRIGHT_BROWSERS_PATH"] = _default' in src
+    # 三个平台的默认缓存目录都要覆盖
+    assert 'LOCALAPPDATA' in src
+    assert 'ms-playwright' in src
+    assert 'Library' in src and '.cache' in src

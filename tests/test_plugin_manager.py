@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import os
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -25,6 +26,7 @@ from doubi.core.plugin_manager import (
     PluginStatus,
     _browsers_dir,
     _parse_percent,
+    ensure_browsers_env,
     install_sniffer_plugin,
     probe_sniffer_plugin,
 )
@@ -132,6 +134,52 @@ class _BrowsersDirCase(unittest.TestCase):
         # 本机有内核 → 返回默认 LOCALAPPDATA 目录；CI → None。都不应
         # 是那个不存在的路径。
         self.assertNotEqual(result, Path(r"C:\definitely\not\here\xyz"))
+
+
+class _EnsureBrowsersEnvCase(unittest.TestCase):
+    """ensure_browsers_env 对冻结进程 setdefault("0") 的压制。"""
+
+    def test_zero_is_replaced_with_real_default(self):
+        """env="0" 必须被替换成真实目录——playwright transport 的
+        setdefault 不会覆盖已存在的键，显式设值即压制成功。"""
+        with mock.patch.dict(
+            "os.environ", {"PLAYWRIGHT_BROWSERS_PATH": "0"}
+        ):
+            with tempfile.TemporaryDirectory() as tmp:
+                # 造一个含 chromium-* 的目录让 _browsers_dir 命中
+                browser = Path(tmp) / "chromium-1234"
+                browser.mkdir()
+                with mock.patch(
+                    "doubi.core.plugin_manager._browsers_dir",
+                    return_value=Path(tmp),
+                ):
+                    ensure_browsers_env()
+                self.assertEqual(
+                    os.environ["PLAYWRIGHT_BROWSERS_PATH"], tmp
+                )
+
+    def test_unset_pins_default_dir_even_without_browser(self):
+        """没设 env 且内核未装 → 也钉到默认缓存目录，让报错指向正确的
+        安装位置（而非误导性的包内 .local-browsers）。"""
+        with mock.patch.dict(
+            "os.environ", {}, clear=False
+        ):
+            os.environ.pop("PLAYWRIGHT_BROWSERS_PATH", None)
+            with mock.patch(
+                "doubi.core.plugin_manager._browsers_dir", return_value=None
+            ):
+                ensure_browsers_env()
+            value = os.environ["PLAYWRIGHT_BROWSERS_PATH"]
+        self.assertNotEqual(value, "0")
+        self.assertIn("ms-playwright", value)
+
+    def test_valid_custom_dir_is_untouched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(
+                "os.environ", {"PLAYWRIGHT_BROWSERS_PATH": tmp}
+            ):
+                ensure_browsers_env()
+                self.assertEqual(os.environ["PLAYWRIGHT_BROWSERS_PATH"], tmp)
 
 
 class _InstallFlowCase(unittest.TestCase):

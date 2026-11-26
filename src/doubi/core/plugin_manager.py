@@ -103,6 +103,50 @@ def _browsers_dir() -> Optional[Path]:
     return None
 
 
+def ensure_browsers_env() -> None:
+    """冻结进程内压制 playwright 的 ``PLAYWRIGHT_BROWSERS_PATH="0"``。
+
+    关键坑：playwright/_impl/_transport.py 的 ``PipeTransport.connect`` 在
+    冻结进程（``sys.frozen``）里会对 driver 子进程
+    ``env.setdefault("PLAYWRIGHT_BROWSERS_PATH", "0")``——迫使 node driver
+    找包内 ``.local-browsers``（为把内核捆进包的构建设计）。精简构建没捆
+    绑内核，这个值必然让登录/嗅探报「Executable doesn't exist」。而
+    ``setdefault`` 不会覆盖已存在的键，所以只要我们在进程内**显式设置**
+    该变量即可压制它。
+
+    规则（与 scripts/build_exe.py 启动壳一致，本函数是 core 侧兜底，
+    覆盖不走启动壳入口的情况）：
+
+    * env 指向真实存在的目录 → 尊重用户，不动
+    * env 是 "0" / 相对路径 / 指向不存在的目录 / 没设 → 设为
+      :func:`_browsers_dir` 结果（内核已装时）或 node 默认缓存目录
+      （内核没装时——报错会指向正确的安装位置，而非误导性的
+      包内 .local-browsers）
+    """
+    import os
+
+    env = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+    if env and env != "0":
+        try:
+            if Path(env).is_dir():
+                return
+        except OSError:
+            pass
+    target = _browsers_dir()
+    if target is None:
+        # 内核还没装：也钉到默认目录，让后续报错指向正确的安装位置
+        if sys.platform == "win32":
+            local = os.environ.get("LOCALAPPDATA") or str(
+                Path.home() / "AppData" / "Local"
+            )
+            target = Path(local) / "ms-playwright"
+        elif sys.platform == "darwin":
+            target = Path.home() / "Library" / "Caches" / "ms-playwright"
+        else:
+            target = Path.home() / ".cache" / "ms-playwright"
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(target)
+
+
 def _read_chromium_revision() -> Optional[str]:
     """从已装 playwright 的 browsers.json 读 chromium 目标 revision。
 
