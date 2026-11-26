@@ -3,7 +3,7 @@
 > 跨平台视频下载器 —— 一个安装包 **74.7 MB** 的 Windows 桌面应用，同时提供 GUI / CLI / REST / MCP 四种形态，下载能力由 [yt-dlp](https://github.com/yt-dlp/yt-dlp) 提供。
 
 <p align="center">
-  <img src="screenshots/01_doubi.png" alt="DouBi 主界面（豆比紫主题）" width="720">
+  <img src="screenshots/00_main_040.png" alt="DouBi 0.4.0 主界面（解析页 · 豆比主题）" width="720">
 </p>
 
 ## 亮点
