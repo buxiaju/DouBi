@@ -745,7 +745,7 @@ multidict / yarl / propcache / frozenlist 各 1 个），这是 https 分片下�
 | 0.3.11 | 400,655,011 B / 382.1 MB | `938da446…` | 45.8s | 3.3s | 装后 1413 文件 / 1177.7 MB（Playwright chromium-1254 进包 + 压缩率 32.4%）；CI 已移除，手工打包 |
 | 0.3.12 | 242,112,099 B / 230.9 MB | `c43e73b2…` | — | — | 瘦身版：ms-playwright 按 browsers.json 过滤 revision（跳过 chromium-1254/ffmpeg-1013），onedir 1.2GB→727MB / 1101 文件，压缩率 31.8%，CRC `0x48AD8ABA` |
 | 0.3.13 | 242,161,067 B / 230.9 MB | `d6eba420…` | — | — | tag 后三批功能随包首发，纯打包版本；onedir 727MB / 1101 文件不变，压缩率 31.8%，CRC `0x6CD0ECAA`；首次构建被 SAFE_DELETE 拦旧 dist/doubi-gui（1101 文件 > 50 阈值），mv 改名让位后重跑成功 |
-| 0.4.0 | 78,323,973 B / 74.7 MB | `5e4c4acf…` | — | — | 精简版：不捆绑 Chromium（插件按需装）+ N_m3u8DL-CLI 随包；onedir 237MB，压缩率 ~31.7%；**发布日补丁重打**——冻结壳免疫 `PLAYWRIGHT_BROWSERS_PATH="0"`（用户终端残留 env 致登录找包内 .local-browsers），首版 SHA `6e55b5ec…`；翻译修剪步骤被 SAFE_DELETE 拦（50 文件阈值），构建后手工 `find -delete` 补完 |
+| 0.4.0 | 78,317,140 B / 74.7 MB | `241da29c…` | — | — | 精简版：不捆绑 Chromium（插件按需装）+ N_m3u8DL-CLI 随包；onedir 237MB，压缩率 ~31.7%；**发布日补丁重打×2**——冻结壳对 `PLAYWRIGHT_BROWSERS_PATH` 显式设默认目录（playwright transport 在冻结进程会 setdefault("0") 强找包内 .local-browsers；第一版 pop 修法无效已废弃，首版 SHA `6e55b5ec…` / 二版 `5e4c4acf…`）；翻译修剪步骤被 SAFE_DELETE 拦（50 文件阈值），构建后手工 `find -delete` 补完 |
 
 > **基线共识**：所有版本实测都达成：CRC footer 写入正确、`*headless_shell*` 与 `*webengine*` 真实文件残留 0；安装包体积跳变先按文件排查（多半是浏览器目录版本漂移），不要急着改打包配置。
 
