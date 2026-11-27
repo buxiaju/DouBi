@@ -437,9 +437,75 @@ aria2 是纯下载器，不解析网页。`Aria2Engine.supports()` 只认有
 
 **取消**：`cancel_check` 返回 True 时调 `remove(gid)`，和 yt-dlp 一样是协作式。
 
-### 7.4 引擎选择（`engine_loader.build_default_engine(cfg)`）
+### 7.4 Nm3u8dlEngine（嗅探 HLS 首选，`engines/nm3u8dl.py`）
 
-按 `cfg.engine` 选择引擎：
+通用嗅探到的 m3u8 流**首选**这个引擎：N_m3u8DL-CLI v3.0.2 原生二进制
+（随安装包分发，`tools/nm3u8dl/`），AES-128 / ChaCha20 / master playlist
+全部原生处理，不必自己实现解密。
+
+- `supports()`：`item.extra["is_hls"]` 或 URL 含 `.m3u8` / `.m3u`。
+- 二进制定位 `_find_cli()`：`sys._MEIPASS/tools/nm3u8dl`（冻结包）→
+  cwd → 仓库根。找不到时 `is_available=False`，路由跳过它落 M3u8Engine。
+- **进度双通道**：v3.0.2 砍掉了 `[#current/total]` 输出格式，stdout
+  解析只能拿到「总分片：N」分母；分子靠**文件系统 watchdog**——1 Hz
+  扫 out_dir 数 `.ts`（含 `Part_*/` 桶），除以分母。这是**稳定契约**：
+  CLI 换日志格式也不影响进度条。
+- 参数映射：`concurrent_fragments` → `--maxThreads`；`proxy` →
+  `--proxyAddress`；固定带 `--enableBinaryMerge --enableMuxFastStart
+  --enableDelAfterDone --noProxy`。
+- 完成判定：rc==0 且输出文件存在非空（后缀可能被 CLI 重排，找不到时
+  按 stem 扫 workDir 兜底）。
+
+### 7.5 M3u8Engine（HLS 备选，`engines/m3u8.py`）
+
+ffmpeg 路径为主、纯 Python aiohttp 分片下载兜底：
+
+- `_can_ffmpeg_fetch()` 守住一个曾经的静默死洞：无 TLS 后端的 ffmpeg
+  遇到 https 播放列表会 exit 1「Protocol not found」且一个字节都不写
+  ——必须先探 `-protocols`，不支持就把整个 URL 交给 aiohttp 路径降级，
+  而不是死在半路。
+- ffmpeg 路径：`-c copy -bsf:a aac_adtstoasc -movflags +faststart`，
+  进度从 stdout 的 `time=` 行解析（分母来自 `Duration:` 行）。
+- aiohttp 路径：自己解析播放列表（含 AES-128 解密需 cryptography，
+  没装就明确报错让用户走 ffmpeg 路径），分片并发下载后 concat。
+- 进度节流：百分比整数变化才 emit，同 yt-dlp 的 ≥0.5% 策略。
+
+### 7.6 DirectHttpEngine（`engines/direct_http.py`）
+
+直链视频文件（`.mp4` / `.webm` 等，`item.extra["is_direct_video"]`）。
+流式下载 + 进度回调，嗅探层把「真视频直链」和「m3u8 播放列表」分开
+打标（`is_direct_video` / `is_hls`），这里只接前者。
+
+### 7.7 子进程监督器（`engines/_subproc.py::run_supervised_subprocess`）
+
+nm3u8dl / m3u8 两个引擎的所有子进程都从这一个监督器拉起，它负责四件事：
+
+1. **输出看门狗**：stdout/stderr 合流后单管道读，静默超过
+   `watchdog_seconds`（默认 180s）即强杀并抛 `SubprocessTimeout`。
+   **0.4.3 起**新增 `keepalive` 参数：静默超阈值时先轮询一次探针，
+   返回真值就重置计时器——N_m3u8DL-CLI 合并/faststart、ffmpeg 的
+   moov 搬迁阶段都会静默数分钟但**输出文件在持续变大**，不区分
+   「静默在生产」和「静默在冻结」就会误杀，管线自动重试后表现为
+   「下载到 100% 又从头来」（用户实锤报障）。引擎侧用
+   `make_dir_activity_keepalive(out_dir)` 快照（文件数, 总字节数）：
+   磁盘有变化=活着；真冻结时一个 tick 后照杀，检测能力不减弱。
+   注意 keepalive 首次调用只建基线返回 False；探针抛异常视同不活。
+2. **协作取消**：`cancel_check`（`_StopFlag` 或可调用）在每次
+   read chunk 前检查，触发即 terminate（Windows 上就是 TerminateProcess），
+   防孤儿孙进程。
+3. **CREATE_NO_WINDOW**（0.4.2 起）：GUI 是 windowed 无控制台进程，
+   Windows 会给控制台子进程分配新终端——表现为下载时黑色窗口反复
+   弹出。监督器在 win32 上默认注入 `CREATE_NO_WINDOW (0x08000000)`，
+   调用方显式传 `creationflags` 时不覆盖。CLI 形态父进程有控制台
+   可复用，所以这个 bug 只在 GUI 打包版出现。
+4. **`\r`/`\n` 双分隔**：N_m3u8DL-CLI 用 `\r` 刷进度行，asyncio 默认
+   行迭代器不适用，`on_chunk` 把切行责任交给调用方。
+
+### 7.8 引擎选择（`engine_loader` + `pipeline._select_engine`）
+
+两条路由叠在一起，顺序决定优先级：
+
+**第一层——默认引擎**（`build_default_engine(cfg)`，按 `cfg.engine`）：
 
 | 配置值 | 引擎 | 说明 |
 | --- | --- | --- |
@@ -447,15 +513,26 @@ aria2 是纯下载器，不解析网页。`Aria2Engine.supports()` 只认有
 | `aria2` | `Aria2Engine` | 多线程分片下载，只接 `direct_url` |
 | 其他 | `YtDlpEngine` | 未知引擎名回退，避免配置写错让应用起不来 |
 
-`build_default_pipeline(cfg=...)` 透传 cfg 给 `build_default_engine`。
-CLI / REST / GUI 三端都走这个工厂，行为一致。
+**第二层——额外引擎**（`build_extra_engines()`，在 pipeline 里
+**先于**默认引擎尝试，第一个 `supports()` 命中即接手）：
 
-### 7.5 如何新增一个引擎
+1. `Nm3u8dlEngine` —— 嗅探 HLS 首选
+2. `M3u8Engine` —— nm3u8dl 二进制不在时兜底
+3. `DirectHttpEngine` —— 直链视频
+
+都不命中才落默认引擎。这保证：平台适配器（抖音/B站/YouTube）解析出
+的容器照走 yt-dlp，而嗅探层的裸 m3u8 / 直链由专职引擎处理。
+
+### 7.9 如何新增一个引擎
 
 1. 继承 `Engine`，实现 `supports` / `download`。
 2. 在 `config.py::DEFAULTS` 加引擎名（如 `"my_engine"`）和引擎私有配置字段。
-3. 在 `engine_loader.build_default_engine(cfg)` 里加分支。
-4. 测试用 Mock（参考 `test_aria2_engine.py`），不依赖真实二进制。
+3. 在 `engine_loader.build_default_engine(cfg)` 里加分支；嗅探场景专用
+   引擎则加进 `build_extra_engines()` 列表（顺序即优先级）。
+4. 子进程一律走 `run_supervised_subprocess`（取消 / 看门狗 / 防弹黑框
+   免费获得），不要自己 `asyncio.create_subprocess_exec`。
+5. 测试用 Mock（参考 `test_aria2_engine.py`），不依赖真实二进制；
+   涉及监督器行为参考 `test_subproc_keepalive.py`（真子进程 + 短看门狗）。
 
 ---
 
@@ -777,14 +854,17 @@ increment_checkpoint  (platform, user_id, mode) 主键 · last_item_id/last_chec
 
 ### 13.1 页面与导航
 
-`main_window.py` 的 `MainWindow(MSFluentWindow)` 注册 4 个页面：
+`main_window.py` 的 `MainWindow(MSFluentWindow)` 注册 7 个页面：
 
 | 导航 | 类 | 文件 | 职责 |
 |---|---|---|---|
 | 解析（默认首页） | `ParsePage` | `pages/parse.py` | URL 输入 → 解析 → 结果表勾选 → 加入下载 |
 | 下载 | `DownloadPage` | `pages/download.py` | 任务管理（下载中/已完成 tab） |
 | 历史 | `HistoryPage` | `pages/history.py` | SQLite 查询 + 刷新 + 打开目录 |
-| 设置 | `SettingsPage` | `pages/settings.py` | 账号登录 + 运行配置 + 主题 |
+| 搜索 | `SearchPage` | `pages/search.py` | 抖音/B站 关键词搜索 → 多选入队 |
+| 热榜 | `HotPage` | `pages/hot.py` | 抖音 4 牌榜 + B 站热搜/热门 → 多选入队 |
+| 收藏 | `FavoritesPage` | `pages/favorites.py` | 平台 Tab（抖音/B站）+ 类型 Tab，右键下钻/入队 |
+| 设置 | `SettingsPage` | `pages/settings.py` | 账号登录 + 运行配置 + 主题 + 插件 + 诊断 |
 
 每个页面模块暴露 `build_<page>_widgets()` 返回 `(class_, factory)`，Qt import 都在函数内**延迟加载**（无 PySide6 也能 import 模块）。
 
@@ -1952,7 +2032,7 @@ return YtDlpEngine()
 4. ~~**剪贴板监听**~~ **早已存在**（parse 页 `_poll_clipboard`，1.5s 轮询、只认具体平台、防打断）；**2026-11 补了开关**：`config.clipboard_watch`（默认关，关 = 轮询定时器完全不启动），设置页「剪贴板自动识别链接」可开。清单把它列为未做是文档滞后——评估前先 grep 现状。
 5. ~~**头像/账号入口**~~ **已达成（2026-11）**：登录态展示与一键登出落在设置页「账号与登录」卡（未做左下角常驻头像，信息架构上设置页更顺）。`auth_actions.logout(platform)` 删本地 cookie 文件即登出（幂等，远端无操作），设置页双平台「登出」按钮带确认框 + toast + 状态刷新。
 6. **附加内容下载**：引擎与搬运链全通（`write_nfo` / `write_danmaku` / `write_subtitles`，CLI `--nfo/--danmaku/--subtitles`）；**2026-11 补齐设置页开关**（下载卡三枚 SwitchButton，进 `_wire_auto_save` 自动保存），GUI 缺入口的「静默失效开关」就此清零。封面随「缩略图」开关已在弹窗与 config。剩：ASS 弹幕转换。
-7. **收藏页**（CLI 已支持 `--container favlist`，登录后可用；GUI 专属页未做）。
+7. ~~**收藏页**~~ **已做（0.3.12 起）**：GUI 独立收藏页（`pages/favorites.py`），抖音收藏夹 / 收藏视频 / 收藏合集 / 收藏音乐 / 收藏短剧四类 Tab + 右键下钻；**0.4.1 起支持 B 站收藏夹**（平台 Tab 切换，`bili_folders` 文件夹列表 → `bili_contents` 内容两类 kind，右键「下载整个收藏夹」走 `fav_folder` 确认弹框）。切换平台时强制清空表格行，防右键对错位 record 走火。CLI 侧 B 站收藏夹入口仍未做（见 ROADMAP P2）。
 8. ~~**纯编号解析**~~ **早已实现**：`BilibiliAdapter._bare_id_pattern` 覆盖 BV / av / ep / ss / ml 裸编号，历史页「重新解析」即依赖此路径。
 9. ~~**重复下载 / 文件重名策略**~~ **已做**（`config.duplicate_policy`，skip / redownload / ask）；剩：画质音质编码优先级、CDN 切换、更新检查。
 

@@ -12,7 +12,7 @@
 | 用户作品列表 | `download` | ✓ | USER 容器自动展开 |
 | **搜索** | `search` | ✓ 搜索页 | 抖音（综合 / 视频 / 用户 / 直播）+ **0.3.4 B 站（视频 / 用户）**；平台 Tab 切换；支持排序 / 时间 / 时长 / 粉丝量筛选 |
 | **热点榜** | `hot` | ✓ 热榜页 | 抖音 4 牌榜（热搜 / 娱乐 / 社会 / 挑战）+ **0.3.4 B 站热搜词 + 热门视频**；B 站走匿名公开端点，无需登录 |
-| **收藏夹全家族** | `favorites` | — | 收藏夹 + 收藏视频 / 合集 / 音乐 / 短剧 5 类 |
+| **收藏夹全家族** | `favorites` | ✓ 收藏页 | 抖音收藏夹 + 收藏视频 / 合集 / 音乐 / 短剧 5 类（**0.3.12 起 GUI 收藏页**）；**0.4.1 起收藏页支持 B 站收藏夹**（平台 Tab 切换，文件夹列表 → 内容 → 右键「下载整个收藏夹」） |
 | **评论 + 回复** | `comments` | — | 一级评论 + 嵌套回复 |
 | **关注 / 粉丝列表** | `user` | — | `--kind following\|followers`（DouBi 原生实现） |
 | **话题作品列表** | `hashtag` | — | 输入话题 id 或 `/challenge/detail/{id}` URL（DouBi 原生实现） |
@@ -92,6 +92,7 @@ doubi download -u "https://www.douyin.com/jingxuan?modal_id=7676517073484352822"
 
 # 常用开关
 doubi download -u URL --quality 4k --container mkv --concurrent 4
+doubi download -u URL --fragments 8          # 单任务分片并发（1-16，默认取配置）
 doubi download -u URL --no-database --no-manifest   # 完全跳过记录
 
 # 侧车文件（附加下载）—— 与主视频并排落盘

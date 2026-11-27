@@ -487,3 +487,52 @@ yt-dlp 的抖音抽取器只覆盖**单条视频**。推它去拿合集 / 搜索
 ### 13.5 测试边界
 
 签名层与 webapi 层全部用**真实响应快照**（脱离网络）测试，测试不打真实请求。只有「签名结构与白名单完整性」和「分页状态机」在测试里断言，平台真实返回值不做硬断言（会随风控变）。
+
+---
+
+## 14. 引擎路由与子进程监督
+
+### 14.1 两层路由
+
+一个 item 最终由谁下载，由两条路由叠加决定（`core/engine_loader.py` + `core/pipeline.py::_select_engine`）：
+
+```text
+item 进 pipeline
+  → 第一层：extra_engines 依次试 supports()，第一个命中即接手
+      1. Nm3u8dlEngine   （嗅探 HLS 首选，原生二进制处理 AES/ChaCha20/master）
+      2. M3u8Engine      （ffmpeg 下载，aiohttp 分片兜底）
+      3. DirectHttpEngine（真视频直链 .mp4/.webm）
+  → 都不命中
+  → 第二层：默认引擎（cfg.engine：yt-dlp / aria2）
+```
+
+平台适配器（抖音 / B 站 / YouTube）解析出的 item 走默认引擎；嗅探层
+打标的裸 m3u8（`is_hls`）与直链（`is_direct_video`）由专职引擎截获。
+Nm3u8dlEngine 二进制不在（`is_available=False`）时自动让位 M3u8Engine。
+
+### 14.2 子进程监督器（`engines/_subproc.py`）
+
+nm3u8dl / m3u8 的全部子进程都从 `run_supervised_subprocess` 一个口出，
+它把三件易错的事收敛成一处：
+
+1. **输出看门狗 + keepalive 通道**（0.4.3）：stdout 静默超过
+   `watchdog_seconds`（默认 180s）先轮询 `keepalive` 探针——返回真值
+   就重置计时器。动机：N_m3u8DL-CLI 的「二进制合并 + MuxFastStart」
+   与 ffmpeg 的 moov 搬迁阶段 stdout 零输出可持续数分钟，但输出文件
+   在持续变大；不区分「静默在生产」与「静默在冻结」，看门狗会误杀，
+   管线自动重试后表现为「下载到 100% 又从头来」。引擎用
+   `make_dir_activity_keepalive(out_dir)` 快照目录（文件数, 总字节数）：
+   磁盘有变化 = 活着；真冻结一个 tick 后照杀。首次调用只建基线。
+2. **CREATE_NO_WINDOW**（0.4.2）：GUI 是 windowed 无控制台进程，
+   Windows 给控制台子进程分配新终端 → 下载时黑色窗口反复弹。
+   win32 上默认注入 `CREATE_NO_WINDOW`，显式传 `creationflags` 时不覆盖。
+3. **协作取消**：`cancel_check` 每次 read 前检查，触发即 terminate，
+   防孤儿孙进程；`\r`/`\n` 双分隔切行交给调用方的 `on_chunk`。
+
+### 14.3 自动重试（`pipeline.py`）
+
+`build_default_pipeline` 开启自动重试（`max_retries` 默认 1）。
+三条硬规则：① `ok is False` 与异常都触发重试（yt-dlp 把所有失败收敛
+成 return False）；② 退避 sleep 放在并发信号量**外**，不占槽位；
+③ 引擎经进度钩子报出的具体错误（HTTP 403 等）要带进重试消息，
+不给用户一句笼统的「engine returned False」。用户主动取消不重试。
