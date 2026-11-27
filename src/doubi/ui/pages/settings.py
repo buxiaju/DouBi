@@ -266,7 +266,7 @@ def build_settings_widgets():
             self._header = PageHeader(self)
             self._header.set_title("设置")
             self._header.set_subtitle(
-                "账号、下载、网络、嗅探、存储。改动后自动写回配置文件，「立即保存」可手动触发一次。"
+                "改动会自动保存；部分选项（如语言）需要重启应用后生效。"
             )
             # 主 CTA：设置页唯一的实心按钮，挂在页头动作槽
             self.save_btn = PrimaryPushButton("立即保存", self)
@@ -303,10 +303,12 @@ def build_settings_widgets():
             self.account_card = self._build_account_card()
             body_layout.addWidget(self.account_card)
 
-            # ---- 2) 下载设置卡（输出 / 画质 / 容器） ----
+            # ---- 2) 下载卡（使用频率最高：改保存目录 / 画质都在这） ----
+            # 行为偏好（下载前询问 / 剪贴板 / 完成通知）也在本卡——它们
+            # 都是「下载」语义，之前放在「主题与外观」卡里是分组错位。
             self._download_card = self._build_card(
                 "下载",
-                "输出位置、文件名、容器、画质等下载相关配置",
+                "视频保存到哪里、以什么画质和格式下载",
             )
             download_form = QFormLayout(self._download_card["body"])
             download_form.setVerticalSpacing(SPACE_MD)
@@ -314,35 +316,66 @@ def build_settings_widgets():
             download_form.setContentsMargins(0, 0, 0, 0)
 
             self.output_root = LineEdit(self._download_card["body"])
-            self.output_root.setPlaceholderText("./Downloaded")
+            self.output_root.setPlaceholderText(r"如 D:\Downloads（默认 ./Downloaded）")
             self.filename_template = LineEdit(self._download_card["body"])
-            self.filename_template.setPlaceholderText("{title}_{item_id}")
+            self.filename_template.setPlaceholderText("{title}_{item_id}，{title} 是视频标题")
             self.container = ComboBox(self._download_card["body"])
             self.container.addItems(["mp4", "mkv"])
             self.max_quality = ComboBox(self._download_card["body"])
             self.max_quality.addItems(["best", "8k", "4k", "1080p", "720p", "480p"])
 
-            download_form.addRow("保存根目录", self.output_root)
-            download_form.addRow("文件名模板", self.filename_template)
-            download_form.addRow("容器格式", self.container)
-            download_form.addRow("最高画质", self.max_quality)
+            download_form.addRow("保存位置", self.output_root)
+            download_form.addRow("文件命名规则", self.filename_template)
+            download_form.addRow("视频格式", self.container)
+            download_form.addRow("清晰度上限", self.max_quality)
 
             # 附加内容 sidecar：CLI 有 --nfo/--danmaku/--subtitles，搬运链
             # （_build_options → 引擎）早已全通，唯独 GUI 一直没有入口——
             # 用户只能手改 config.yml，属于「静默失效开关」的 GUI 变体。
             # 补齐三端对齐的最后一块。默认值都来自 AppConfig（默认关）。
             self.write_nfo = SwitchButton(self._download_card["body"])
-            download_form.addRow("NFO 刮削文件", self.write_nfo)
+            download_form.addRow("同时保存 NFO 媒体信息文件", self.write_nfo)
             self.write_danmaku = SwitchButton(self._download_card["body"])
-            download_form.addRow("弹幕 (XML)", self.write_danmaku)
+            download_form.addRow("同时保存弹幕", self.write_danmaku)
             self.write_subtitles = SwitchButton(self._download_card["body"])
-            download_form.addRow("字幕", self.write_subtitles)
+            download_form.addRow("同时保存字幕", self.write_subtitles)
+
+            # ---- 下载行为（与本卡配置用分隔线隔开）----
+            download_form.addRow(build_section_divider()(self._download_card["body"]))
+
+            # GUI 行为偏好：是否在解析页点下载时先弹选项对话框。
+            # 默认 False——「点一下就走」是绝大多数用户的心智模型。
+            self.prompt_before_download = SwitchButton(self._download_card["body"])
+            download_form.addRow("下载前逐个确认选项", self.prompt_before_download)
+
+            # 剪贴板监听：解析页轮询剪贴板，复制已知平台链接自动填入。
+            # 默认关——自动抢粘贴对部分用户是惊扰，要用的人自己开。
+            self.clipboard_watch = SwitchButton(self._download_card["body"])
+            download_form.addRow("复制链接后自动填入解析页", self.clipboard_watch)
+
+            # 下载完成通知：控制 Windows toast 的触发场景。
+            # 三个档位映射到 AppConfig.notify_on_completion：
+            #   "成功完成"     → "success"  (推荐；失败有 GUI 弹窗)
+            #   "成功 + 失败"  → "all"
+            #   "全部完成后弹一次" → "summary"
+            # tray.py 用同一份配置来决定要不要 showMessage。
+            self.notify_on_completion = ComboBox(self._download_card["body"])
+            self._NOTIFY_LABELS = (
+                "下载成功时",
+                "下载成功或失败时",
+                "全部任务结束后汇总一次",
+            )
+            self._NOTIFY_VALUES = ("success", "all", "summary")
+            self.notify_on_completion.addItems(list(self._NOTIFY_LABELS))
+            self._notify_combo_set(self._cfg.notify_on_completion)
+            download_form.addRow("完成通知时机", self.notify_on_completion)
+
             body_layout.addWidget(self._download_card["widget"])
 
-            # ---- 3) 网络与性能卡 ----
+            # ---- 3) 网络卡 ----
             self._network_card = self._build_card(
-                "网络与性能",
-                "代理、并发、限速等连接层配置",
+                "网络",
+                "代理、同时下载的任务数和下载速度限制",
             )
             net_form = QFormLayout(self._network_card["body"])
             net_form.setVerticalSpacing(SPACE_MD)
@@ -350,23 +383,23 @@ def build_settings_widgets():
             net_form.setContentsMargins(0, 0, 0, 0)
 
             self.proxy = LineEdit(self._network_card["body"])
-            self.proxy.setPlaceholderText("http://127.0.0.1:7890（留空不使用）")
+            self.proxy.setPlaceholderText("http://127.0.0.1:7890，留空表示不使用代理")
             self.concurrent = LineEdit(self._network_card["body"])
             self.concurrent.setPlaceholderText("3")
             self.rate_limit = LineEdit(self._network_card["body"])
-            self.rate_limit.setPlaceholderText("如 5M（留空不限速）")
+            self.rate_limit.setPlaceholderText("如 5M 表示每秒 5 MB，留空不限速")
 
-            net_form.addRow("代理", self.proxy)
-            net_form.addRow("并发下载数", self.concurrent)
-            net_form.addRow("限速", self.rate_limit)
+            net_form.addRow("代理服务器", self.proxy)
+            net_form.addRow("同时下载任务数", self.concurrent)
+            net_form.addRow("下载速度限制", self.rate_limit)
             body_layout.addWidget(self._network_card["widget"])
 
             # ---- 4) 通用嗅探卡（折叠，默认收起——高级项） ----
             # 只有「未知站点」才会走这条路：registry 里 GenericAdapter 的
             # priority=-1，抖音 / B 站等具体平台永远先匹配，这些开关对它们无效。
             self._sniff_card = self._build_card(
-                "通用嗅探",
-                "未识别的网站会用无头浏览器嗅探视频地址；已支持的平台不受影响",
+                "通用嗅探（高级）",
+                "遇到暂不支持的视频网站时，自动用无头浏览器找出真实的视频地址",
             )
             sniff_form = QFormLayout(self._sniff_card["body"])
             sniff_form.setVerticalSpacing(SPACE_MD)
@@ -400,10 +433,10 @@ def build_settings_widgets():
             self._sniff_card["title_row"].addWidget(self._sniff_toggle_btn)
             body_layout.addWidget(self._sniff_card["widget"])
 
-            # ---- 5) 主题与外观卡（合并了原「主题」与「下载前询问 / 通知」偏好） ----
+            # ---- 5) 界面卡（主题 + 语言；下载行为偏好已迁入下载卡） ----
             self._appearance_card = self._build_card(
-                "主题与外观",
-                "切换主题包会立即生效并自动写回配置文件",
+                "界面",
+                "换个配色，或把界面换成你熟悉的语言",
             )
             appearance_form = QFormLayout(self._appearance_card["body"])
             appearance_form.setVerticalSpacing(SPACE_MD)
@@ -432,33 +465,6 @@ def build_settings_widgets():
                 pass
             appearance_form.addRow(tr("language.label"), self.language)
 
-            # GUI 行为偏好：是否在解析页点下载时先弹选项对话框。
-            # 默认 False——「点一下就走」是绝大多数用户的心智模型。
-            self.prompt_before_download = SwitchButton(self._appearance_card["body"])
-            appearance_form.addRow("下载前询问选项", self.prompt_before_download)
-
-            # 剪贴板监听：解析页轮询剪贴板，复制已知平台链接自动填入。
-            # 默认关——自动抢粘贴对部分用户是惊扰，要用的人自己开。
-            self.clipboard_watch = SwitchButton(self._appearance_card["body"])
-            appearance_form.addRow("剪贴板自动识别链接", self.clipboard_watch)
-
-            # 下载完成通知：控制 Windows toast 的触发场景。
-            # 三个档位映射到 AppConfig.notify_on_completion：
-            #   "成功完成"     → "success"  (推荐；失败有 GUI 弹窗)
-            #   "成功 + 失败"  → "all"
-            #   "全部完成后弹一次" → "summary"
-            # tray.py 用同一份配置来决定要不要 showMessage。
-            self.notify_on_completion = ComboBox(self._appearance_card["body"])
-            self._NOTIFY_LABELS = (
-                "成功完成",
-                "成功 + 失败",
-                "全部完成后弹一次",
-            )
-            self._NOTIFY_VALUES = ("success", "all", "summary")
-            self.notify_on_completion.addItems(list(self._NOTIFY_LABELS))
-            self._notify_combo_set(self._cfg.notify_on_completion)
-            appearance_form.addRow("下载完成通知", self.notify_on_completion)
-
             body_layout.addWidget(self._appearance_card["widget"])
 
             # ---- 6) Cookie 与存储卡（合并了「启用数据库」） ----
@@ -466,8 +472,8 @@ def build_settings_widgets():
             # 数据库、cookie、配置都在 ~/.doubi/ 下，让用户在一张卡里
             # 完整看到「本地数据都藏在哪里」。
             self._cookie_card = self._build_card(
-                "Cookie 与存储",
-                "登录状态与下载历史都在 ~/.doubi/ 目录",
+                "存储",
+                "登录凭据和下载记录都保存在 ~/.doubi/ 目录下",
             )
             cookie_form = QFormLayout(self._cookie_card["body"])
             cookie_form.setVerticalSpacing(SPACE_MD)
@@ -487,10 +493,10 @@ def build_settings_widgets():
             cookies_holder = QWidget()
             cookies_holder.setStyleSheet("background: transparent;")
             cookies_holder.setLayout(cookies_row)
-            cookie_form.addRow("Cookie 目录", cookies_holder)
+            cookie_form.addRow("登录凭据目录", cookies_holder)
 
             self.database = SwitchButton(self._cookie_card["body"])
-            cookie_form.addRow("启用下载历史数据库", self.database)
+            cookie_form.addRow("记录下载历史", self.database)
             body_layout.addWidget(self._cookie_card["widget"])
 
             # 0.3.9：快捷键速查卡也放进滚动区（之前在 ``outer`` 里、scroll
@@ -498,8 +504,8 @@ def build_settings_widgets():
             # 卡片**默认折叠**——只露标题 + 「N 个快捷键 · 展开」按钮，
             # 不占额外高度。点开后才显示分组列表。
             self._shortcut_card = self._build_card(
-                title="快捷键速查",
-                subtitle="点击主窗口后即可使用；本卡随快捷键增减自动刷新。",
+                title="快捷键",
+                subtitle="常用操作都有键盘快捷键，本列表随快捷键增减自动刷新。",
             )
             # 在 body 上挂一个独立 QVBoxLayout 放占位和重建后的分组列表。
             # _build_card 内部 body 是空 QWidget，没有自带 layout——加一层
@@ -696,7 +702,7 @@ def build_settings_widgets():
             """
             card_dict = self._build_card(
                 title="功能插件",
-                subtitle="可选的大型功能组件，按需安装以减小安装包体积",
+                subtitle="大型可选功能不默认内置，需要时一键安装",
             )
             body = card_dict["body"]
             from qfluentwidgets import BodyLabel, ProgressBar
@@ -860,8 +866,8 @@ def build_settings_widgets():
             import doubi
 
             card_dict = self._build_card(
-                title="关于与更新",
-                subtitle=f"DouBi v{doubi.__version__} — 多平台媒体下载助手",
+                title="关于",
+                subtitle=f"DouBi v{doubi.__version__} — 多平台视频下载助手",
             )
             body = card_dict["body"]
             from qfluentwidgets import BodyLabel
@@ -996,8 +1002,7 @@ def build_settings_widgets():
             # 不是 3-tuple——别 unpack。
             card_dict = self._build_card(
                 title="诊断",
-                subtitle="导出 ~/.doubi/ 关键文件 + 系统信息 + 最近 5 个日志文件"
-                "（已脱敏）为 zip，附给作者排查问题用。",
+                subtitle="遇到问题？导出日志和配置（自动脱敏）发给开发者即可定位",
             )
             body = card_dict["body"]
             from qfluentwidgets import BodyLabel
@@ -1007,10 +1012,8 @@ def build_settings_widgets():
             body_layout.setSpacing(SPACE_SM)
 
             hint = BodyLabel(
-                "包含：config.yml（敏感字段已脱敏）、cookies/<platform>.txt（敏感字段"
-                "已脱敏）、最近 5 个 logs/*.log。\n"
-                "不包含：doubi.db / download_manifest.jsonl 的内容（仅记录文件大小"
-                "——需要时再单独索取）。",
+                "导出内容包括：配置文件、登录凭据文件和最近 5 个日志（敏感信息自动脱敏）。\n"
+                "下载记录数据库不会包含在内。",
                 body,
             )
             hint.setStyleSheet(muted_qss())
