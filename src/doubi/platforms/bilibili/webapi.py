@@ -60,6 +60,14 @@ HOTWORD_URL = "https://s.search.bilibili.com/main/hotword"
 POPULAR_URL = "https://api.bilibili.com/x/web-interface/popular"
 RANKING_URL = "https://api.bilibili.com/x/web-interface/ranking/v2"
 NAV_URL = "https://api.bilibili.com/x/web-interface/nav"
+# 收藏夹（ favlist ）两段式：
+#   list-all  → 当前账号创建的所有收藏夹（需登录，mid 从 nav 拿）
+#   resource  → 单个收藏夹里的内容（type==2 才是可下载视频）
+# 两个端点都是老接口，不吃 WBI 签名（与 series/archives 同类）。
+FAV_FOLDER_LIST_URL = (
+    "https://api.bilibili.com/x/v3/fav/folder/created/list-all"
+)
+FAV_RESOURCE_LIST_URL = "https://api.bilibili.com/x/v3/fav/resource/list"
 
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -505,4 +513,159 @@ class BilibiliWebAPI:
             "like": stat.get("like", 0) or 0,
             "duration": raw.get("duration") or 0,
             "pubdate": raw.get("pubdate") or 0,
+        }
+
+    # ---- favorites (收藏夹) -----------------------------------------
+
+    async def get_my_info(self, *, error_sink: Optional[dict] = None) -> dict:
+        """``/x/web-interface/nav`` → 当前登录用户 ``{mid, uname, isLogin}``.
+
+        未登录（isLogin=False）时返回 ``{"mid": 0, "uname": "", "isLogin": False}``
+        而不是抛错——调用方（收藏页）要拿它做登录 gate，缺席登录态是
+        正常分支不是异常。
+        """
+        client = await self._ensure_client()
+        try:
+            resp = await client.get(NAV_URL)
+        except httpx.HTTPError as exc:
+            logger.warning("bilibili nav failed: %s", exc)
+            if error_sink is not None:
+                error_sink["error"] = str(exc)
+            return {"mid": 0, "uname": "", "isLogin": False}
+        try:
+            payload = resp.json()
+        except ValueError:
+            payload = {}
+        data = payload.get("data") or {}
+        return {
+            "mid": int(data.get("mid") or 0),
+            "uname": str(data.get("uname") or ""),
+            "isLogin": bool(data.get("isLogin")),
+        }
+
+    async def list_my_fav_folders(
+        self,
+        *,
+        error_sink: Optional[dict] = None,
+    ) -> list[dict[str, Any]]:
+        """当前账号创建的所有收藏夹。
+
+        两步：nav 拿 mid → ``/x/v3/fav/folder/created/list-all?up_mid=mid``。
+        未登录或 nav 失败时返回空列表（error_sink 里带原因），让 GUI 走
+        登录引导而不是报错弹窗。
+        """
+        me = await self.get_my_info(error_sink=error_sink)
+        if not me.get("isLogin") or not me.get("mid"):
+            if error_sink is not None and "error" not in error_sink:
+                error_sink["error"] = "need_login"
+            return []
+        params = {"up_mid": me["mid"]}
+        url = f"{FAV_FOLDER_LIST_URL}?{urlencode(params)}"
+        client = await self._ensure_client()
+        try:
+            resp = await client.get(url)
+        except httpx.HTTPError as exc:
+            logger.warning("bilibili fav folder list failed: %s", exc)
+            if error_sink is not None:
+                error_sink["error"] = str(exc)
+            return []
+        try:
+            payload = resp.json()
+        except ValueError:
+            payload = {}
+        if payload.get("code") not in (0, None):
+            if error_sink is not None:
+                error_sink["error"] = (
+                    f"code={payload.get('code')} {payload.get('message') or ''}"
+                )
+            return []
+        rows = payload.get("data") or []
+        return [self._adapt_fav_folder(raw) for raw in rows if isinstance(raw, dict)]
+
+    @staticmethod
+    def _adapt_fav_folder(raw: dict) -> dict[str, Any]:
+        """list-all 的单行 → GUI 表格行（title / fid / media_count）。"""
+        return {
+            "title": str(raw.get("title") or ""),
+            "fid": str(raw.get("id") or ""),
+            "media_count": int(raw.get("media_count") or 0),
+            "kind": "bili_fav_folder",
+            "platform": "bilibili",
+        }
+
+    async def list_fav_resources(
+        self,
+        media_id: str,
+        *,
+        max_count: int = 100,
+        error_sink: Optional[dict] = None,
+    ) -> list[dict[str, Any]]:
+        """单个收藏夹里的内容（分页拉全，只留 type==2 的视频）。
+
+        B 站收藏夹里混着视频 / 音频 / 课程 / AI 稿等多种 type，本端
+        只下载 type==2（普通视频）——其余类型 yt-dlp 也没有对应提取器，
+        列出来只会造出「下载必失败」的行。
+        """
+        out: list[dict[str, Any]] = []
+        page_size = 20  # B 站该端点 ps 上限
+        page = 1
+        client = await self._ensure_client()
+        while len(out) < max_count:
+            params = {
+                "media_id": media_id,
+                "pn": page,
+                "ps": page_size,
+                "keyword": "",
+                "order": "mtime",
+                "type": 0,
+                "tid": 0,
+                "platform": "web",
+            }
+            url = f"{FAV_RESOURCE_LIST_URL}?{urlencode(params)}"
+            try:
+                resp = await client.get(url)
+            except httpx.HTTPError as exc:
+                logger.warning("bilibili fav resource failed: %s", exc)
+                if error_sink is not None:
+                    error_sink["error"] = str(exc)
+                return out
+            try:
+                payload = resp.json()
+            except ValueError:
+                payload = {}
+            if payload.get("code") not in (0, None):
+                if error_sink is not None:
+                    error_sink["error"] = (
+                        f"code={payload.get('code')} {payload.get('message') or ''}"
+                    )
+                return out
+            medias = (payload.get("data") or {}).get("medias") or []
+            if not medias:
+                break
+            for raw in medias:
+                adapted = self._adapt_fav_resource(raw)
+                if adapted is not None:
+                    out.append(adapted)
+                    if len(out) >= max_count:
+                        break
+            page += 1
+        return out
+
+    @staticmethod
+    def _adapt_fav_resource(raw: dict) -> Optional[dict[str, Any]]:
+        """resource/list 单行 → GUI 表格行；非视频（type!=2）返回 None。"""
+        if int(raw.get("type") or 0) != 2:
+            return None
+        bvid = raw.get("bvid") or ""
+        if not bvid:
+            return None
+        upper = raw.get("upper") or {}
+        title = re.sub(r"</?em[^>]*>", "", raw.get("title") or "")
+        return {
+            "title": title,
+            "bvid": bvid,
+            "author": {"name": upper.get("name", ""), "mid": upper.get("mid")},
+            "share_url": f"https://www.bilibili.com/video/{bvid}",
+            "kind": "bili_fav_resource",
+            "platform": "bilibili",
         }

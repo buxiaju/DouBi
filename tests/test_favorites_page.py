@@ -301,3 +301,239 @@ def test_context_menu_entries_per_kind(page):
     assert page._menu_actions_for({"mc_id": "MC1"}, "music") == []
     page._kind_tabs.setCurrentItem("series")
     assert page._menu_actions_for({"series_id": "S1"}, "series") == []
+
+
+# ---------------------------------------------------------------------------
+# B 站收藏夹（0.4.1 平台切换层）
+# ---------------------------------------------------------------------------
+
+
+def test_bili_platform_constants():
+    """平台 / B 站 kind 常量与路由键 pin 死——右键分叉按这些键走。"""
+    from doubi.ui.pages.favorites import BILI_FAV_KINDS, FAVORITE_PLATFORMS
+
+    assert FAVORITE_PLATFORMS == [("douyin", "抖音"), ("bilibili", "B站")]
+    assert [k for k, _label in BILI_FAV_KINDS] == ["bili_folders", "bili_contents"]
+
+
+def test_platform_switch_swaps_kind_tabs_and_clears_rows(page):
+    """切平台必须互换 kind tabs 并清空旧行——两平台行结构不同。"""
+    page._rows = [{"collect_name": "抖音旧行", "collects_id": "C1"}]
+    page._platform_tabs.setCurrentItem("bilibili")
+    assert page._kind_tabs.isHidden() is True
+    assert page._bili_kind_tabs.isHidden() is False
+    assert page._rows == []
+    assert page._stack.currentWidget() is page._empty_state
+
+    # 切回抖音：tabs 回归
+    page._platform_tabs.setCurrentItem("douyin")
+    assert page._kind_tabs.isHidden() is False
+    assert page._bili_kind_tabs.isHidden() is True
+
+
+def test_bili_id_row_visibility_and_placeholder(page):
+    """B 站「收藏夹内容」才需要 fid；占位文案随平台变（collects_id vs fid）。"""
+    page._platform_tabs.setCurrentItem("bilibili")
+    page._bili_kind_tabs.setCurrentItem("bili_folders")
+    assert page._collect_id_input.isHidden() is True
+
+    page._bili_kind_tabs.setCurrentItem("bili_contents")
+    assert page._collect_id_input.isHidden() is False
+    assert "fid" in page._collect_id_label.placeholderText()
+
+    page._platform_tabs.setCurrentItem("douyin")
+    page._kind_tabs.setCurrentItem("videos")
+    assert "collects_id" in page._collect_id_label.placeholderText()
+
+
+def test_bili_contents_without_fid_never_fetches(page, monkeypatch):
+    """B 站缺 fid 时必须短路——不发请求、不切加载态（与抖音 videos 同规）。"""
+    page._platform_tabs.setCurrentItem("bilibili")
+    page._bili_kind_tabs.setCurrentItem("bili_contents")
+    page._collect_id_input.setText("")
+
+    def _boom(_coro):
+        raise AssertionError("must not fetch")
+
+    monkeypatch.setattr(page, "_run_async", _boom)
+    page._on_refresh()
+    assert page._stack.currentWidget() is page._empty_state
+
+
+def test_no_bilibili_cookie_shows_need_login_state(page, monkeypatch):
+    """没有 B 站 cookie 文件 → 引导态（文案指名 B站），不发网络请求。"""
+    from doubi.platforms.bilibili import auth as bili_auth
+
+    monkeypatch.setattr(
+        bili_auth, "default_cookie_path",
+        lambda: Path("Z:/nonexistent/bilibili.txt"),
+    )
+
+    def _boom(_coro):
+        raise AssertionError("must not fetch")
+
+    monkeypatch.setattr(page, "_run_async", _boom)
+    page._platform_tabs.setCurrentItem("bilibili")
+    page._on_refresh()
+    assert page._stack.currentWidget() is page._error_state
+    assert "B站" in page._error_state._title.text() or "B站" in (
+        page._error_state._subtitle.text()
+    )
+
+
+def test_bili_menu_forks_pinned(page):
+    """B 站两类行的菜单分叉表 pin 死（纯函数，offscreen 可断言）。"""
+    page._platform_tabs.setCurrentItem("bilibili")
+
+    # 收藏夹行：下钻恒可用（有 fid）；整夹下载要 task_manager。
+    folder = {"title": "我的收藏", "fid": "123"}
+    page._task_manager = None
+    assert page._menu_actions_for(folder, "bili_folders") == [
+        ("查看收藏夹内容", True),
+        ("下载整个收藏夹", False),
+    ]
+    page._task_manager = object()
+    assert page._menu_actions_for(folder, "bili_folders") == [
+        ("查看收藏夹内容", True),
+        ("下载整个收藏夹", True),
+    ]
+    assert page._menu_actions_for({}, "bili_folders") == [
+        ("查看收藏夹内容", False),
+        ("下载整个收藏夹", False),
+    ]
+
+    # 内容行：与抖音 videos 同构三动作。
+    content = {
+        "title": "视频A", "bvid": "BV1abc",
+        "share_url": "https://www.bilibili.com/video/BV1abc",
+    }
+    page._task_manager = object()
+    entries = page._menu_actions_for(content, "bili_contents")
+    assert [label for label, _e in entries] == [
+        "下载", "复制链接", "在浏览器中打开",
+    ]
+    assert all(enabled for _label, enabled in entries)
+    page._task_manager = None
+    assert page._menu_actions_for(content, "bili_contents")[0] == ("下载", False)
+
+    # 平台错位：抖音 kind 键在 B 站上下文 / 反之，都返回空（防走火）。
+    page._bili_kind_tabs.setCurrentItem("bili_folders")
+    assert page._menu_actions_for(folder, "favorites") == []
+    page._platform_tabs.setCurrentItem("douyin")
+    assert page._menu_actions_for(folder, "bili_folders") == []
+
+
+def test_bili_rows_populate_table(page):
+    """B 站两类的名称 / ID / 链接映射 pin 死。"""
+    page._platform_tabs.setCurrentItem("bilibili")
+    page._bili_kind_tabs.setCurrentItem("bili_folders")
+    page._rows = [{"title": "我的收藏", "fid": "123", "media_count": 3}]
+    page._populate_table()
+    assert page.table.item(0, 0).text() == "我的收藏"
+    assert page.table.item(0, 1).text() == "123"
+    assert page.table.item(0, 2).text() == "B站收藏夹"
+    assert page.table.item(0, 3).text() == ""
+
+    page._bili_kind_tabs.setCurrentItem("bili_contents")
+    page._rows = [{
+        "title": "视频A", "bvid": "BV1abc",
+        "share_url": "https://www.bilibili.com/video/BV1abc",
+    }]
+    page._populate_table()
+    assert page.table.item(0, 0).text() == "视频A"
+    assert page.table.item(0, 1).text() == "BV1abc"
+    assert page.table.item(0, 2).text() == "B站收藏夹内容"
+    assert page.table.item(0, 3).text().endswith("/video/BV1abc")
+
+
+class TestBiliWebApiAdapters:
+    """webapi 收藏适配器：纯函数离线测，不发网络。"""
+
+    def test_adapt_fav_folder(self):
+        from doubi.platforms.bilibili.webapi import BilibiliWebAPI
+
+        row = BilibiliWebAPI._adapt_fav_folder(
+            {"id": 123, "title": "默认收藏夹", "media_count": 7},
+        )
+        assert row == {
+            "title": "默认收藏夹", "fid": "123", "media_count": 7,
+            "kind": "bili_fav_folder", "platform": "bilibili",
+        }
+
+    def test_adapt_fav_resource_keeps_videos_only(self):
+        from doubi.platforms.bilibili.webapi import BilibiliWebAPI
+
+        video = BilibiliWebAPI._adapt_fav_resource(
+            {"type": 2, "bvid": "BV1abc", "title": "t<em>kw</em>",
+             "upper": {"name": "up", "mid": 42}},
+        )
+        assert video is not None
+        assert video["bvid"] == "BV1abc"
+        assert video["share_url"] == "https://www.bilibili.com/video/BV1abc"
+        # <em> 高亮标签必须剥掉（搜索类接口同规）
+        assert "em" not in video["title"]
+
+        # type!=2（音频/课程/AI 稿）与缺 bvid 一律滤掉——列出来只会
+        # 造出「下载必失败」的行。
+        assert BilibiliWebAPI._adapt_fav_resource(
+            {"type": 24, "bvid": "BV2", "title": "x"},
+        ) is None
+        assert BilibiliWebAPI._adapt_fav_resource({"type": 2, "bvid": ""}) is None
+
+    def test_list_my_fav_folders_gates_on_login(self, monkeypatch):
+        """nav 报未登录时 list-all 不得发起——直接空列表 + need_login。"""
+        async def _drive():
+            from doubi.platforms.bilibili import webapi
+
+            class _FakeResp:
+                def json(self):
+                    return {"code": 0, "data": {"isLogin": False, "mid": 0}}
+
+            class _FakeClient:
+                async def get(self, *_a, **_kw):
+                    return _FakeResp()
+
+            api = webapi.BilibiliWebAPI(http_client=_FakeClient())
+            sink: dict = {}
+            rows = await api.list_my_fav_folders(error_sink=sink)
+            assert rows == []
+            assert sink["error"] == "need_login"
+
+        asyncio.run(_drive())
+
+    def test_list_my_fav_folders_happy_path(self, monkeypatch):
+        """nav 登录 → list-all 请求带 up_mid → 适配行返回。"""
+        async def _drive():
+            from doubi.platforms.bilibili import webapi
+
+            hits: list[str] = []
+
+            class _FakeResp:
+                def __init__(self, payload):
+                    self._payload = payload
+
+                def json(self):
+                    return self._payload
+
+            class _FakeClient:
+                async def get(self, url, *_a, **_kw):
+                    hits.append(url)
+                    if "nav" in url:
+                        return _FakeResp(
+                            {"code": 0, "data": {"isLogin": True,
+                                                 "mid": 42, "uname": "u"}},
+                        )
+                    return _FakeResp(
+                        {"code": 0, "data": [
+                            {"id": 1, "title": "A", "media_count": 2},
+                            {"id": 2, "title": "B", "media_count": 0},
+                        ]},
+                    )
+
+            api = webapi.BilibiliWebAPI(http_client=_FakeClient())
+            rows = await api.list_my_fav_folders()
+            assert len(rows) == 2
+            assert rows[0]["fid"] == "1" and rows[0]["title"] == "A"
+            assert any("up_mid=42" in u for u in hits)
+
+        asyncio.run(_drive())
