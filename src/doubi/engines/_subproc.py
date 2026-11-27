@@ -22,6 +22,7 @@ import asyncio
 import logging
 import os
 import signal
+import subprocess
 import sys
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
@@ -34,6 +35,13 @@ logger = logging.getLogger("doubi.engines.subproc")
 # a few seconds between 2835-segment chunks, so 3 minutes is a fairly
 # safe upper bound: 180s without *any* output is definitely a hang.
 DEFAULT_OUTPUT_WATCHDOG_SECONDS = 180.0
+
+# 打包后的 GUI 是 windowed（无控制台），而 N_m3u8DL-CLI / ffmpeg 都是
+# 控制台程序——不设这个标志，Windows 会为每个子进程分配一个新控制台，
+# 表现为下载时黑色终端窗口反复弹出。CREATE_NO_WINDOW (0x08000000) 压制
+# 分配，子进程 stdout/stderr 照常经管道回传，进度解析不受影响。
+# 仅 Windows 有此常量；显式传了 creationflags 的调用方优先于默认注入。
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def find_bundled_ffmpeg() -> Optional[str]:
@@ -139,6 +147,11 @@ async def run_supervised_subprocess(
     kwargs.pop("stderr", None)
 
     env_final = env if env is not None else dict(os.environ)
+
+    # GUI 窗口化后控制台子进程会弹黑框：默认注入 CREATE_NO_WINDOW，
+    # 调用方显式传 creationflags 时尊重调用方（不覆盖）。
+    if sys.platform == "win32" and "creationflags" not in kwargs:
+        kwargs["creationflags"] = _NO_WINDOW
 
     proc = await asyncio.create_subprocess_exec(
         *args,
