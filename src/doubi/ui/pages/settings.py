@@ -317,15 +317,60 @@ def build_settings_widgets():
 
             self.output_root = LineEdit(self._download_card["body"])
             self.output_root.setPlaceholderText(r"如 D:\Downloads（默认 ./Downloaded）")
+            # 浏览按钮：手输绝对路径对普通用户不友好——点一下选目录，
+            # 选完回填输入框（仍可手改，两条路等价）。
+            self.output_root_browse_btn = PushButton("浏览…", self._download_card["body"])
+            self.output_root_browse_btn.setFixedWidth(80)
+            self.output_root_browse_btn.clicked.connect(self._on_browse_output_root)
+            output_root_row = QHBoxLayout()
+            output_root_row.setContentsMargins(0, 0, 0, 0)
+            output_root_row.setSpacing(SPACE_SM)
+            output_root_row.addWidget(self.output_root, 1)
+            output_root_row.addWidget(self.output_root_browse_btn, 0)
+            output_root_holder = QWidget(self._download_card["body"])
+            output_root_holder.setStyleSheet("background: transparent;")
+            output_root_holder.setLayout(output_root_row)
+
             self.filename_template = LineEdit(self._download_card["body"])
-            self.filename_template.setPlaceholderText("{title}_{item_id}，{title} 是视频标题")
+            self.filename_template.setPlaceholderText("留空用默认命名（视频标题）")
             self.container = ComboBox(self._download_card["body"])
             self.container.addItems(["mp4", "mkv"])
             self.max_quality = ComboBox(self._download_card["body"])
             self.max_quality.addItems(["best", "8k", "4k", "1080p", "720p", "480p"])
 
-            download_form.addRow("保存位置", self.output_root)
+            download_form.addRow("保存位置", output_root_holder)
             download_form.addRow("文件命名规则", self.filename_template)
+
+            # 命名规则帮助行：模板变量对普通用户是黑盒。默认只显示一句
+            # 人话说明 + 「可用变量」链接；点开才展示变量表和示例。
+            self._naming_hint = QLabel(
+                "默认按「视频标题」命名文件。想自定义时可用标题、作者等变量组合。",
+                self._download_card["body"],
+            )
+            self._naming_hint.setStyleSheet(muted_qss())
+            self._naming_hint.setWordWrap(True)
+            download_form.addRow("", self._naming_hint)
+
+            self._naming_detail_toggle = PushButton("可用变量", self._download_card["body"])
+            self._naming_detail_toggle.setFlat(True)
+            self._naming_detail_toggle.setFixedWidth(88)
+            self._naming_detail_toggle.setStyleSheet(muted_qss())
+            self._naming_detail_toggle.setCursor(Qt.PointingHandCursor)
+            self._naming_detail_toggle.setCheckable(True)
+            self._naming_detail_toggle.toggled.connect(self._on_naming_detail_toggle)
+
+            self._naming_detail = QLabel(self._download_card["body"])
+            self._naming_detail.setWordWrap(True)
+            self._naming_detail.setVisible(False)
+            naming_help_col = QVBoxLayout()
+            naming_help_col.setContentsMargins(0, 0, 0, 0)
+            naming_help_col.setSpacing(SPACE_XS)
+            naming_help_col.addWidget(self._naming_detail_toggle, 0, Qt.AlignLeft)
+            naming_help_col.addWidget(self._naming_detail)
+            naming_help_holder = QWidget(self._download_card["body"])
+            naming_help_holder.setStyleSheet("background: transparent;")
+            naming_help_holder.setLayout(naming_help_col)
+            download_form.addRow("", naming_help_holder)
             download_form.addRow("视频格式", self.container)
             download_form.addRow("清晰度上限", self.max_quality)
 
@@ -339,9 +384,9 @@ def build_settings_widgets():
             download_form.addRow("同时保存弹幕", self.write_danmaku)
             self.write_subtitles = SwitchButton(self._download_card["body"])
             download_form.addRow("同时保存字幕", self.write_subtitles)
+            download_form.addRow(build_section_divider()(self._download_card["body"]))
 
             # ---- 下载行为（与本卡配置用分隔线隔开）----
-            download_form.addRow(build_section_divider()(self._download_card["body"]))
 
             # GUI 行为偏好：是否在解析页点下载时先弹选项对话框。
             # 默认 False——「点一下就走」是绝大多数用户的心智模型。
@@ -671,6 +716,57 @@ def build_settings_widgets():
             else:
                 self._shortcut_card["body"].show()
             self._refresh_shortcut_toggle_btn()
+
+        # ---------------------------------------------------- 下载卡辅助
+
+        def _on_browse_output_root(self) -> None:
+            """「浏览…」：选目录回填保存位置输入框。
+
+            旧值作为对话框起始目录（不存在时退用户主目录）；取消不改动。
+            回填即触发 textChanged → 自动保存链路，与手输完全等价。
+            """
+            from PySide6.QtWidgets import QFileDialog
+
+            current = self.output_root.text().strip()
+            start_dir = current if current and Path(current).exists() else str(Path.home())
+            picked = QFileDialog.getExistingDirectory(
+                self, "选择视频保存位置", start_dir,
+            )
+            if not picked:
+                return  # 用户取消
+            self.output_root.setText(picked)
+
+        #: 文件命名规则可用的变量（与 core/naming.py 的支持列表一一对应；
+        #: {ext} 由引擎追加，不暴露给用户）。
+        _NAMING_TOKENS = (
+            ("{title}", "视频标题"),
+            ("{author}", "作者昵称"),
+            ("{date}", "发布日期（年-月-日）"),
+            ("{platform}", "来源平台"),
+            ("{item_id}", "视频 ID"),
+            ("{index}", "合集内序号（001 起）"),
+            ("{quality}", "清晰度"),
+        )
+        _NAMING_EXAMPLE = "{date}_{author} - {title}"
+
+        def _on_naming_detail_toggle(self, on: bool) -> None:
+            """展开 / 收起「可用变量」说明，并给出一个可直接采用的示例。"""
+            self._naming_detail.setVisible(on)
+            if not on:
+                self._naming_detail_toggle.setText("可用变量")
+                return
+            tokens_html = "<br>".join(
+                f"<b>{token}</b> — {meaning}"
+                for token, meaning in self._NAMING_TOKENS
+            )
+            self._naming_detail.setTextFormat(Qt.RichText)
+            self._naming_detail.setText(
+                f"{tokens_html}<br><br>"
+                f"示例：<b>{self._NAMING_EXAMPLE}</b> 会保存为"
+                f"「2026-11-27 张三 - 旅拍混剪.mp4」这样的文件名。"
+            )
+            self._naming_detail.setStyleSheet(muted_qss())
+            self._naming_detail_toggle.setText("收起变量")
 
         def _on_sniff_toggle(self, on: bool) -> None:
             """嗅探卡折叠/展开。0.3.4 默认折叠，少一张卡挤在主页面里。"""
