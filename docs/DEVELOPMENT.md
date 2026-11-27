@@ -451,8 +451,10 @@ aria2 是纯下载器，不解析网页。`Aria2Engine.supports()` 只认有
   扫 out_dir 数 `.ts`（含 `Part_*/` 桶），除以分母。这是**稳定契约**：
   CLI 换日志格式也不影响进度条。
 - 参数映射：`concurrent_fragments` → `--maxThreads`；`proxy` →
-  `--proxyAddress`；固定带 `--enableBinaryMerge --enableMuxFastStart
-  --enableDelAfterDone --noProxy`。
+  `--proxyAddress`；固定带 `--enableMuxFastStart --enableDelAfterDone
+  --noProxy`。**二进制合并按容器分叉**（0.4.5）：目标 mp4 不传
+  `--enableBinaryMerge`（二进制拼接只能产 .ts），CLI 走 ffmpeg 封装
+  直接产 `.mp4`；非 mp4 容器才保留二进制合并。
 - 完成判定：rc==0 且输出文件存在非空（后缀可能被 CLI 重排，找不到时
   按 stem 扫 workDir 兜底）。
 
