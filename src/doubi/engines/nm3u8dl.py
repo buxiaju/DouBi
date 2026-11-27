@@ -410,12 +410,21 @@ class Nm3u8dlEngine(Engine):
             if on_progress:
                 on_progress(EngineProgress(fraction=0.0, message=err_msg))
             return False
+        # 决定论：CLI 子进程继承我们的 CWD，相对路径虽然两边一致，但显式
+        # 绝对化之后 --workDir / 文件核对 / keepalive 探针三方永远指向同一处。
+        out_dir = out_dir.resolve()
 
         basename = safe_basename_for_item(item)
         raw_ext = item.extra.get("sniff_ext") or self._guess_ext(item.source_url) or "mp4"
         ext = self._sanitize_output_ext(raw_ext)
         final_output = output_path_under(out_dir, basename, ext)
-        save_name = final_output.with_suffix("")  # N_m3u8DL-CLI appends the extension itself
+        # v3.0.2 的 --saveName 是纯文件名（可含 CLI 自己补的扩展名），不是
+        # 路径：传整条目录链进去，CLI 会把 ``\`` 扁平化成 ``.`` 生成一个
+        # 顶层怪名文件（实测 silidm.com 案例：12 分钟视频下完后引擎按预期
+        # stem 找不到文件 → 判失败 → 管线重试 → "100% 后重新下载"）。
+        # 正确姿势：--workDir 给目录、--saveName 只给 basename，最终文件
+        # 便落在 workDir/<basename>.<CLI自选扩展名>（二进制合并产 .ts）。
+        save_name = basename
 
         cmd = [
             self._cli,
@@ -643,15 +652,19 @@ class Nm3u8dlEngine(Engine):
             return False
 
         if not output_path.exists():
-            # N_m3u8DL-CLI may have remuxed with a different suffix than
-            # we expected. Walk workDir and look for a matching stem.
+            # N_m3u8DL-CLI 自选扩展名（二进制合并产 .ts 而非我们要的 .mp4），
+            # 且不保证产出的正好是我们预期的 stem。按 stem 递归搜 workDir，
+            # 多个命中取最大——文件本体已经下载好了，认不出它就是灾难
+            # （管线会整段重下）。
             target_stem = final_output.with_suffix("").name
             alt_paths: list[Path] = []
             try:
-                for p in out_dir.iterdir():
-                    if not p.is_file():
-                        continue
-                    if p.with_suffix("").name == target_stem:
+                for p in out_dir.rglob("*"):
+                    if (
+                        p.is_file()
+                        and not p.name.startswith(".")
+                        and p.with_suffix("").name == target_stem
+                    ):
                         alt_paths.append(p)
             except OSError:
                 alt_paths = []
