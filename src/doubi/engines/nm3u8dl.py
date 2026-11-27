@@ -432,11 +432,18 @@ class Nm3u8dlEngine(Engine):
             "--workDir", str(out_dir),
             "--saveName", str(save_name),
             "--enableMuxFastStart",
-            "--enableBinaryMerge",
             "--enableDelAfterDone",
             "--disableDateInfo",
             "--noProxy",
         ]
+
+        if ext != "mp4":
+            # 二进制拼接（无封装）只能产 .ts——HLS 嗅探的目标容器是 mp4
+            # 时必须走 ffmpeg 合并（配合上面的 --enableMuxFastStart 直接
+            # 产 .mp4，0.4.5 起尊重设置里的容器格式）。实测：v3.0.2 去掉
+            # 该参数后产出 workDir/<saveName>.mp4。合并阶段 stdout 静默
+            # 由 keepalive 通道兜底（0.4.3）。
+            cmd += ["--enableBinaryMerge"]
 
         if options.proxy:
             cmd += ["--proxyAddress", options.proxy]

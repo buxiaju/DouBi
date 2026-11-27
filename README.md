@@ -31,19 +31,19 @@
 
 ### Windows 用户：直接装（推荐）
 
-到 [Releases](https://github.com/buxiaju/DouBi/releases/latest) 下载 `DouBi-Setup-0.4.4.exe` 双击安装：
+到 [Releases](https://github.com/buxiaju/DouBi/releases/latest) 下载 `DouBi-Setup-0.4.5.exe` 双击安装：
 
 - 装到 `%LOCALAPPDATA%\DouBi`，**无 UAC 弹窗**，不需要管理员权限
 - 开始菜单 + 桌面快捷方式，控制面板正常卸载，卸载后安装目录零残留（`~/.doubi` 配置默认保留）
-- 静默安装：`DouBi-Setup-0.4.4.exe /S /D=D:\DouBi`
+- 静默安装：`DouBi-Setup-0.4.5.exe /S /D=D:\DouBi`
 
 **校验完整性**（可选）：Release 资产里附带 `.sha256` 侧签文件，装了 Git 的话一条命令即可：
 
 ```bash
-sha256sum -c DouBi-Setup-0.4.4.exe.sha256   # 输出 OK 即通过
+sha256sum -c DouBi-Setup-0.4.5.exe.sha256   # 输出 OK 即通过
 ```
 
-> 0.4.4 的官方哈希：`e4914ffe9a6d8292362adfa153926eabb9060a466708ac98c9b2e923c8136289`
+> 0.4.5 的官方哈希：待打包后回填
 
 **首次使用提示**：想下载抖音 / B 站 / YouTube 之外的任意视频站，先到「设置 → 功能插件」点「安装插件」（约 170 MB 下载，装的是 Chromium 嗅探内核，落在用户目录，不影响安装包体积）。抖音 / B 站登录在设置页「账号与登录」卡里扫码完成。
 

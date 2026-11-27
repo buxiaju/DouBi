@@ -118,3 +118,39 @@ def test_nested_output_found_by_recursive_stem_match(tmp_path: Path, monkeypatch
 
     argvs = _run_engine(tmp_path, monkeypatch, cli_side_effect=cli_wrote_nested)
     assert argvs[-1] is True
+
+
+def test_mp4_container_skips_binary_merge(tmp_path: Path, monkeypatch):
+    """目标容器 mp4 → 不得传 --enableBinaryMerge（二进制拼接只能产 .ts，
+    必须走 ffmpeg 合并才能直接产 .mp4，尊重设置里的容器格式）。"""
+    argvs = _run_engine(tmp_path, monkeypatch, cli_side_effect=None)
+    argv = argvs[0]
+    assert "--enableBinaryMerge" not in argv
+    assert "--enableMuxFastStart" in argv
+
+
+def test_non_mp4_ext_keeps_binary_merge(tmp_path: Path, monkeypatch):
+    """非 mp4 容器（如嗅探声明 flv）保留二进制合并。"""
+    from doubi.core.models import Author, MediaItem, MediaType, Platform
+
+    item = MediaItem(
+        platform=Platform.GENERIC,
+        item_id="probe43",
+        title="probe43",
+        author=Author(),
+        media_type=MediaType.VIDEO,
+        source_url="https://cdn.example.com/video.m3u8",
+        extra={"is_hls": True, "sniff_ext": "flv"},
+    )
+
+    argvs: list[list[str]] = []
+
+    async def fake_supervise(args, **kwargs):
+        argvs.append([str(a) for a in args])
+        return 0, b""
+
+    monkeypatch.setattr(nm3u8dl_mod, "run_supervised_subprocess", fake_supervise)
+    engine = nm3u8dl_mod.Nm3u8dlEngine(cli_path=str(tmp_path / "fake-cli.exe"))
+    asyncio.run(engine.download(item, _make_download_options(tmp_path)))
+    assert argvs, "supervisor was never called"
+    assert "--enableBinaryMerge" in argvs[0]
