@@ -73,6 +73,9 @@ DEFAULTS: dict[str, Any] = {
     "clipboard_watch": False,
     # 重复下载策略：skip（跳过）/ redownload（重新下载）/ ask（询问）
     "duplicate_policy": "skip",
+    # GUI 关窗行为：True = 点 X 最小化到托盘继续跑（默认，下载不中断）；
+    # False = 点 X 直接退出。托盘菜单的「退出」始终真退出，不受影响。
+    "close_to_tray": True,
     # UI 语言。空串/未知值回退到 zh_CN。GUI 切换后需重启生效。
     "language": "zh_CN",
     # 下载引擎：yt-dlp（默认）/ aria2。aria2 需要 aria2 守护进程运行。
@@ -152,6 +155,9 @@ class AppConfig:
     #: 完全不启动——不是「检测到再忽略」，是零轮询开销。
     clipboard_watch: bool = DEFAULTS["clipboard_watch"]
     duplicate_policy: str = DEFAULTS["duplicate_policy"]
+    #: 关窗到托盘开关（默认开）。main_window.closeEvent 读它决定
+    #: 「藏到托盘」还是「走真退出路径」。
+    close_to_tray: bool = DEFAULTS["close_to_tray"]
     language: str = DEFAULTS["language"]
     engine: str = DEFAULTS["engine"]
     aria2_rpc_url: str = DEFAULTS["aria2_rpc_url"]
@@ -325,6 +331,10 @@ def load_config(path: Optional[Path] = None, *, env_prefix: str = "DOUBI_") -> A
             DEFAULTS["clipboard_watch"],
         ),
         duplicate_policy=str(data.get("duplicate_policy", DEFAULTS["duplicate_policy"])),
+        close_to_tray=_coerce(
+            data.get("close_to_tray", DEFAULTS["close_to_tray"]),
+            DEFAULTS["close_to_tray"],
+        ),
         language=str(data.get("language", DEFAULTS["language"])),
         engine=str(data.get("engine", DEFAULTS["engine"])),
         aria2_rpc_url=str(data.get("aria2_rpc_url", DEFAULTS["aria2_rpc_url"])),

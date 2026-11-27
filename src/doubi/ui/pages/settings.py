@@ -464,6 +464,16 @@ def build_settings_widgets():
             sniff_form.addRow("无头模式", self.sniff_headless)
             sniff_form.addRow("自动播放触发", self.sniff_auto_play)
             sniff_form.addRow("User-Agent", self.sniff_user_agent)
+
+            # 插件依赖提示：嗅探靠「通用嗅探插件」（Playwright + Chromium）
+            # 才能跑，没装时开关开着也只会静默失败——必须在卡内说清楚，
+            # 否则用户不知道要滚到「功能插件」卡去装。状态延迟一拍刷新
+            # （probe 是纯读但构造期不想做任何 IO）。
+            self._sniff_plugin_hint = QLabel("", self._sniff_card["body"])
+            self._sniff_plugin_hint.setWordWrap(True)
+            sniff_form.addRow("", self._sniff_plugin_hint)
+            QTimer.singleShot(0, self._refresh_sniff_plugin_hint)
+
             # 把整个 body 收起来，默认折叠。0.3.4 起改为可折叠，
             # 让 99% 用不到嗅探的用户少看到一整张。
             self._sniff_card["body"].setVisible(False)
@@ -509,6 +519,11 @@ def build_settings_widgets():
             except ValueError:
                 pass
             appearance_form.addRow(tr("language.label"), self.language)
+
+            # 关窗行为：点 X 是藏到托盘还是直接退出。默认藏——下载在跑
+            # 时关窗应当是「放后台」而不是「打断任务」。
+            self.close_to_tray = SwitchButton(self._appearance_card["body"])
+            appearance_form.addRow("关闭窗口时最小化到托盘", self.close_to_tray)
 
             body_layout.addWidget(self._appearance_card["widget"])
 
@@ -718,6 +733,28 @@ def build_settings_widgets():
             self._refresh_shortcut_toggle_btn()
 
         # ---------------------------------------------------- 下载卡辅助
+
+        def _refresh_sniff_plugin_hint(self) -> None:
+            """嗅探卡内的插件依赖提示，随插件安装状态变化。
+
+            未装 → 提示去「功能插件」卡安装；已装 → 提示消失（不占高度）。
+            插件卡在嗅探卡之后构建，装完插件刷新插件卡状态时顺带刷这里。
+            """
+            from ...core.plugin_manager import probe_sniffer_plugin
+
+            try:
+                status = probe_sniffer_plugin()
+            except Exception:  # noqa: BLE001 — 探针按约定不抛
+                status = None
+            if status is None or status.ready:
+                self._sniff_plugin_hint.clear()
+                self._sniff_plugin_hint.hide()
+                return
+            self._sniff_plugin_hint.setText(
+                "提示：通用嗅探需要先安装「功能插件」卡中的通用嗅探插件"
+                "（约 170 MB），否则嗅探不会生效。"
+            )
+            self._sniff_plugin_hint.show()
 
         def _on_browse_output_root(self) -> None:
             """「浏览…」：选目录回填保存位置输入框。
@@ -940,6 +977,8 @@ def build_settings_widgets():
                     self._plugin_stage_label.hide()
                     self._plugin_log_label.hide()
                     self._refresh_plugin_status()
+                    # 插件装完/重装后嗅探卡的依赖提示要跟着消失
+                    self._refresh_sniff_plugin_hint()
                     from ..feedback import toast_error, toast_success
 
                     if final.ok:
@@ -979,6 +1018,16 @@ def build_settings_widgets():
             self._update_status.setStyleSheet(muted_qss())
             self._update_status.setWordWrap(True)
             body_layout.addWidget(self._update_status)
+
+            # CLI 同配置提示：GUI 写的 config.yml 就是 CLI / REST 读的
+            # 同一份文件——这条跨端能力此前在 GUI 里完全不可见。
+            cli_hint = BodyLabel(
+                "这里保存的设置同样对命令行（doubi CLI）生效。",
+                body,
+            )
+            cli_hint.setStyleSheet(muted_qss())
+            cli_hint.setWordWrap(True)
+            body_layout.addWidget(cli_hint)
 
             btn_row = QHBoxLayout()
             btn_row.setContentsMargins(0, 0, 0, 0)
@@ -1319,6 +1368,10 @@ def build_settings_widgets():
             self.write_subtitles.setChecked(self._cfg.write_subtitles)
             self.prompt_before_download.setChecked(self._cfg.prompt_before_download)
             self.clipboard_watch.setChecked(self._cfg.clipboard_watch)
+            if hasattr(self, "close_to_tray"):
+                self.close_to_tray.setChecked(
+                    bool(getattr(self._cfg, "close_to_tray", True))
+                )
             self._notify_combo_set(self._cfg.notify_on_completion)
             self.sniff_enabled.setChecked(self._cfg.sniff_enabled)
             self.sniff_duration.setText(str(self._cfg.sniff_duration_sec))
@@ -1625,6 +1678,8 @@ def build_settings_widgets():
             data["database"] = self.database.isChecked()
             data["prompt_before_download"] = self.prompt_before_download.isChecked()
             data["clipboard_watch"] = self.clipboard_watch.isChecked()
+            if hasattr(self, "close_to_tray"):
+                data["close_to_tray"] = self.close_to_tray.isChecked()
             data["notify_on_completion"] = self._notify_combo_value()
             data["write_nfo"] = self.write_nfo.isChecked()
             data["write_danmaku"] = self.write_danmaku.isChecked()

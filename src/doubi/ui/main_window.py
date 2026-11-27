@@ -433,6 +433,22 @@ def build_main_window():
             )
             toast_success(self, "已恢复", f"{len(restored)} 个任务已暂停待续")
 
+        def _should_close_to_tray(self) -> bool:
+            """点 X 时要不要藏到托盘（而不是退出）。
+
+            读 live 配置而不是构造期快照——用户在设置页改完开关后立即
+            生效，不需要重启。任何异常（配置文件损坏等）都退回默认
+            「藏到托盘」，宁可让用户多点一次托盘「退出」，也不能让
+            一次坏配置打断正在跑的下载。
+            """
+            try:
+                from ...core.config import load_config
+
+                return bool(load_config(None).close_to_tray)
+            except Exception:  # noqa: BLE001
+                logger.debug("close_to_tray fallback to True", exc_info=True)
+                return True
+
         def closeEvent(self, event) -> None:
             """关窗行为取决于 ``_truly_quit`` 标志。
 
@@ -486,9 +502,15 @@ def build_main_window():
                 super().closeEvent(event)
                 return
 
-            # 用户点 X：把窗口藏到托盘，不退出。第一次藏的时候弹一个
+            # 用户点 X：默认藏到托盘（close_to_tray=True，下载不中断）；
+            # 用户在设置里关掉这个行为时走真退出。第一次藏的时候弹一个
             # 一次性通知，告诉用户「程序还在跑」。后续关窗就只藏不
             # 通知了——再弹就刷屏了。
+            if not self._should_close_to_tray():
+                # 用户明确选择「关窗即退出」：标记真退出，走 flush 路径
+                self._truly_quit = True
+                self.closeEvent(event)
+                return
             event.ignore()
             self.hide()
             if getattr(self, "tray", None) is not None:
