@@ -724,10 +724,10 @@ def build_favorites_widgets():
                     )
                     return
 
-                # 「container」分支即「展开收藏夹 / 合集」语义，与抖音
-                # 合集下载共用同一个 confirm kind。
+                # 「fav_folder」是 B 站收藏夹专属 confirm kind——复用
+                # container 会把收藏夹说成「合集 / 主页」，语义错位。
                 plan = confirm_plan(
-                    kind="container", label=title, count=len(pending),
+                    kind="fav_folder", label=title, count=len(pending),
                 )
                 if not self._confirm(plan):
                     toast_info(

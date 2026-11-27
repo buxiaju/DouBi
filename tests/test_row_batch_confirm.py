@@ -113,6 +113,66 @@ def test_unknown_kind_is_loud():
 
 
 # ---------------------------------------------------------------------------
+# B 站收藏夹整夹下载（0.4.1）——专属 confirm kind，语义不得借用 container
+# ---------------------------------------------------------------------------
+
+
+def test_fav_folder_confirm_mentions_folder_and_count():
+    from doubi.ui.row_confirm import confirm_plan
+
+    plan = confirm_plan(kind="fav_folder", label="学习资料", count=12)
+
+    assert plan.title == "下载收藏夹"
+    assert "收藏夹" in plan.body
+    assert "12" in plan.body
+    # 不得复用 container 的「合集 / 主页」文案——弹错框观感。
+    assert "主页" not in plan.body
+
+
+def test_fav_folder_confirm_without_count_says_expand():
+    from doubi.ui.row_confirm import confirm_plan
+
+    plan = confirm_plan(kind="fav_folder", label="学习资料", count=None)
+
+    assert "收藏夹" in plan.body
+    assert "以展开结果为准" in plan.body
+
+
+def test_fav_folder_confirm_blank_label_falls_back():
+    from doubi.ui.row_confirm import confirm_plan
+
+    plan = confirm_plan(kind="fav_folder", label="", count=3)
+
+    assert "该词条" in plan.body
+    assert "3" in plan.body
+
+
+def test_favorites_page_uses_fav_folder_kind():
+    """收藏页的 B 站整夹下载必须用 fav_folder confirm——AST 防止改回去。"""
+    import ast
+
+    path = _SRC / "doubi" / "ui" / "pages" / "favorites.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+
+    fn = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_enqueue_whole_bili_folder":
+            fn = node
+    assert fn is not None, "favorites.py 缺少 _enqueue_whole_bili_folder"
+
+    src = ast.unparse(fn)
+    # ast.unparse 用单引号渲染字符串字面量，所以按 token 断言而不是原文。
+    assert "confirm_plan" in src and "fav_folder" in src, (
+        "B 站整夹下载必须用 fav_folder confirm kind"
+    )
+    # 展开必须在确认之前——确认框上的数字必须是真实条数。
+    # 注意 confirm_plan 先出现在 import 行，要匹配调用点 confirm_plan(。
+    assert src.index("list_fav_resources") < src.index("confirm_plan("), (
+        "必须先展开收藏夹再确认，否则弹框里的条数是猜的"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 2. container detection (pure — no Qt)
 # ---------------------------------------------------------------------------
 

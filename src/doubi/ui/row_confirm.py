@@ -126,6 +126,23 @@ def confirm_plan(
             )
         return ConfirmPlan(title="下载合集 / 主页", body=body)
 
+    if kind == "fav_folder":
+        # B 站收藏夹整夹下载（0.4.1）。与 container 的区别在语义：
+        # 收藏夹是「我的存档」不是「别人的作品列表」，文案要如实反映——
+        # 说成合集 / 主页会让用户怀疑弹错框。
+        if count is None:
+            body = (
+                f"「{subject}」是一个 B 站收藏夹，不是一个单独的视频。\n\n"
+                f"下载它会把夹内的视频全部加入下载队列，"
+                f"具体数量以展开结果为准。"
+            )
+        else:
+            body = (
+                f"「{subject}」是一个 B 站收藏夹。\n\n"
+                f"下载它会把夹内的 {count} 个视频全部加入下载队列。"
+            )
+        return ConfirmPlan(title="下载收藏夹", body=body)
+
     raise ValueError(f"unknown confirm kind: {kind!r}")
 
 
