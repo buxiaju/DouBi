@@ -747,6 +747,7 @@ multidict / yarl / propcache / frozenlist 各 1 个），这是 https 分片下�
 | 0.3.13 | 242,161,067 B / 230.9 MB | `d6eba420…` | — | — | tag 后三批功能随包首发，纯打包版本；onedir 727MB / 1101 文件不变，压缩率 31.8%，CRC `0x6CD0ECAA`；首次构建被 SAFE_DELETE 拦旧 dist/doubi-gui（1101 文件 > 50 阈值），mv 改名让位后重跑成功 |
 | 0.4.0 | 78,317,140 B / 74.7 MB | `241da29c…` | — | — | 精简版：不捆绑 Chromium（插件按需装）+ N_m3u8DL-CLI 随包；onedir 237MB，压缩率 ~31.7%；**发布日补丁重打×2**——冻结壳对 `PLAYWRIGHT_BROWSERS_PATH` 显式设默认目录（playwright transport 在冻结进程会 setdefault("0") 强找包内 .local-browsers；第一版 pop 修法无效已废弃，首版 SHA `6e55b5ec…` / 二版 `5e4c4acf…`）；翻译修剪步骤被 SAFE_DELETE 拦（50 文件阈值），构建后手工 `find -delete` 补完 |
 | 0.4.1 | 78,349,500 B / 74.7 MB | `7025fa14…` | — | — | 纯 UI 打磨 + B 站收藏夹；onedir 237MB 不变，压缩率 31.7%，CRC `0x729249D2`；SAFE_DELETE 拦截两次——COLLECT 清旧 dist/doubi-gui（571 文件）与翻译 .qm 批删（50 阈值），对策升级为「先 mv 旧 dist 让位 + 构建后手工 mv .qm 到 .scratch/pruned-qm-041」（本环境禁删，mv 改名是唯一通路） |
+| 0.4.3 | 78,328,548 B / 74.7 MB | `b6e10e51…` | — | — | 修「下到 100% 又重来」：supervisor 新增 keepalive 通道（stdout 静默超阈值时探 out_dir 文件活动续命），nm3u8dl/m3u8 双引擎接线；构建沿用 mv 让位 + 手工 .qm 修剪套路（.scratch/pruned-qm-043） |
 | 0.4.2 | 78,341,136 B / 74.7 MB | `307471d6…` | — | — | 修 nm3u8dl 终端弹窗（CREATE_NO_WINDOW 注入）；onedir 237MB 不变，压缩率 31.7%；构建流程沿用 0.4.1 的 mv 让位 + 手工 .qm 修剪套路（.scratch/pruned-qm-042），一气呵成无新坑 |
 
 > **基线共识**：所有版本实测都达成：CRC footer 写入正确、`*headless_shell*` 与 `*webengine*` 真实文件残留 0；安装包体积跳变先按文件排查（多半是浏览器目录版本漂移），不要急着改打包配置。
