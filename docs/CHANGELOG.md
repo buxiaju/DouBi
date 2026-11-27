@@ -85,8 +85,8 @@
 
 > | 口径 | 0.4.0 | **0.4.1** | 差量 |
 > | --- | --- | --- | --- |
-> | local 全量 | 1788 passed / 8 skipped | 待发版实测回填 | — |
-> | 安装包 | 74.7 MB | 待发版实测回填 | — |
+> | local 全量 | 1788 passed / 8 skipped | 未重跑全量（本轮为纯 UI 改动，以 settings / favorites / shell regression / row_batch_confirm 相关合集 91 passed + 1 skipped 验证） | — |
+> | 安装包 | 74.7 MB | **74.7 MB** | 持平（压缩率 31.7%） |
 
 ## 0.4.0 (2026-11-26) — 安装包瘦身到 100 MB 以内：大件插件化 + 精简构建 + 体验打磨
 
