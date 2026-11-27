@@ -276,11 +276,15 @@ def build_settings_widgets():
             outer.addWidget(self._header)
 
             # ---- 滚动区（容纳下面的多张卡） ----
-            self._body_scroll = QScrollArea(self)
+            # 用 SmoothScrollArea 而非裸 QScrollArea：设置页 10 张卡
+            # 总高 ~1900px，远超视口，纵向滚动条必须可见——否则用户
+            # 只能滚轮盲滚，不知道下面还有没有内容（下载页隐藏滚动条
+            # 是因为列表短、卡片行自带对齐，设置页不适用）。
+            from qfluentwidgets import SmoothScrollArea
+            self._body_scroll = SmoothScrollArea(self)
             self._body_scroll.setWidgetResizable(True)
             self._body_scroll.setFrameShape(QScrollArea.NoFrame)
             self._body_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-            self._body_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
             self._body_scroll.setStyleSheet(
                 "QScrollArea { background: transparent; border: none; }"
             )
@@ -528,20 +532,21 @@ def build_settings_widgets():
             self._plugins_card = self._build_plugins_card()
             body_layout.addWidget(self._plugins_card["widget"])
 
-            # ---- 9) 关于与更新卡 ----
-            # 移植自 BiliMusic-Desktop 的设计：桌面应用应该在应用内告诉
-            # 用户「有新版本」，而不是指望用户自己去看 Release 页。
-            # 核心查询逻辑在 core.update_check（纯 stdlib，可测试），
-            # 本卡只负责触发 + 展示结果。
-            self._update_card = self._build_update_card()
-            body_layout.addWidget(self._update_card["widget"])
+            # ---- 9) 底部双列区：关于与更新 + 诊断 ----
+            # 这两张卡内容都是「一行状态 + 一个按钮」，独占全宽浪费横向
+            # 空间、拉长页面。两列并排把底部收短一整屏的 1/4。
+            # 注意各卡内部仍是自己的 QVBoxLayout，双列只是摆放位置。
+            bottom_row = QHBoxLayout()
+            bottom_row.setContentsMargins(0, 0, 0, 0)
+            bottom_row.setSpacing(SPACE_LG)
 
-            # ---- 10) 诊断卡（最末位） ----
-            # 用户报 bug 时一键导出 ~/.doubi/ 关键文件 + 系统信息 + 最近日志
-            # 为 zip（已脱敏）。核心逻辑在 core.diagnostics 里，本卡只负责
-            # 弹文件对话框 + toast 反馈。
+            self._update_card = self._build_update_card()
+            bottom_row.addWidget(self._update_card["widget"], 1)
+
             self._diagnostics_card = self._build_diagnostics_card()
-            body_layout.addWidget(self._diagnostics_card["widget"])
+            bottom_row.addWidget(self._diagnostics_card["widget"], 1)
+
+            body_layout.addLayout(bottom_row)
 
             body_layout.addStretch(1)
 
@@ -1043,13 +1048,13 @@ def build_settings_widgets():
                 result = build_diagnostic_bundle(Path(out_path))
             except (OSError, PermissionError, ValueError) as exc:
                 logger.warning("diagnostics: export failed: %s", exc)
-                toast_error(f"诊断包导出失败：{exc}", self)
+                toast_error(self, "诊断包导出失败", str(exc))
                 return
             except Exception as exc:  # noqa: BLE001  # 兜底：诊断不应让 GUI 崩
                 logger.exception("diagnostics: unexpected error: %s", exc)
-                toast_error(f"诊断包导出失败：{exc}", self)
+                toast_error(self, "诊断包导出失败", str(exc))
                 return
-            toast_success(f"诊断包已导出：{result.name}", self)
+            toast_success(self, "诊断包已导出", result.name)
 
         def _build_card(self, title: str, subtitle: str) -> dict:
             """构造一张带「标题 / 副标题 / 右侧动作槽 / body 容器」的可复用卡片。
@@ -1139,8 +1144,15 @@ def build_settings_widgets():
             layout.addWidget(SectionDivider(card))
 
             # ---- B 站 row -----------------------------------------
+            # PlatformBadge 是设计系统组件（UI_DESIGN §6.4），账号卡是
+            # 它的声明使用场景——补上，与登录对话框的视觉一致。
+            from ..widgets import build_platform_badge
+            PlatformBadge = build_platform_badge()
+
             bili_row = QHBoxLayout()
             bili_row.setSpacing(SPACE_SM)
+            self._bili_badge = PlatformBadge("B 站", card)
+            bili_row.addWidget(self._bili_badge, 0)
             self.bili_status_label = StrongBodyLabel(card)
             self.bili_status_label.setText("B 站：正在检测…")
             bili_row.addWidget(self.bili_status_label, 1)
@@ -1167,6 +1179,8 @@ def build_settings_widgets():
             # ---- 抖音 row -----------------------------------------
             dy_row = QHBoxLayout()
             dy_row.setSpacing(SPACE_SM)
+            self._dy_badge = PlatformBadge("抖音", card)
+            dy_row.addWidget(self._dy_badge, 0)
             self.dy_status_label = StrongBodyLabel(card)
             self.dy_status_label.setText("抖音：正在检测…")
             dy_row.addWidget(self.dy_status_label, 1)
