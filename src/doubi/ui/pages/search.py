@@ -92,6 +92,7 @@ def build_search_widgets():
     from qfluentwidgets import (
         ComboBox,
         LineEdit,
+        PrimaryPushButton,
         PushButton,
         SegmentedWidget,
         TableWidget,
@@ -108,6 +109,7 @@ def build_search_widgets():
         SPACE_LG,
         SPACE_MD,
         SPACE_XL,
+        muted_qss,
         subscribe_theme,
     )
     from ..widgets import (
@@ -155,7 +157,8 @@ def build_search_widgets():
                 "在 抖音 / B 站站内按关键词搜索。通道结构与 CLI "
                 "`doubi search` 完全对齐。"
             )
-            self.search_btn = PushButton("搜索", self)
+            # 主 CTA：与「多选下载」拉开层级
+            self.search_btn = PrimaryPushButton("搜索", self)
             self.search_btn.clicked.connect(self._on_search)
             self._header.add_action(self.search_btn)
             # 多选模式按钮（0.3.14 移植自 BiliMusic-Desktop）：切到多选
@@ -237,7 +240,7 @@ def build_search_widgets():
             batch_row.setContentsMargins(0, 0, 0, 0)
             batch_row.setSpacing(SPACE_MD)
             self._batch_label = QLabel("已选 0 项", self._batch_bar)
-            self._batch_label.setStyleSheet("color: #888;")
+            self._batch_label.setStyleSheet(muted_qss())
             batch_row.addWidget(self._batch_label, 1)
             self._batch_download_btn = PushButton("批量下载选中项", self._batch_bar)
             self._batch_download_btn.clicked.connect(self._on_batch_download)

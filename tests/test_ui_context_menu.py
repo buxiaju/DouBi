@@ -335,7 +335,9 @@ def test_container_row_disables_single_download(qapp):
     assert single, f"entry missing from {stub.entries!r}"
     text, enabled = single[0]
     assert enabled is False
-    assert "不可用" in text, "disabled entries should say why"
+    # 0.4.x 文案从「（不可用）」改为更可操作的「（请先展开合集）」——
+    # 断言只锁定「禁用项必须解释原因」的约定，不锁具体措辞。
+    assert "请先展开合集" in text, "disabled entries should say why"
 
 
 def test_douyin_row_offers_the_collection_entry(qapp):

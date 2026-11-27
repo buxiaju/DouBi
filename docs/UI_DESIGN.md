@@ -414,3 +414,54 @@ mgr.register(
 | `test_no_bare_qshortcut_in_pages` | 裸 `QShortcut(...)`（未过 manager = 没安全包装 / 没去重） |
 
 6 条全在离线环境可跑（不需要 QApplication 也不需要网络）。
+
+---
+
+## 13. 对比度守护与按钮层级（2026-11-27 UI 评估落地）
+
+### 13.1 WCAG AA 是测试事实，不再只是文档承诺
+
+`tests/test_theme_contrast_aa.py`（纯数学，无 Qt 依赖）守两条：
+
+- 每套主题 `text_muted` 对 `bg_base` **和** `bg_layer` 都 ≥ 4.5:1
+- 每套主题 `text_primary` 对 `bg_base` ≥ 7:1（AAA 留余量）
+
+新增 / 调整主题时这条测试当场验证。2026-11-27 修的历史值：
+`default_light` `#8a8a8a→#6b6b6b`、`morandi` `#948b80→#6f665b`、
+`eye_care` `#8b8874→#6d6a58`——此前亮色主题全部不达 AA（最低 2.79:1）。
+
+### 13.2 行高双档约定
+
+两种数据密度并存，**不要互相统一**：
+
+| 档 | 值 | 用在哪 |
+| --- | --- | --- |
+| 表格行 | 36px（`verticalHeader().setDefaultSectionSize(36)`） | 解析 / 历史 / 搜索 / 热榜的 TableWidget |
+| 卡片行 | `row_height` token（52px） | 下载页 TaskRow（自绘行，含进度条） |
+
+### 13.3 主 CTA 用 `PrimaryPushButton`
+
+每屏**最多一个实心按钮**——页面主动作用它，其余动作一律 `PushButton`：
+
+| 页面 | 主 CTA |
+| --- | --- |
+| 解析 | 「解析」「下载选中」 |
+| 搜索 | 「搜索」 |
+| 设置 | 「立即保存」 |
+
+新页面照此规则：先问「这屏用户最终想干什么」，那个按钮就是 Primary。
+
+### 13.4 导航图标语义
+
+| 页面 | 图标 | 约定 |
+| --- | --- | --- |
+| 解析 | `LINK` | 核心动作是「粘贴链接」 |
+| 搜索 | `SEARCH` | SEARCH 只归搜索页 |
+| 热榜 | `LABEL` | 榜单热度；`HEART` 语义留给收藏 |
+| 收藏 | `ALBUM` | |
+
+### 13.5 输入框自适应
+
+解析页 URL 输入框不许 `setFixedHeight`：最小 110px（约 4 行），
+`textChanged` 驱动按行数增长（行高走 `fontMetrics()`，DPI 安全），
+300px 封顶转内部滚动。见 `parse.py` 的 `_auto_grow_url_input`。

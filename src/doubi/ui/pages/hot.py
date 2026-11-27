@@ -74,6 +74,7 @@ def build_hot_widgets():
         SPACE_LG,
         SPACE_MD,
         SPACE_XL,
+        muted_qss,
         subscribe_theme,
     )
     from ..widgets import (
@@ -195,7 +196,7 @@ def build_hot_widgets():
             batch_row.setContentsMargins(0, 0, 0, 0)
             batch_row.setSpacing(SPACE_MD)
             self._batch_label = QLabel("已选 0 项", self._batch_bar)
-            self._batch_label.setStyleSheet("color: #888;")
+            self._batch_label.setStyleSheet(muted_qss())
             batch_row.addWidget(self._batch_label, 1)
             self._batch_download_btn = PushButton("批量下载选中项", self._batch_bar)
             self._batch_download_btn.clicked.connect(self._on_batch_download)

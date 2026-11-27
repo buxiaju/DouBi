@@ -118,11 +118,13 @@ def build_main_window():
             self.task_manager = TaskManager(build_default_pipeline(), parent=self)
 
             # ---- 解析 (default landing) -----------------------------
+            # 图标用 LINK 而非 SEARCH：解析页的核心动作是「粘贴链接」，
+            # SEARCH 留给搜索页独占，两个导航项不再撞图标。
             self.parse_interface = ParsePage(self)
             self.parse_interface.setObjectName("parseInterface")
             self.addSubInterface(
                 self.parse_interface,
-                FluentIcon.SEARCH,
+                FluentIcon.LINK,
                 tr("nav.parse"),
                 position=NavigationItemPosition.TOP,
             )
@@ -165,9 +167,11 @@ def build_main_window():
 
             self.hot_interface = HotPage(self)
             self.hot_interface.setObjectName("hotInterface")
+            # 图标用 LABEL 而非 HEART：热榜是「榜单热度」，HEART 更像
+            # 收藏——收藏页已有 ALBUM，语义留给它。
             self.addSubInterface(
                 self.hot_interface,
-                FluentIcon.HEART,
+                FluentIcon.LABEL,
                 tr("nav.hot"),
                 position=NavigationItemPosition.TOP,
             )

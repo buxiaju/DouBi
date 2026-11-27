@@ -159,6 +159,7 @@ def build_settings_widgets():
         CardWidget,
         ComboBox,
         LineEdit,
+        PrimaryPushButton,
         PushButton,
         StrongBodyLabel,
         SwitchButton,
@@ -267,7 +268,8 @@ def build_settings_widgets():
             self._header.set_subtitle(
                 "账号、下载、网络、嗅探、存储。改动后自动写回配置文件，「立即保存」可手动触发一次。"
             )
-            self.save_btn = PushButton("立即保存", self)
+            # 主 CTA：设置页唯一的实心按钮，挂在页头动作槽
+            self.save_btn = PrimaryPushButton("立即保存", self)
             self.save_btn.setFixedWidth(120)
             self.save_btn.clicked.connect(self._on_save)
             self._header.add_action(self.save_btn)

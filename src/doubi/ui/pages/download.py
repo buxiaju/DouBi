@@ -172,6 +172,8 @@ def build_download_widgets():
         SPACE_MD,
         SPACE_SM,
         SPACE_XL,
+        SPACE_XS,
+        TYPE_CAPTION,
         heading_qss,
         subscribe_theme,
         token,
@@ -261,8 +263,8 @@ def build_download_widgets():
             self._apply_row_background()
 
             layout = QHBoxLayout(self)
-            layout.setContentsMargins(12, 0, 12, 0)
-            layout.setSpacing(12)
+            layout.setContentsMargins(SPACE_MD, 0, SPACE_MD, 0)
+            layout.setSpacing(SPACE_MD)
 
             self.status_label = QLabel(self._status_text(), self)
             self.status_label.setFixedWidth(56)
@@ -271,7 +273,7 @@ def build_download_widgets():
 
             self.title_label = QLabel(self._title_full, self)
             self.title_label.setWordWrap(False)
-            self.title_label.setStyleSheet("font-size: 13px;")
+            self.title_label.setStyleSheet(f"font-size: {TYPE_CAPTION}px;")
             self.title_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
             self.title_label.setFixedHeight(20)
             self.title_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
@@ -281,7 +283,7 @@ def build_download_widgets():
             self.progress_wrap = QWidget(self)
             progress_wrap_layout = QHBoxLayout(self.progress_wrap)
             progress_wrap_layout.setContentsMargins(0, 0, 0, 0)
-            progress_wrap_layout.setSpacing(8)
+            progress_wrap_layout.setSpacing(SPACE_SM)
 
             self.progress = ProgressBar(self.progress_wrap)
             self.progress.setRange(0, 100)
@@ -310,7 +312,7 @@ def build_download_widgets():
             self.info_slot.setFixedWidth(150)
             info_slot_layout = QHBoxLayout(self.info_slot)
             info_slot_layout.setContentsMargins(0, 0, 0, 0)
-            info_slot_layout.setSpacing(6)
+            info_slot_layout.setSpacing(SPACE_XS)
 
             self.message_label = QLabel(self.info_slot)
             self.message_label.setStyleSheet(_muted_qss())
@@ -347,7 +349,7 @@ def build_download_widgets():
             self.pause_slot.setFixedWidth(52)
             pause_slot_layout = QHBoxLayout(self.pause_slot)
             pause_slot_layout.setContentsMargins(0, 0, 0, 0)
-            pause_slot_layout.setSpacing(0)
+            pause_slot_layout.setSpacing(SPACE_XS)
 
             self.pause_btn = PushButton("暂停", self.pause_slot)
             self.pause_btn.setFixedHeight(28)
@@ -363,7 +365,7 @@ def build_download_widgets():
             self.retry_slot.setFixedWidth(52)
             retry_slot_layout = QHBoxLayout(self.retry_slot)
             retry_slot_layout.setContentsMargins(0, 0, 0, 0)
-            retry_slot_layout.setSpacing(0)
+            retry_slot_layout.setSpacing(SPACE_XS)
 
             self.retry_btn = PushButton("重试", self.retry_slot)
             self.retry_btn.setFixedHeight(28)

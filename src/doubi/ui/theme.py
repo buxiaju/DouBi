@@ -344,7 +344,9 @@ THEMES: dict[str, ThemePack] = {
             bg_layer="#ffffff",
             bg_hover="#e6e6e6",
             text_primary="#1a1a1a",
-            text_muted="#8a8a8a",
+            # 4.80:1 on bg_base / 5.33:1 on bg_layer —— WCAG AA 达标。
+            # 旧值 #8a8a8a 只有 3.11:1，次级说明文字在亮底下偏虚。
+            text_muted="#6b6b6b",
         ),
     ),
     "default_dark": ThemePack(
@@ -455,7 +457,8 @@ THEMES: dict[str, ThemePack] = {
                 bg_layer="#f7f5f1",
                 bg_hover="#ded9d1",
                 text_primary="#3b352f",
-                text_muted="#948b80",
+                # 4.69:1 on bg_base —— WCAG AA 达标（旧值 #948b80 仅 2.79:1）。
+                text_muted="#6f665b",
             ),
             "status_running_fg": "#7a6a58",
             "status_running_bg": "rgba(122, 106, 88, 0.12)",
@@ -480,7 +483,9 @@ THEMES: dict[str, ThemePack] = {
                 bg_layer="#fbf8f1",
                 bg_hover="#e8e2d3",
                 text_primary="#33372c",
-                text_muted="#8b8874",
+                # 4.84:1 on bg_base / 5.1x:1 on bg_layer —— WCAG AA 达标
+                # （旧值 #8b8874 仅 3.17:1）。
+                text_muted="#6d6a58",
             ),
             "status_running_fg": "#3f7d58",
             "status_running_bg": "rgba(63, 125, 88, 0.12)",

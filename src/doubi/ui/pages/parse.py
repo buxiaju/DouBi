@@ -323,6 +323,7 @@ def build_parse_widgets():
     from qfluentwidgets import (
         CardWidget,
         ComboBox,
+        PrimaryPushButton,
         PushButton,
         SearchLineEdit,
         TableWidget,
@@ -531,6 +532,9 @@ def build_parse_widgets():
             input_layout.setContentsMargins(SPACE_MD, SPACE_MD, SPACE_MD, SPACE_MD)
             input_layout.setSpacing(SPACE_MD)
 
+            # 高度自适应：4 行起步（~110px），粘贴多行链接时随内容增长，
+            # 封顶 300px 后内部滚动。setFixedHeight(110) 时代粘贴整页链接
+            # 只能在 4 行可视区里滚，憋屈。
             self.url_input = QPlainTextEdit(input_card)
             self.url_input.setPlaceholderText(
                 "https://www.bilibili.com/video/BV1GJ411x7h7\n"
@@ -538,7 +542,8 @@ def build_parse_widgets():
                 "https://www.bilibili.com/list/ml12345\n"
                 "https://www.douyin.com/video/7123456789012345678"
             )
-            self.url_input.setFixedHeight(110)
+            self.url_input.setMinimumHeight(110)
+            self.url_input.textChanged.connect(self._auto_grow_url_input)
             input_layout.addWidget(self.url_input)
 
             # ---- 最近解析（P2：解析历史）----
@@ -561,7 +566,8 @@ def build_parse_widgets():
             btn_row = QHBoxLayout()
             btn_row.setSpacing(SPACE_SM)
             btn_row.addStretch(1)
-            self.parse_btn = PushButton("解析", input_card)
+            # 主 CTA 用 Primary：本页唯一实心按钮，「快速下载」保持次级
+            self.parse_btn = PrimaryPushButton("解析", input_card)
             self.parse_btn.clicked.connect(self._on_parse_clicked)
             self.quick_download_btn = PushButton("快速下载", input_card)
             self.quick_download_btn.setToolTip("解析第一个 URL 并直接加入下载队列")
@@ -609,7 +615,8 @@ def build_parse_widgets():
             actions_row.addWidget(self.select_none_btn)
             actions_row.addWidget(self.select_range_btn)
             actions_row.addStretch(1)
-            self.download_selected_btn = PushButton("下载选中 (0)", self.result_card)
+            # 主 CTA：批量动作的终点，与「全选/全不选」拉开层级
+            self.download_selected_btn = PrimaryPushButton("下载选中 (0)", self.result_card)
             self.download_selected_btn.clicked.connect(self._download_selected)
             actions_row.addWidget(self.download_selected_btn)
             self.result_layout.addLayout(actions_row)
@@ -669,6 +676,29 @@ def build_parse_widgets():
             outer.addWidget(self.result_card, 1)
 
         # ---- parsing --------------------------------------------------
+
+        #: 输入框自适应高度的上下限。下限 110px 约容纳 4 行；上限 300px
+        #: 之后转内部滚动，防止一次粘贴上百行把结果区压没。
+        URL_INPUT_MIN_HEIGHT = 110
+        URL_INPUT_MAX_HEIGHT = 300
+
+        def _auto_grow_url_input(self) -> None:
+            """按文档行数伸展 url_input 高度，多行粘贴不再憋屈。
+
+            行高估算走当前字体 metrics（125%/150% 缩放下不写死 20px），
+            ``document.documentLayout().documentMargin()`` 兜住首尾留白。
+            textChanged 在 setPlainText 时也触发，剪贴板回填同样自适应。
+            """
+            doc = self.url_input.document()
+            line_count = max(1, doc.blockCount())
+            fm = self.url_input.fontMetrics()
+            margin = doc.documentMargin() * 2
+            wanted = min(
+                self.URL_INPUT_MAX_HEIGHT,
+                max(self.URL_INPUT_MIN_HEIGHT,
+                    line_count * fm.height() + margin + 12),
+            )
+            self.url_input.setFixedHeight(wanted)
 
         def _sniff_seconds_for(self, urls: list[str]) -> int:
             """待解析 URL 里若有走 generic 兜底的，返回预计嗅探秒数，否则 0。
