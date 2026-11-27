@@ -725,6 +725,7 @@ def build_search_widgets():
                 manifest=cfg.manifest_path,
                 proxy=cfg.proxy,
                 rate_limit=cfg.rate_limit,
+                concurrent_fragments=cfg.concurrent_fragments,
                 cookies_file=cfg.cookies_file,
             )
 

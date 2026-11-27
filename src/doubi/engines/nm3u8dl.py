@@ -431,6 +431,11 @@ class Nm3u8dlEngine(Engine):
         if options.proxy:
             cmd += ["--proxyAddress", options.proxy]
 
+        # 单任务分片并发：与 yt-dlp concurrent_fragment_downloads / aria2
+        # split 共用 ``concurrent_fragments`` 这一个旋钮，v3.0.2 的对应
+        # 参数是 --maxThreads。
+        cmd += ["--maxThreads", str(max(1, options.concurrent_fragments))]
+
         ffmpeg_dir = str(Path(self._ffmpeg).parent) if self._ffmpeg else None
         env = dict(os.environ)
         if ffmpeg_dir:

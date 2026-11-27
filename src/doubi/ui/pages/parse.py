@@ -1949,6 +1949,7 @@ def build_parse_widgets():
                 manifest=self._cfg.manifest_path,
                 proxy=self._cfg.proxy,
                 rate_limit=self._cfg.rate_limit,
+                concurrent_fragments=self._cfg.concurrent_fragments,
                 # ``None`` here is meaningful, not "unset": the pipeline then
                 # falls back to the per-platform cookie file under
                 # ``~/.doubi/cookies/``. Forwarding the configured path is

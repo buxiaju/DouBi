@@ -409,6 +409,8 @@ def test_build_options_covers_every_shared_config_field(monkeypatch):
             setattr(cfg, name, current + "_probe")
         elif isinstance(current, Path):
             setattr(cfg, name, current / "probe")
+        elif isinstance(current, int) and not isinstance(current, bool):
+            setattr(cfg, name, current + 1)
         elif current is None:
             setattr(cfg, name, "probe")
         else:

@@ -95,6 +95,9 @@ def _build_parser() -> argparse.ArgumentParser:
                            "default: '{title}_{item_id}')")
     p_dl.add_argument("--concurrent", type=int, default=None,
                       help="max concurrent downloads (config: concurrent_jobs, default: 3)")
+    p_dl.add_argument("--fragments", type=int, default=None,
+                      help="concurrent fragment/connection count per download "
+                           "(config: concurrent_fragments, default: 4)")
     p_dl.add_argument("--rate-limit", default=None, help="rate limit, e.g. 5M")
     p_dl.add_argument("--proxy", default=None, help="HTTP proxy, e.g. http://127.0.0.1:7890")
     # 全局 cookie 路径，喂给 yt-dlp ``cookiefile``。覆盖 config.yml 里的
@@ -1674,6 +1677,9 @@ def _build_options(args: argparse.Namespace, cfg: AppConfig | None = None) -> Do
         duplicate_policy=cfg.duplicate_policy,
         rate_limit=_pick(args.rate_limit, cfg.rate_limit),
         proxy=_pick(args.proxy, cfg.proxy),
+        concurrent_fragments=int(
+            _pick(getattr(args, "fragments", None), cfg.concurrent_fragments)
+        ),
         cookies_file=_pick(getattr(args, "cookies_file", None), cfg.cookies_file),
         database=database,
         manifest=manifest,

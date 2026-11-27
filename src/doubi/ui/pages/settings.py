@@ -420,7 +420,7 @@ def build_settings_widgets():
             # ---- 3) 网络卡 ----
             self._network_card = self._build_card(
                 "网络",
-                "代理、同时下载的任务数和下载速度限制",
+                "代理、同时下载的任务数、单任务并发分片数和下载速度限制",
             )
             net_form = QFormLayout(self._network_card["body"])
             net_form.setVerticalSpacing(SPACE_MD)
@@ -431,11 +431,14 @@ def build_settings_widgets():
             self.proxy.setPlaceholderText("http://127.0.0.1:7890，留空表示不使用代理")
             self.concurrent = LineEdit(self._network_card["body"])
             self.concurrent.setPlaceholderText("3")
+            self.fragments = LineEdit(self._network_card["body"])
+            self.fragments.setPlaceholderText("4（建议 1–16）")
             self.rate_limit = LineEdit(self._network_card["body"])
             self.rate_limit.setPlaceholderText("如 5M 表示每秒 5 MB，留空不限速")
 
             net_form.addRow("代理服务器", self.proxy)
             net_form.addRow("同时下载任务数", self.concurrent)
+            net_form.addRow("单任务分片并发数", self.fragments)
             net_form.addRow("下载速度限制", self.rate_limit)
             body_layout.addWidget(self._network_card["widget"])
 
@@ -1361,6 +1364,9 @@ def build_settings_widgets():
             self._set_combo(self.max_quality, self._cfg.max_quality)
             self.proxy.setText(self._cfg.proxy or "")
             self.concurrent.setText(str(self._cfg.concurrent_jobs))
+            self.fragments.setText(
+                str(getattr(self._cfg, "concurrent_fragments", 4))
+            )
             self.rate_limit.setText(self._cfg.rate_limit or "")
             self.database.setChecked(self._cfg.database)
             self.write_nfo.setChecked(self._cfg.write_nfo)
@@ -1674,6 +1680,15 @@ def build_settings_widgets():
                 data["concurrent_jobs"] = max(1, int(self.concurrent.text() or 3))
             except ValueError:
                 data["concurrent_jobs"] = 3
+            # 分片并发夹 1–16：过高会把第三方 CDN 打进不稳定状态
+            # （yt-dlp 并发分片下载器实测在长传输后段死锁过），过低没意义。
+            if hasattr(self, "fragments"):
+                try:
+                    data["concurrent_fragments"] = min(
+                        16, max(1, int(self.fragments.text() or 4))
+                    )
+                except ValueError:
+                    data["concurrent_fragments"] = 4
             data["rate_limit"] = self.rate_limit.text().strip() or None
             data["database"] = self.database.isChecked()
             data["prompt_before_download"] = self.prompt_before_download.isChecked()

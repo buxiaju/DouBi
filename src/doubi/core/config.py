@@ -40,6 +40,10 @@ DEFAULTS: dict[str, Any] = {
     "output_root": "./Downloaded",
     "output_dir_template": "{platform}/{author}/{media_type}",
     "concurrent_jobs": 3,
+    # 单任务内并发拉取的分片/连接数（yt-dlp concurrent_fragment_downloads、
+    # aria2 split、m3u8 分片并发、N_m3u8DL-CLI --maxThreads 共用这一个旋钮）。
+    # 设置页「单任务分片并发」暴露，写盘时夹 1–16。
+    "concurrent_fragments": 4,
     "container": "mp4",
     "max_quality": "best",
     "write_thumbnail": False,
@@ -117,6 +121,10 @@ class AppConfig:
     output_root: Path = Path(DEFAULTS["output_root"])
     output_dir_template: str = DEFAULTS["output_dir_template"]
     concurrent_jobs: int = DEFAULTS["concurrent_jobs"]
+    #: 单任务内并发拉取的分片/连接数。四个引擎共用（yt-dlp
+    #: ``concurrent_fragment_downloads`` / aria2 ``split`` /
+    #: m3u8 分片并发 / nm3u8dl ``--maxThreads``）。
+    concurrent_fragments: int = DEFAULTS["concurrent_fragments"]
     container: str = DEFAULTS["container"]
     max_quality: str = DEFAULTS["max_quality"]
     write_thumbnail: bool = DEFAULTS["write_thumbnail"]
@@ -280,6 +288,7 @@ def load_config(path: Optional[Path] = None, *, env_prefix: str = "DOUBI_") -> A
         "OUTPUT_ROOT": "output_root",
         "OUTPUT_DIR_TEMPLATE": "output_dir_template",
         "CONCURRENT_JOBS": "concurrent_jobs",
+        "CONCURRENT_FRAGMENTS": "concurrent_fragments",
         "CONTAINER": "container",
         "MAX_QUALITY": "max_quality",
         "PROXY": "proxy",
@@ -299,6 +308,9 @@ def load_config(path: Optional[Path] = None, *, env_prefix: str = "DOUBI_") -> A
         output_root=_coerce(data["output_root"], DEFAULTS["output_root"]),
         output_dir_template=str(data["output_dir_template"]),
         concurrent_jobs=_coerce(data["concurrent_jobs"], DEFAULTS["concurrent_jobs"]),
+        concurrent_fragments=_coerce(
+            data["concurrent_fragments"], DEFAULTS["concurrent_fragments"],
+        ),
         container=str(data["container"]),
         max_quality=str(data["max_quality"]),
         write_thumbnail=_coerce(data["write_thumbnail"], DEFAULTS["write_thumbnail"]),
