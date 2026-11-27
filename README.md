@@ -21,7 +21,7 @@
 | 平台 | 能力 | 说明 |
 |---|---|---|
 | ✓ 抖音 | 单条 / 图集 / 合集 / 用户作品 / 直播 / 收藏全家桶 | 采集走签名 Web API，下载走 yt-dlp |
-| ✓ B 站 | 视频 / 合集 / 搜索 / 热榜 / 登录高清 | 搜索热榜与抖音共用同一套采集参数 |
+| ✓ B 站 | 视频 / 合集 / 收藏夹 / 搜索 / 热榜 / 登录高清 | 收藏夹需先登录；搜索热榜与抖音共用同一套采集参数 |
 | ✓ YouTube | watch / shorts / live / youtu.be 短链 | 元数据与下载都走 yt-dlp |
 | ✓ 通用视频站 | 任意 URL 嗅探 m3u8 与真视频直链 | 需安装「功能插件」（Chromium 内核）；解析列表只显示视频容器，不会混入 ts 分片 |
 | 🚧 计划 | 小红书 / 微博 / 快手 | TikTok 国际版已评估不做，理由见 [docs/ROADMAP.md](docs/ROADMAP.md) |
@@ -30,19 +30,19 @@
 
 ### Windows 用户：直接装（推荐）
 
-到 [Releases](https://github.com/buxiaju/DouBi/releases/latest) 下载 `DouBi-Setup-0.4.0.exe` 双击安装：
+到 [Releases](https://github.com/buxiaju/DouBi/releases/latest) 下载 `DouBi-Setup-0.4.1.exe` 双击安装：
 
 - 装到 `%LOCALAPPDATA%\DouBi`，**无 UAC 弹窗**，不需要管理员权限
 - 开始菜单 + 桌面快捷方式，控制面板正常卸载，卸载后安装目录零残留（`~/.doubi` 配置默认保留）
-- 静默安装：`DouBi-Setup-0.4.0.exe /S /D=D:\DouBi`
+- 静默安装：`DouBi-Setup-0.4.1.exe /S /D=D:\DouBi`
 
 **校验完整性**（可选）：Release 资产里附带 `.sha256` 侧签文件，装了 Git 的话一条命令即可：
 
 ```bash
-sha256sum -c DouBi-Setup-0.4.0.exe.sha256   # 输出 OK 即通过
+sha256sum -c DouBi-Setup-0.4.1.exe.sha256   # 输出 OK 即通过
 ```
 
-> 0.4.0 的官方哈希：`6e55b5ec86c772018678c50dea164673c807f4e42df41b798cca4a0261cbd263`
+> 0.4.1 的官方哈希：待打包后回填
 
 **首次使用提示**：想下载抖音 / B 站 / YouTube 之外的任意视频站，先到「设置 → 功能插件」点「安装插件」（约 170 MB 下载，装的是 Chromium 嗅探内核，落在用户目录，不影响安装包体积）。抖音 / B 站登录在设置页「账号与登录」卡里扫码完成。
 
