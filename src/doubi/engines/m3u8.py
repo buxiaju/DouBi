@@ -28,6 +28,7 @@ from ..core.storage.file_layout import resolve_item_dir
 from ._subproc import (
     SubprocessTimeout,
     find_bundled_ffmpeg,
+    make_dir_activity_keepalive,
     run_supervised_subprocess,
 )
 from .base import (
@@ -498,6 +499,9 @@ class M3u8Engine(Engine):
                 stdout_limit=1024 * 1024,
                 chunk_size=4096,
                 watchdog_seconds=240.0,  # ffmpeg merge phase is slow for huge files
+                # -movflags +faststart 的第二遍（搬 moov atom）对大文件会
+                # 静默很久，与 nm3u8dl 同款保护：输出目录有文件活动就不杀。
+                keepalive=make_dir_activity_keepalive(output_path.parent),
             )
         except SubprocessTimeout as e:
             rc = -1

@@ -30,6 +30,7 @@ from ..core.storage.file_layout import resolve_item_dir
 from ._subproc import (
     SubprocessTimeout,
     find_bundled_ffmpeg,
+    make_dir_activity_keepalive,
     run_supervised_subprocess,
 )
 from .base import (
@@ -589,6 +590,11 @@ class Nm3u8dlEngine(Engine):
                 env=env,
                 stdout_limit=1024 * 1024,
                 chunk_size=4096,
+                # 合并/faststart 阶段 N_m3u8DL-CLI 会静默数分钟（stdout
+                # 零输出），但输出文件在持续变大。180s 无输出看门狗会把
+                # 它当冻结杀掉 → 管线自动重试 → "下到 100% 又从头来"。
+                # keepalive 探 out_dir 文件活动：在写盘就不杀，真冻结才杀。
+                keepalive=make_dir_activity_keepalive(out_dir),
             )
         except SubprocessTimeout as e:
             rc = -1

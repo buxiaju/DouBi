@@ -88,7 +88,55 @@ def find_bundled_ffmpeg() -> Optional[str]:
 
 
 class SubprocessTimeout(Exception):
-    """Raised by ``run_supervised_subprocess`` when the watchdog fires."""
+    """Raised by ``run_supervised_subprocess`` when the watchdog fired."""
+
+
+def make_dir_activity_keepalive(*roots: Path) -> Callable[[], bool]:
+    """Build a watchdog keepalive that watches *roots* for file changes.
+
+    The returned callable snapshots ``(file count, total bytes)`` under
+    every root (recursive) and reports ``True`` when the snapshot
+    changed since the previous call. Typical wiring: pass the engine's
+    ``out_dir`` so a subprocess that went stdout-silent during its
+    merge/faststart phase still counts as alive while the merged file
+    keeps growing. When the process is genuinely frozen nothing changes
+    on disk, the probe reports ``False`` and the watchdog kills it one
+    tick later — bounded staleness, no unkillable hangs.
+
+    Notes:
+    * The first call only *seeds* the baseline and returns ``False``
+      (there is no prior snapshot to compare against).
+    * A file that vanished mid-scan (N_m3u8DL-CLI rotates its
+      ``Part_*/`` buckets) is skipped, not fatal.
+    * Scan cost is one ``rglob`` per consult; consults happen at most
+      once per second and only while stdout is silent past the
+      watchdog threshold, so this is negligible for 10k-segment dirs.
+    """
+    state: dict[str, Optional[tuple[int, int]]] = {"sig": None}
+
+    def _snapshot() -> tuple[int, int]:
+        n_files = 0
+        total_bytes = 0
+        for root in roots:
+            try:
+                for path in root.rglob("*"):
+                    try:
+                        if path.is_file():
+                            n_files += 1
+                            total_bytes += path.stat().st_size
+                    except OSError:
+                        continue
+            except OSError:
+                continue
+        return n_files, total_bytes
+
+    def keepalive() -> bool:
+        sig = _snapshot()
+        prev = state["sig"]
+        state["sig"] = sig
+        return prev is not None and sig != prev
+
+    return keepalive
 
 
 async def run_supervised_subprocess(
@@ -100,6 +148,7 @@ async def run_supervised_subprocess(
     stdout_limit: int = 1024 * 1024,
     chunk_size: int = 4096,
     watchdog_seconds: float = DEFAULT_OUTPUT_WATCHDOG_SECONDS,
+    keepalive: Optional[Callable[[], bool | Awaitable[bool]]] = None,
     **kwargs,
 ) -> tuple[int, bytes]:
     """Run *args* as a supervised subprocess.
@@ -127,6 +176,16 @@ async def run_supervised_subprocess(
     watchdog_seconds:
         Kill the process if no output arrives for this long. Set to
         ``0`` or ``<= 0`` to disable (not recommended).
+    keepalive:
+        Optional liveness probe consulted **only** when stdout has been
+        silent past ``watchdog_seconds``. Returning truthy resets the
+        watchdog timer instead of killing the process — this is how the
+        merge/faststart phase of N_m3u8DL-CLI and ffmpeg survives: both
+        legitimately go quiet for minutes while writing the output
+        file, and killing them there caused the "downloaded to 100%
+        then started over" bug (the pipeline retried from scratch).
+        Use :func:`make_dir_activity_keepalive` to build one from
+        output directories. If the callable raises, treat as silent.
 
     Returns
     -------
@@ -234,6 +293,22 @@ async def run_supervised_subprocess(
                 # No data came in this 1s window — check watchdog / cancel.
                 now = asyncio.get_event_loop().time()
                 if watchdog_ms > 0 and (now - last_output_at) > watchdog_ms:
+                    # Last chance before the kill: the process may be in
+                    # a legitimately silent but productive phase (binary
+                    # merge / faststart rewrite / moov relocation). Any
+                    # evidence of file-system progress resets the timer.
+                    if keepalive is not None:
+                        try:
+                            alive = keepalive()
+                            if isinstance(alive, Awaitable):
+                                alive = await alive
+                            if alive:
+                                last_output_at = now
+                                continue
+                        except Exception:
+                            # A broken probe must not wedge supervision:
+                            # treat like "no evidence of life".
+                            logger.exception("[subproc] keepalive raised, treating as silent")
                     await _force_terminate(
                         f"watchdog: no output for {watchdog_ms:.0f}s"
                     )
