@@ -4,6 +4,7 @@
 >
 > | 版本 | 日期 | 一句话摘要 |
 > | --- | --- | --- |
+> | 0.4.2 | 2026-11-27 | 修复下载时 N_m3u8DL-CLI 黑色终端反复弹出（子进程主管道默认注入 CREATE_NO_WINDOW） |
 > | 0.4.1 | 2026-11-27 | UI 打磨三连（AA 对比度守护 + 设置页布局/文案产品化 + 隐藏功能可发现性）+ 收藏页支持 B 站收藏夹 + 诊断 toast 参数反序真 bug 修复 |
 > | 0.4.0 | 2026-11-26 | 安装包 230.9 MB → **74.7 MB**（精简构建 + 大件插件化）+ N_m3u8DL-CLI 随包 + 多选批量下载 + 右键打开文件夹 + 启动更新检查 + 文案打磨 |
 > | 0.3.13 | 2026-11-12 | 0.3.12 tag 后三个功能 commit 随安装包首发（嗅探代理 + 停摆看门狗 + m3u8 AES/MAP/master playlist + aria2 取消进度对齐） |
@@ -27,6 +28,28 @@
 > - **测试基线**（passed / skipped）→ 见每版段尾的「统计」表，或者直接读 [BUILD.md](BUILD.md) §6.5 / §7 的本地全量 + ci 双口径脚本。
 > - **构建产物基线**（体积 / SHA256）→ 见 [BUILD.md](BUILD.md) §6.5 的「实测基线速查表」。
 > - **检索**：编辑器用 `Ctrl+F` 搜版本号（如 `0.3.6` 或 `M6.48`）是最快的跳转方式。
+
+## 0.4.2 (2026-11-27) — 修复下载时 N_m3u8DL-CLI 黑色终端反复弹出
+
+**症状**：GUI 下载嗅探视频（走 nm3u8dl 引擎的 m3u8 流）时，
+`N_m3u8DL-CLI_v3.0.2.exe` 的终端窗口反复弹出，任务期间一直闪。
+
+**根因**：打包后的 GUI 是 windowed（无控制台）。Windows 对控制台
+子进程会分配新控制台——除非父进程显式传 `CREATE_NO_WINDOW (0x08000000)`。
+`m3u8.py` 早期只在同步探针（`subprocess.run` 探 ffmpeg protocols）加了
+`_NO_WINDOW`，而异步主管道 `run_supervised_subprocess` 没有：nm3u8dl
+引擎整条链路都从 supervisor 拉起，于是必弹。CLI 形态跑的时候父进程
+本身就有控制台，复用同一控制台，所以 bug 只在 GUI 打包版出现。
+
+**修法**：收敛在 `_subproc.py` 一处——`run_supervised_subprocess` 在
+Windows 上默认注入 `CREATE_NO_WINDOW`，调用方显式传 `creationflags`
+时不覆盖。stdout/stderr 照常走管道回传，进度解析不受影响；
+m3u8 引擎的 ffmpeg 合并阶段同批受益（同走 supervisor）。
+
+**判据**：新增 `test_subproc_no_window.py` 三例——spy 包一层真执行的
+`create_subprocess_exec` 捕获 kwargs：Windows 默认注入 / 调用方覆盖
+尊重 / `_NO_WINDOW` 常量取值（0x08000000）。+ m3u8 / yt_dlp /
+engine_routing 相关合集 143 例全过。
 
 ## 0.4.1 (2026-11-27) — UI 打磨三连 + B 站收藏夹：可读性、可发现性与收藏全家桶补位
 
